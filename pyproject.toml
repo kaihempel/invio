@@ -55,3 +55,13 @@ testpaths = ["tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 addopts = ["-ra", "--strict-markers", "--strict-config"]
+
+[tool.coverage.run]
+source = ["invio"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+fail_under = 95
+exclude_also = ['if __name__ == "__main__":']

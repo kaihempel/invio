@@ -92,6 +92,8 @@ write_yaml(job, "job.yaml")  # or dump_yaml(job) for a string
 - Unknown keys are errors at every level. Scalars follow YAML 1.2 style: `time: 17:30`, `on`
   and `2026-10-04` stay strings.
 - Comments are not preserved on save, and every field (defaults included) is written.
+- `write_yaml` replaces the file atomically, keeps an existing file's mode and follows
+  symlinks (the link stays, its target is updated).
 - `weekday` accepts any capitalisation, but the JSON Schema lists the lowercase values only.
 - Cross-field errors (e.g. `schedule: weekday is required ...`) may appear only after the
   field errors of the same section are fixed.

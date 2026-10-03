@@ -1,16 +1,12 @@
 """Tests for the generated JSON Schema (docs/job.schema.json)."""
 
 import json
-from pathlib import Path
 
 import jsonschema
 import yaml
 
 from invio.config.job import SUPPORTED_SCHEMA_VERSION, JobYamlLoader, job_json_schema
-
-REPO_ROOT = Path(__file__).resolve().parents[1]
-SCHEMA = REPO_ROOT / "docs" / "job.schema.json"
-EXAMPLE = REPO_ROOT / "docs" / "job.example.yaml"
+from tests.job_helpers import EXAMPLE, SCHEMA
 
 
 def test_committed_schema_is_current() -> None:

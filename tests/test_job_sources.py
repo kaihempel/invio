@@ -3,7 +3,6 @@
 from typing import Any
 
 import pytest
-from pydantic import ValidationError
 
 from invio.config.job import (
     JobConfig,
@@ -13,6 +12,7 @@ from invio.config.job import (
     YoutubeChannelSource,
     YoutubePlaylistSource,
 )
+from tests.job_helpers import validation_errors
 
 VALID_SOURCES = [
     ({"type": "rss", "url": "https://example.com/feed.xml"}, RssSource),
@@ -68,9 +68,7 @@ ID_KINDS = [k for k in ALL_KINDS if k[1] != "url"]
 
 def _errors(job_data: dict[str, Any], source: dict[str, Any]) -> list[tuple[Any, str]]:
     job_data["sources"] = [source]
-    with pytest.raises(ValidationError) as info:
-        JobConfig.model_validate(job_data)
-    return [(e["loc"], e["msg"]) for e in info.value.errors()]
+    return validation_errors(job_data)
 
 
 @pytest.mark.parametrize(("kind", "field", "value"), ALL_KINDS)

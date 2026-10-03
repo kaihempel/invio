@@ -5,15 +5,17 @@ sources, search, LLM and limits). Models are immutable and reject unknown keys. 
 job file are not preserved when a job is saved; every field is written on save.
 """
 
+import contextlib
 import functools
 import json
 import os
 import re
+import secrets
 import stat
-import tempfile
+from collections.abc import Hashable
 from enum import StrEnum
 from pathlib import Path
-from typing import Annotated, Any, Final, Literal, Self
+from typing import Annotated, Any, Final, Literal, Self, get_args
 from zoneinfo import available_timezones
 
 import yaml
@@ -214,12 +216,17 @@ class LimitsConfig(_StrictModel):
     max_llm_tokens_per_run: StrictInt = Field(default=200000, ge=1)
 
 
+# Source models repeat ``name``/``enabled`` instead of inheriting them: Pydantic puts inherited
+# fields first, but saved files list ``type`` and the locator first (contracts/job-file.md).
+_SourceName = Annotated[str | None, Field(min_length=1)]
+
+
 class RssSource(_StrictModel):
     """An RSS/Atom feed."""
 
     type: Literal["rss"]
     url: HttpUrl
-    name: str | None = Field(default=None, min_length=1)
+    name: _SourceName = None
     enabled: StrictBool = True
 
 
@@ -228,7 +235,7 @@ class WebSource(_StrictModel):
 
     type: Literal["web"]
     url: HttpUrl
-    name: str | None = Field(default=None, min_length=1)
+    name: _SourceName = None
     enabled: StrictBool = True
 
 
@@ -237,7 +244,7 @@ class SitemapSource(_StrictModel):
 
     type: Literal["sitemap"]
     url: HttpUrl
-    name: str | None = Field(default=None, min_length=1)
+    name: _SourceName = None
     enabled: StrictBool = True
 
 
@@ -246,7 +253,7 @@ class YoutubeChannelSource(_StrictModel):
 
     type: Literal["youtube_channel"]
     channel_id: str = Field(min_length=1)
-    name: str | None = Field(default=None, min_length=1)
+    name: _SourceName = None
     enabled: StrictBool = True
 
 
@@ -255,14 +262,12 @@ class YoutubePlaylistSource(_StrictModel):
 
     type: Literal["youtube_playlist"]
     playlist_id: str = Field(min_length=1)
-    name: str | None = Field(default=None, min_length=1)
+    name: _SourceName = None
     enabled: StrictBool = True
 
 
-SourceConfig = Annotated[
-    RssSource | WebSource | SitemapSource | YoutubeChannelSource | YoutubePlaylistSource,
-    Field(discriminator="type"),
-]
+_SourceUnion = RssSource | WebSource | SitemapSource | YoutubeChannelSource | YoutubePlaylistSource
+SourceConfig = Annotated[_SourceUnion, Field(discriminator="type")]
 
 
 class JobConfig(_StrictModel):
@@ -305,6 +310,13 @@ class JobYamlLoader(yaml.SafeLoader):
         seen: set[Any] = set()
         for key_node, _ in node.value:
             key = self.construct_object(key_node, deep=True)
+            if not isinstance(key, Hashable):
+                raise yaml.constructor.ConstructorError(
+                    "while constructing a mapping",
+                    node.start_mark,
+                    f"found unhashable key {key!r}",
+                    key_node.start_mark,
+                )
             if key in seen:
                 raise yaml.constructor.ConstructorError(
                     "while constructing a mapping",
@@ -332,7 +344,12 @@ for _tag, _pattern, _first in (
     JobYamlLoader.add_implicit_resolver(_tag, re.compile(_pattern), list(_first))
 
 
-_SOURCE_TAGS: Final = frozenset({"rss", "web", "sitemap", "youtube_channel", "youtube_playlist"})
+# Discriminator values of ``SourceConfig``; Pydantic puts them into source error locations.
+_SOURCE_TAGS: Final = frozenset(
+    tag
+    for model in get_args(_SourceUnion)
+    for tag in get_args(model.model_fields["type"].annotation)
+)
 
 
 def _format_validation_error(exc: ValidationError) -> list[str]:
@@ -413,32 +430,51 @@ def dump_yaml(config: JobConfig) -> str:
     )
 
 
-def _file_mode(target: Path) -> int:
-    """Mode for the written file: keep an existing file's mode, else ``0o666`` minus umask."""
+def _create_temp(target: Path) -> tuple[int, Path]:
+    """Create an exclusive temp file next to ``target`` with mode ``0o666`` minus umask.
+
+    The kernel applies the umask on creation, so the process-wide umask is never touched.
+    """
+    while True:
+        tmp = target.with_name(f".{target.name}.{secrets.token_hex(8)}.tmp")
+        try:
+            return os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666), tmp
+        except FileExistsError:
+            continue
+
+
+def _fsync_directory(directory: Path) -> None:
+    """Make a rename in ``directory`` durable (POSIX only; Windows cannot open directories)."""
+    if os.name != "posix":
+        return
+    fd = os.open(directory, os.O_RDONLY)
     try:
-        return stat.S_IMODE(target.stat().st_mode)
-    except FileNotFoundError:
-        umask = os.umask(0)
-        os.umask(umask)
-        return 0o666 & ~umask
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
 
 def write_yaml(config: JobConfig, path: str | os.PathLike[str]) -> None:
-    """Write a job as UTF-8 YAML atomically (temp file + replace); raises ``OSError``."""
-    target = Path(path)
+    """Write a job as UTF-8 YAML atomically (temp file + replace); raises ``OSError``.
+
+    A symlinked ``path`` is followed, so the link stays and its target is updated. An existing
+    file keeps its mode; a new file gets ``0o666`` minus umask.
+    """
+    target = Path(os.path.realpath(path))
     text = dump_yaml(config)
-    mode = _file_mode(target)
-    fd, tmp_name = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.", suffix=".tmp")
+    fd, tmp = _create_temp(target)
     try:
         with open(fd, "w", encoding="utf-8", newline="\n") as handle:
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
-        os.chmod(tmp_name, mode)
-        os.replace(tmp_name, target)
+        with contextlib.suppress(FileNotFoundError):  # new file: keep the umask-based mode
+            os.chmod(tmp, stat.S_IMODE(target.stat().st_mode))
+        os.replace(tmp, target)
     except BaseException:
-        Path(tmp_name).unlink(missing_ok=True)
+        tmp.unlink(missing_ok=True)
         raise
+    _fsync_directory(target.parent)
 
 
 def job_json_schema() -> dict[str, Any]:

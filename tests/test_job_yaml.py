@@ -13,6 +13,7 @@ import jsonschema
 import pytest
 import yaml
 
+from invio.config import job as job_module
 from invio.config.job import (
     JobConfig,
     JobConfigError,
@@ -27,9 +28,7 @@ from invio.config.job import (
     load_yaml,
     write_yaml,
 )
-
-REPO_ROOT = Path(__file__).resolve().parents[1]
-EXAMPLE = REPO_ROOT / "docs" / "job.example.yaml"
+from tests.job_helpers import BAD_JOB, EXAMPLE
 
 MINIMAL = """\
 schedule: {{frequency: daily, time: {time}, timezone: Europe/Berlin}}
@@ -95,13 +94,6 @@ def _load_text(tmp_path: Path, text: str) -> JobConfigError:
     return info.value
 
 
-def test_missing_file(tmp_path: Path) -> None:
-    with pytest.raises(JobConfigError) as info:
-        load_yaml(tmp_path / "nope.yaml")
-
-    assert "cannot read job file" in str(info.value)
-
-
 def test_undecodable_file(tmp_path: Path) -> None:
     path = tmp_path / "job.yaml"
     path.write_bytes(b"\xff\xfe\x00bad")
@@ -110,22 +102,10 @@ def test_undecodable_file(tmp_path: Path) -> None:
         load_yaml(path)
 
 
-def test_yaml_syntax_error_has_line(tmp_path: Path) -> None:
-    err = _load_text(tmp_path, "a: [unclosed\nb: 2\n")
-
-    assert "invalid YAML in job file" in str(err)
-    assert "line" in str(err)
-
-
 def test_invalid_explicit_tag_value(tmp_path: Path) -> None:
     err = _load_text(tmp_path, "a: !!int 08x\n")
 
     assert "invalid YAML in job file" in str(err)
-
-
-@pytest.mark.parametrize("text", ["", "- a\n- b\n", "just text\n"])
-def test_top_level_not_mapping(tmp_path: Path, text: str) -> None:
-    assert "must contain a mapping at the top level" in str(_load_text(tmp_path, text))
 
 
 def test_invalid_source_url_location(tmp_path: Path) -> None:
@@ -314,13 +294,6 @@ def test_error_pickle_roundtrip() -> None:
     assert copy_.path == err.path
     assert copy_.errors == err.errors
     assert str(copy_) == str(err)
-
-
-def test_yaml_syntax_error_single_line(tmp_path: Path) -> None:
-    err = _load_text(tmp_path, "a: [unclosed\nb: 2\n")
-
-    assert len(err.errors) == 1
-    assert "\n" not in err.errors[0]
 
 
 def test_bom_tolerated(tmp_path: Path) -> None:
@@ -666,17 +639,8 @@ def test_error_str_without_path() -> None:
     assert str(JobConfigError(None, ["a: b", "c"])) == "invalid job file:\n  a: b\n  c"
 
 
-QUICKSTART_BAD_JOB = """\
-schedule: {frequency: weekly, time: "25:00", timezone: Europe/Atlantis}
-notification: {to: [not-an-email], subject: x}
-sources: []
-search: {semantic_description: " ", min_relevance: 1.5}
-llm: {provider: openai, models: {fast: a, smart: b}, fallback_provider: openai, frequncy: 1}
-"""
-
-
 def test_all_field_errors_reported_in_one_pass(tmp_path: Path) -> None:
-    err = _load_text(tmp_path, QUICKSTART_BAD_JOB)
+    err = _load_text(tmp_path, BAD_JOB)
 
     assert [e.split(": ", 1)[0] for e in err.errors] == [
         "schedule.time",
@@ -696,7 +660,7 @@ def test_all_field_errors_reported_in_one_pass(tmp_path: Path) -> None:
 
 def test_cross_field_errors_surface_on_second_pass(tmp_path: Path) -> None:
     fixed = (
-        QUICKSTART_BAD_JOB.replace('"25:00"', '"07:30"')
+        BAD_JOB.replace('"25:00"', '"07:30"')
         .replace("Europe/Atlantis", "UTC")
         .replace("not-an-email", "a@example.com")
         .replace("sources: []", "sources: [{type: rss, url: 'https://example.com/f'}]")
@@ -793,15 +757,18 @@ def test_directory_path_is_read_error(tmp_path: Path) -> None:
     assert info.value.errors[0].startswith(f"cannot read job file {tmp_path}: ")
 
 
-def test_yaml_error_names_file_and_position(tmp_path: Path) -> None:
+def test_yaml_error_is_one_line_with_file_and_position(tmp_path: Path) -> None:
     err = _load_text(tmp_path, "a: 1\nb: [unclosed\n")
 
+    assert len(err.errors) == 1
+    assert "\n" not in err.errors[0]
     assert err.errors[0].startswith(f"invalid YAML in job file {tmp_path / 'job.yaml'}: ")
     assert re.search(r"\(line \d+, column \d+\)$", err.errors[0])
 
 
-def test_not_mapping_message_names_file(tmp_path: Path) -> None:
-    err = _load_text(tmp_path, "- a\n")
+@pytest.mark.parametrize("text", ["", "- a\n- b\n", "just text\n"])
+def test_not_mapping_message_names_file(tmp_path: Path, text: str) -> None:
+    err = _load_text(tmp_path, text)
 
     assert err.errors == [
         f"job file {tmp_path / 'job.yaml'} must contain a mapping at the top level"
@@ -816,11 +783,18 @@ def test_not_mapping_message_names_file(tmp_path: Path) -> None:
     ],
 )
 def test_duplicate_keys_rejected(tmp_path: Path, text: str) -> None:
-    target = tmp_path / "job.yaml"
-    target.write_text(text, encoding="utf-8")
+    err = _load_text(tmp_path, text)
 
-    with pytest.raises(JobConfigError, match="found duplicate key"):
-        load_yaml(target)
+    assert "found duplicate key" in err.errors[0]
+
+
+@pytest.mark.parametrize("text", ["? [a]\n: 1\n", "? {a: 1}\n: 1\n", "schedule:\n  ? [a]\n  : 1\n"])
+def test_unhashable_keys_rejected(tmp_path: Path, text: str) -> None:
+    err = _load_text(tmp_path, text)
+
+    assert err.errors[0].startswith("invalid YAML in job file")
+    assert "found unhashable key" in err.errors[0]
+    assert re.search(r"\(line \d+, column \d+\)$", err.errors[0])
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX file modes")
@@ -844,3 +818,67 @@ def test_write_yaml_new_file_honours_umask(tmp_path: Path) -> None:
         os.umask(umask)
 
     assert stat.S_IMODE(target.stat().st_mode) == 0o644
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX file modes")
+def test_write_yaml_keeps_restrictive_mode(tmp_path: Path) -> None:
+    target = tmp_path / "job.yaml"
+    target.write_text("", encoding="utf-8")
+    target.chmod(0o600)
+
+    write_yaml(load_yaml(EXAMPLE), target)
+
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+
+
+def test_write_yaml_leaves_process_umask_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def forbidden(mask: int) -> int:
+        raise AssertionError("write_yaml must not change the process-wide umask")
+
+    monkeypatch.setattr(os, "umask", forbidden)
+
+    write_yaml(load_yaml(EXAMPLE), tmp_path / "job.yaml")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlinks need privileges on Windows")
+def test_write_yaml_follows_symlink(tmp_path: Path) -> None:
+    real = tmp_path / "real" / "job.yaml"
+    real.parent.mkdir()
+    real.write_text("old", encoding="utf-8")
+    link = tmp_path / "job.yaml"
+    link.symlink_to(real)
+    job = load_yaml(EXAMPLE)
+
+    write_yaml(job, link)
+
+    assert link.is_symlink()
+    assert real.read_text(encoding="utf-8") == dump_yaml(job)
+    assert [p.name for p in real.parent.iterdir()] == ["job.yaml"]
+
+
+def test_write_yaml_failure_removes_temp_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fail(src: object, dst: object) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(os, "replace", fail)
+
+    with pytest.raises(OSError, match="disk full"):
+        write_yaml(load_yaml(EXAMPLE), tmp_path / "job.yaml")
+
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_write_yaml_retries_temp_name_collision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / ".job.yaml.taken.tmp").write_text("", encoding="utf-8")
+    names = iter(["taken", "free"])
+    monkeypatch.setattr(job_module.secrets, "token_hex", lambda n: next(names))
+
+    write_yaml(load_yaml(EXAMPLE), tmp_path / "job.yaml")
+
+    assert sorted(p.name for p in tmp_path.iterdir()) == [".job.yaml.taken.tmp", "job.yaml"]

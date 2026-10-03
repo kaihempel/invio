@@ -1,36 +1,13 @@
 """Tests for notification, search, llm, limits and root-level validation."""
 
-from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 import pytest
 import yaml
-from pydantic import ValidationError
 
 from invio.config.job import JobConfig, JobConfigError, load_yaml
-
-Mutation = Callable[[dict[str, Any]], None]
-
-
-def _set(path: str, value: Any) -> Mutation:
-    """Return a mutation that sets a dotted path (creating no intermediate keys)."""
-
-    def apply(data: dict[str, Any]) -> None:
-        *parents, last = path.split(".")
-        node = data
-        for key in parents:
-            node = node.setdefault(key, {})
-        node[last] = value
-
-    return apply
-
-
-def _loc_msgs(data: dict[str, Any]) -> list[tuple[tuple[Any, ...], str]]:
-    with pytest.raises(ValidationError) as info:
-        JobConfig.model_validate(data)
-    return [(e["loc"], e["msg"]) for e in info.value.errors()]
-
+from tests.job_helpers import set_path, validation_errors
 
 REJECTED = [
     ("notification.to", [], "at least 1 item"),
@@ -57,9 +34,9 @@ REJECTED = [
 
 @pytest.mark.parametrize(("path", "value", "message"), REJECTED)
 def test_rejected(job_data: dict[str, Any], path: str, value: Any, message: str) -> None:
-    _set(path, value)(job_data)
+    set_path(job_data, path, value)
 
-    errors = _loc_msgs(job_data)
+    errors = validation_errors(job_data)
 
     assert len(errors) == 1
     parts = tuple(path.split("."))
@@ -80,7 +57,7 @@ def test_rejected(job_data: dict[str, Any], path: str, value: Any, message: str)
 def test_limits_rejected(job_data: dict[str, Any], field: str, value: Any) -> None:
     job_data["limits"] = {field: value}
 
-    errors = _loc_msgs(job_data)
+    errors = validation_errors(job_data)
 
     assert [loc for loc, _ in errors] == [("limits", field)]
 
@@ -88,7 +65,7 @@ def test_limits_rejected(job_data: dict[str, Any], field: str, value: Any) -> No
 def test_fallback_must_differ(job_data: dict[str, Any]) -> None:
     job_data["llm"]["fallback_provider"] = "openai"
 
-    errors = _loc_msgs(job_data)
+    errors = validation_errors(job_data)
 
     assert errors == [(("llm",), "Value error, fallback_provider must differ from provider")]
 
@@ -136,7 +113,7 @@ def test_rejected_file_line_names_field(
     job_data: dict[str, Any], tmp_path: Path, path: str, value: Any, message: str
 ) -> None:
     """SC-002/SC-007: the same cases loaded from a file give one line naming the field."""
-    _set(path, value)(job_data)
+    set_path(job_data, path, value)
     job_file = tmp_path / "job.yaml"
     job_file.write_text(yaml.safe_dump(job_data, allow_unicode=True), encoding="utf-8")
 
@@ -153,7 +130,7 @@ def test_rejected_file_line_names_field(
 def test_limits_section_omitted_vs_null(job_data: dict[str, Any]) -> None:
     job_data["limits"] = None
 
-    errors = _loc_msgs(job_data)
+    errors = validation_errors(job_data)
 
     assert [loc for loc, _ in errors] == [("limits",)]
 
@@ -165,7 +142,7 @@ def test_limits_section_omitted_vs_null(job_data: dict[str, Any]) -> None:
 def test_required_sections(job_data: dict[str, Any], missing: str) -> None:
     del job_data[missing]
 
-    assert _loc_msgs(job_data) == [((missing,), "Field required")]
+    assert validation_errors(job_data) == [((missing,), "Field required")]
 
 
 @pytest.mark.parametrize(
@@ -181,4 +158,4 @@ def test_required_sections(job_data: dict[str, Any], missing: str) -> None:
 def test_required_fields(job_data: dict[str, Any], path: str, field: str) -> None:
     del job_data[path][field]
 
-    assert _loc_msgs(job_data) == [((path, field), "Field required")]
+    assert validation_errors(job_data) == [((path, field), "Field required")]

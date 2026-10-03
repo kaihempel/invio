@@ -20,18 +20,7 @@ from invio.config.job import (
     load_yaml,
     write_yaml,
 )
-
-REPO_ROOT = Path(__file__).resolve().parents[1]
-EXAMPLE = REPO_ROOT / "docs" / "job.example.yaml"
-SCHEMA = REPO_ROOT / "docs" / "job.schema.json"
-
-BAD_JOB = """\
-schedule: {frequency: weekly, time: "25:00", timezone: Europe/Atlantis}
-notification: {to: [not-an-email], subject: x}
-sources: []
-search: {semantic_description: " ", min_relevance: 1.5}
-llm: {provider: openai, models: {fast: a, smart: b}, fallback_provider: openai, frequncy: 1}
-"""
+from tests.job_helpers import BAD_JOB, EXAMPLE, SCHEMA
 
 
 def test_quickstart_end_to_end(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
