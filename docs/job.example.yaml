@@ -1,0 +1,43 @@
+schema_version: 1
+schedule:
+  frequency: weekly
+  time: 07:30
+  weekday: monday
+  timezone: Europe/Berlin
+notification:
+  to:
+    - research@example.com
+  subject: "invio: AI agents digest – {date}"
+  send_if_empty: false
+sources:
+  - type: rss
+    url: https://example.com/feed.xml
+    name: Example blog
+  - type: web
+    url: https://example.org/news
+  - type: sitemap
+    url: https://example.net/sitemap.xml
+    enabled: false
+  - type: youtube_channel
+    channel_id: UCxxxxxxxxxxxxxxxxxxxxxx
+  - type: youtube_playlist
+    playlist_id: PLxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+search:
+  keywords:
+    any: [LangGraph, agent]
+    all: []
+    exclude: [crypto]
+  semantic_description: >-
+    New tools, papers and production experience reports about LLM agent frameworks.
+  min_relevance: 0.6
+llm:
+  provider: openai
+  models:
+    fast: gpt-small
+    smart: gpt-large
+  fallback_provider: anthropic
+limits:
+  max_items_per_source: 20
+  max_items_per_run: 100
+  max_items_in_notification: 20
+  max_llm_tokens_per_run: 200000

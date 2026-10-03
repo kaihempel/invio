@@ -4,6 +4,7 @@ import logging
 import os
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -39,3 +40,20 @@ def restore_root_logger() -> Iterator[logging.Logger]:
         if handler not in root.handlers:
             root.addHandler(handler)
     root.setLevel(level)
+
+
+@pytest.fixture
+def job_data() -> dict[str, Any]:
+    """Return a fresh, minimal valid job mapping (tests mutate it freely)."""
+    return {
+        "schedule": {
+            "frequency": "weekly",
+            "time": "07:30",
+            "weekday": "monday",
+            "timezone": "Europe/Berlin",
+        },
+        "notification": {"to": ["research@example.com"], "subject": "invio digest"},
+        "sources": [{"type": "rss", "url": "https://example.com/feed.xml"}],
+        "search": {"semantic_description": "LLM agent frameworks"},
+        "llm": {"provider": "openai", "models": {"fast": "gpt-small", "smart": "gpt-large"}},
+    }
