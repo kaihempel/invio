@@ -1,6 +1,7 @@
 """Entry point of the ``invio`` CLI with automatic sub-command discovery."""
 
 import importlib
+import logging
 import pkgutil
 from types import ModuleType
 from typing import Annotated
@@ -9,6 +10,10 @@ import typer
 
 from invio import __version__
 from invio.cli import commands
+from invio.config.settings import unknown_env_keys
+from invio.log import configure_logging
+
+logger = logging.getLogger(__name__)
 
 
 def discover_commands(app: typer.Typer, package: ModuleType) -> list[str]:
@@ -31,6 +36,22 @@ def discover_commands(app: typer.Typer, package: ModuleType) -> list[str]:
         app.add_typer(sub_app, name=command_name)
         registered.append(command_name)
     return registered
+
+
+def _setup_runtime() -> None:
+    """Configure JSON logging and warn about ignored ``INVIO_*`` keys.
+
+    Configuration errors (bad ``INVIO_LOG_LEVEL``, missing ``INVIO_ENV_FILE``) end the CLI
+    with exit code 2 and a one-line message instead of a traceback.
+    """
+    try:
+        configure_logging()
+        unknown = unknown_env_keys()
+    except (ValueError, OSError) as exc:
+        typer.echo(f"Configuration error: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+    for key in unknown:
+        logger.warning("unknown setting ignored", extra={"key": key})
 
 
 def _version_callback(value: bool) -> None:
@@ -57,6 +78,7 @@ def create_app(package: ModuleType = commands) -> typer.Typer:
         ] = False,
     ) -> None:
         """Invio: AI research system."""
+        _setup_runtime()
 
     discover_commands(root, package)
     return root
