@@ -5,6 +5,7 @@ description = "Invio: CLI-based AI research system"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "pydantic-settings>=2.15.0",
     "typer>=0.27.2",
 ]
 

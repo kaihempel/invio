@@ -42,6 +42,32 @@ dashes, e.g. `run_now.py` -> `invio run-now`), so the example above runs as
 `invio <name> greet --name you`. No other file needs to change. Modules whose name starts
 with `_` are ignored, so use them for shared helpers.
 
+### Configuration & logging
+
+Settings come from `INVIO_*` environment variables or a `.env` file in the working directory
+(see `.env.example`; real environment variables win over `.env`). Secrets are `SecretStr` and
+never appear in `repr`/logs. Provider keys are optional until the provider is actually used:
+
+```python
+from invio.config.settings import get_settings
+
+settings = get_settings()  # cached instance
+api_key = settings.require_secret("openai_api_key")  # raises "INVIO_OPENAI_API_KEY is not set"
+```
+
+Logs are one JSON object per line on stderr. Wrap a job run in `run_context` to tag every line
+with `job` and `run_id`:
+
+```python
+import logging
+
+from invio.log import configure_logging, run_context
+
+configure_logging()  # level from INVIO_LOG_LEVEL
+with run_context(job="digest") as run_id:
+    logging.getLogger(__name__).info("started", extra={"sources": 3})
+```
+
 ## Layout
 
 ```
