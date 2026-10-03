@@ -1,0 +1,1 @@
+/Users/erosol/Dev/Console/claude-code-python-stack/agents/architect.md

@@ -1,1 +1,1 @@
-"""Test suite for scout."""
+"""Test suite for invio."""

@@ -1,1 +1,0 @@
-"""Scout scheduling package."""

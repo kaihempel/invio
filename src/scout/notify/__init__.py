@@ -1,1 +1,0 @@
-"""Scout notify package."""

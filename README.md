@@ -1,4 +1,4 @@
-# scout
+# invio
 
 CLI-based AI research system.
 
@@ -8,7 +8,7 @@ Requirements: [uv](https://docs.astral.sh/uv/) (Python 3.12 is installed by uv i
 
 ```bash
 uv sync                      # create .venv and install runtime + dev dependencies
-uv run scout --version       # smoke test
+uv run invio --version       # smoke test
 cp .env.example .env         # local configuration (never commit .env)
 uv run pre-commit install    # optional: run checks on every commit
 ```
@@ -24,7 +24,7 @@ uv run pytest
 
 ### Adding a CLI command
 
-Create `src/scout/cli/commands/<name>.py` exposing a module-level `typer.Typer` named `app`:
+Create `src/invio/cli/commands/<name>.py` exposing a module-level `typer.Typer` named `app`:
 
 ```python
 import typer
@@ -37,15 +37,15 @@ def greet(name: str = "world") -> None:
     typer.echo(f"Hello {name}")
 ```
 
-It is registered automatically as the command group `scout <name>` (underscores become
-dashes, e.g. `run_now.py` -> `scout run-now`), so the example above runs as
-`scout <name> greet --name you`. No other file needs to change. Modules whose name starts
+It is registered automatically as the command group `invio <name>` (underscores become
+dashes, e.g. `run_now.py` -> `invio run-now`), so the example above runs as
+`invio <name> greet --name you`. No other file needs to change. Modules whose name starts
 with `_` are ignored, so use them for shared helpers.
 
 ## Layout
 
 ```
-src/scout/
+src/invio/
   cli/          Typer app (main.py) and auto-discovered commands/
   config/       settings
   db/           SQLAlchemy models and sessions

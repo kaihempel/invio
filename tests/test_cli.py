@@ -12,8 +12,8 @@ import pytest
 import typer
 from typer.testing import CliRunner
 
-from scout import __version__
-from scout.cli.main import app, create_app, discover_commands
+from invio import __version__
+from invio.cli.main import app, create_app, discover_commands
 
 runner = CliRunner()
 
@@ -57,7 +57,7 @@ def make_commands_package(
 def test_version_prints_version() -> None:
     result = runner.invoke(app, ["--version"])
     assert result.exit_code == 0
-    assert result.stdout.strip() == f"scout {__version__}"
+    assert result.stdout.strip() == f"invio {__version__}"
 
 
 def test_version_is_not_placeholder() -> None:
@@ -70,10 +70,10 @@ def test_discovery_registers_dropped_in_module(
     package = make_commands_package({"hello_world": HELLO_MODULE})
     cli = create_app(package)
 
-    result = runner.invoke(cli, ["hello-world", "greet", "--name", "scout"])
+    result = runner.invoke(cli, ["hello-world", "greet", "--name", "invio"])
 
     assert result.exit_code == 0, result.output
-    assert result.stdout.strip() == "hello scout"
+    assert result.stdout.strip() == "hello invio"
 
 
 def test_discovery_skips_private_modules_and_modules_without_app(
