@@ -1,6 +1,8 @@
 """Tests for the root CLI: ``--version`` and sub-command auto-discovery."""
 
 import importlib
+import json
+import logging
 import sys
 import textwrap
 import uuid
@@ -14,6 +16,7 @@ from typer.testing import CliRunner
 
 from invio import __version__
 from invio.cli.main import app, create_app, discover_commands
+from invio.log import JsonFormatter
 
 runner = CliRunner()
 
@@ -93,3 +96,46 @@ def test_discovery_skips_private_modules_and_modules_without_app(
     assert registered == ["hello"]
     result = runner.invoke(create_app(package), ["_private"])
     assert result.exit_code != 0
+
+
+def test_subcommand_configures_json_logging_and_warns_about_unknown_keys(
+    make_commands_package: Callable[[dict[str, str]], ModuleType],
+    monkeypatch: pytest.MonkeyPatch,
+    restore_root_logger: logging.Logger,
+) -> None:
+    monkeypatch.setenv("INVIO_OPENAI_APIKEY", "typo")
+    cli = create_app(make_commands_package({"hello": HELLO_MODULE}))
+
+    result = runner.invoke(cli, ["hello", "greet"])
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout.strip() == "hello world"
+    assert any(isinstance(h.formatter, JsonFormatter) for h in restore_root_logger.handlers)
+    (warning,) = [json.loads(line) for line in result.stderr.splitlines()]
+    assert warning["message"] == "unknown setting ignored"
+    assert warning["key"] == "INVIO_OPENAI_APIKEY"
+
+
+@pytest.mark.parametrize(
+    ("env", "expected"),
+    [
+        ({"INVIO_LOG_LEVEL": "LOUD"}, "invalid log level"),
+        ({"INVIO_ENV_FILE": "/does/not/exist.env"}, "INVIO_ENV_FILE points to a missing file"),
+    ],
+)
+def test_configuration_errors_exit_with_code_2_and_a_clear_message(
+    make_commands_package: Callable[[dict[str, str]], ModuleType],
+    monkeypatch: pytest.MonkeyPatch,
+    env: dict[str, str],
+    expected: str,
+) -> None:
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    cli = create_app(make_commands_package({"hello": HELLO_MODULE}))
+
+    result = runner.invoke(cli, ["hello", "greet"])
+
+    assert result.exit_code == 2
+    assert "Configuration error:" in result.stderr
+    assert expected in result.stderr
+    assert "Traceback" not in result.stderr

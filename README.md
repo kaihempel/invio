@@ -45,8 +45,10 @@ with `_` are ignored, so use them for shared helpers.
 ### Configuration & logging
 
 Settings come from `INVIO_*` environment variables or a `.env` file in the working directory
-(see `.env.example`; real environment variables win over `.env`). Secrets are `SecretStr` and
-never appear in `repr`/logs. Provider keys are optional until the provider is actually used:
+(see `.env.example`; real environment variables win over `.env`). Set `INVIO_ENV_FILE` to load
+the file from elsewhere, e.g. under cron/systemd where the working directory differs; a missing
+file is then an error. Secrets are `SecretStr` and never appear in `repr`/logs. Provider keys
+are optional until the provider is actually used:
 
 ```python
 from invio.config.settings import get_settings
@@ -55,15 +57,18 @@ settings = get_settings()  # cached instance
 api_key = settings.require_secret("openai_api_key")  # raises "INVIO_OPENAI_API_KEY is not set"
 ```
 
-Logs are one JSON object per line on stderr. Wrap a job run in `run_context` to tag every line
-with `job` and `run_id`:
+Every `invio` sub-command configures logging on startup: one JSON object per line on stderr,
+level from `INVIO_LOG_LEVEL`. Unknown `INVIO_*` keys (usually typos) are logged as warnings, and
+configuration errors end the command with exit code 2. Wrap a job run in `run_context` to tag
+every line with `job` and `run_id` (a nested context without `job` keeps the outer one). `extra`
+keys that clash with built-in fields such as `job` or `level` are emitted as `extra_<key>`:
 
 ```python
 import logging
 
 from invio.log import configure_logging, run_context
 
-configure_logging()  # level from INVIO_LOG_LEVEL
+configure_logging()  # done by the CLI already; call it yourself in scripts
 with run_context(job="digest") as run_id:
     logging.getLogger(__name__).info("started", extra={"sources": 3})
 ```

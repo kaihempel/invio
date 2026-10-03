@@ -1,5 +1,6 @@
 """Shared pytest fixtures."""
 
+import logging
 import os
 from collections.abc import Iterator
 from pathlib import Path
@@ -19,3 +20,22 @@ def isolated_settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterat
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def restore_root_logger() -> Iterator[logging.Logger]:
+    """Snapshot the root logger's handlers and level and restore them after the test.
+
+    ``configure_logging()`` (also run by every CLI sub-command) mutates the root logger.
+    """
+    root = logging.getLogger()
+    handlers, level = list(root.handlers), root.level
+    yield root
+    for handler in list(root.handlers):
+        if handler not in handlers:
+            root.removeHandler(handler)
+            handler.close()
+    for handler in handlers:
+        if handler not in root.handlers:
+            root.addHandler(handler)
+    root.setLevel(level)

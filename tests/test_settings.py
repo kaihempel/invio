@@ -1,11 +1,18 @@
 """Tests for ``invio.config.settings``: loading, secret masking, validation and caching."""
 
 from pathlib import Path
+from typing import get_args
 
 import pytest
-from pydantic import ValidationError
+from pydantic import SecretStr, ValidationError
 
-from invio.config.settings import MissingSettingError, Settings, get_settings
+from invio.config.settings import (
+    MissingSettingError,
+    SecretName,
+    Settings,
+    get_settings,
+    unknown_env_keys,
+)
 
 SECRET = "sk-super-secret-value"
 DB_PASSWORD = "db-pa55word"
@@ -29,7 +36,7 @@ def test_loads_from_dotenv_file(tmp_path: Path) -> None:
     (tmp_path / ".env").write_text(
         f"INVIO_DATABASE_URL=mysql+pymysql://invio:{DB_PASSWORD}@localhost/invio\n"
         "INVIO_SMTP_HOST=smtp.example.com\n"
-        "INVIO_ARCHIVE_DIR=/tmp/archive\n",  # unknown keys for later features are ignored
+        "INVIO_NOT_A_SETTING=whatever\n",  # unknown keys are ignored (but reported)
         encoding="utf-8",
     )
 
@@ -55,6 +62,10 @@ def test_defaults_without_any_configuration() -> None:
     assert settings.smtp_port == 587
     assert settings.smtp_starttls is True
     assert settings.log_level == "INFO"
+    assert settings.archive_dir is None
+    assert settings.youtube_cookies_file is None
+    assert settings.youtube_proxy is None
+    assert settings.whisper_model_size == "small"
 
 
 def test_secrets_are_not_leaked_in_repr_str_or_dump(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -62,6 +73,8 @@ def test_secrets_are_not_leaked_in_repr_str_or_dump(monkeypatch: pytest.MonkeyPa
         monkeypatch.setenv(f"INVIO_{name}_API_KEY", SECRET)
     monkeypatch.setenv("INVIO_SMTP_PASSWORD", SECRET)
     monkeypatch.setenv("INVIO_DATABASE_URL", f"mysql://invio:{DB_PASSWORD}@db/invio")
+    monkeypatch.setenv("INVIO_TEST_DATABASE_URL", f"mysql://invio:{DB_PASSWORD}@db/test")
+    monkeypatch.setenv("INVIO_YOUTUBE_PROXY", f"http://user:{DB_PASSWORD}@proxy:8080")
 
     settings = Settings()
 
@@ -113,3 +126,50 @@ def test_get_settings_is_cached(monkeypatch: pytest.MonkeyPatch) -> None:
 
     get_settings.cache_clear()
     assert get_settings().smtp_host == "changed"
+
+
+def test_secret_name_matches_secret_fields() -> None:
+    secret_fields = {
+        name
+        for name, field in Settings.model_fields.items()
+        if field.annotation in (SecretStr, SecretStr | None)
+    }
+
+    assert set(get_args(SecretName)) == secret_fields
+
+
+def test_env_example_keys_are_all_known_settings() -> None:
+    env_example = Path(__file__).resolve().parents[1] / ".env.example"
+
+    assert unknown_env_keys(env_example) == []
+
+
+def test_env_file_override_is_used_by_get_settings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / ".env").write_text("INVIO_SMTP_HOST=from-cwd\n", encoding="utf-8")
+    deploy_env = tmp_path / "deploy" / "invio.env"
+    deploy_env.parent.mkdir()
+    deploy_env.write_text("INVIO_SMTP_HOST=from-override\n", encoding="utf-8")
+    monkeypatch.setenv("INVIO_ENV_FILE", str(deploy_env))
+
+    assert get_settings().smtp_host == "from-override"
+
+
+def test_missing_env_file_override_fails_loudly(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("INVIO_ENV_FILE", "/does/not/exist.env")
+
+    with pytest.raises(FileNotFoundError, match="INVIO_ENV_FILE"):
+        get_settings()
+
+
+def test_unknown_env_keys_reports_typos_from_env_and_dotenv(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / ".env").write_text(
+        "INVIO_SMTP_HOST=ok\ninvio_smpt_port=25\nOTHER_VAR=1\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("INVIO_OPENAI_APIKEY", "typo")
+    monkeypatch.setenv("INVIO_ENV_FILE", str(tmp_path / ".env"))
+
+    assert unknown_env_keys() == ["INVIO_OPENAI_APIKEY", "invio_smpt_port"]
