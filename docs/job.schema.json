@@ -1,0 +1,537 @@
+{
+  "$defs": {
+    "Frequency": {
+      "description": "How often a job runs.",
+      "enum": [
+        "daily",
+        "weekly",
+        "monthly"
+      ],
+      "title": "Frequency",
+      "type": "string"
+    },
+    "KeywordsConfig": {
+      "additionalProperties": false,
+      "description": "Keyword pre-filters (lists stay mutable even though the model is frozen).",
+      "properties": {
+        "any": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Any",
+          "type": "array"
+        },
+        "all": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "All",
+          "type": "array"
+        },
+        "exclude": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Exclude",
+          "type": "array"
+        }
+      },
+      "title": "KeywordsConfig",
+      "type": "object"
+    },
+    "LLMConfig": {
+      "additionalProperties": false,
+      "description": "LLM provider selection.",
+      "properties": {
+        "provider": {
+          "$ref": "#/$defs/LLMProvider"
+        },
+        "models": {
+          "$ref": "#/$defs/LLMModels"
+        },
+        "fallback_provider": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LLMProvider"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "provider",
+        "models"
+      ],
+      "title": "LLMConfig",
+      "type": "object"
+    },
+    "LLMModels": {
+      "additionalProperties": false,
+      "description": "Model names for the cheap and the capable tier.",
+      "properties": {
+        "fast": {
+          "minLength": 1,
+          "title": "Fast",
+          "type": "string"
+        },
+        "smart": {
+          "minLength": 1,
+          "title": "Smart",
+          "type": "string"
+        }
+      },
+      "required": [
+        "fast",
+        "smart"
+      ],
+      "title": "LLMModels",
+      "type": "object"
+    },
+    "LLMProvider": {
+      "description": "Supported LLM providers (kept in sync with ``Settings`` by a test).",
+      "enum": [
+        "mistral",
+        "openai",
+        "anthropic",
+        "google",
+        "ollama"
+      ],
+      "title": "LLMProvider",
+      "type": "string"
+    },
+    "LimitsConfig": {
+      "additionalProperties": false,
+      "description": "Per-run caps.",
+      "properties": {
+        "max_items_per_source": {
+          "default": 20,
+          "minimum": 1,
+          "title": "Max Items Per Source",
+          "type": "integer"
+        },
+        "max_items_per_run": {
+          "default": 100,
+          "minimum": 1,
+          "title": "Max Items Per Run",
+          "type": "integer"
+        },
+        "max_items_in_notification": {
+          "default": 20,
+          "minimum": 1,
+          "title": "Max Items In Notification",
+          "type": "integer"
+        },
+        "max_llm_tokens_per_run": {
+          "default": 200000,
+          "minimum": 1,
+          "title": "Max Llm Tokens Per Run",
+          "type": "integer"
+        }
+      },
+      "title": "LimitsConfig",
+      "type": "object"
+    },
+    "NotificationConfig": {
+      "additionalProperties": false,
+      "description": "Who gets the digest and how it is titled.",
+      "properties": {
+        "to": {
+          "items": {
+            "format": "email",
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "To",
+          "type": "array"
+        },
+        "subject": {
+          "minLength": 1,
+          "title": "Subject",
+          "type": "string"
+        },
+        "send_if_empty": {
+          "default": false,
+          "title": "Send If Empty",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "to",
+        "subject"
+      ],
+      "title": "NotificationConfig",
+      "type": "object"
+    },
+    "RssSource": {
+      "additionalProperties": false,
+      "description": "An RSS/Atom feed.",
+      "properties": {
+        "type": {
+          "const": "rss",
+          "title": "Type",
+          "type": "string"
+        },
+        "url": {
+          "format": "uri",
+          "maxLength": 2083,
+          "minLength": 1,
+          "title": "Url",
+          "type": "string"
+        },
+        "name": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Name"
+        },
+        "enabled": {
+          "default": true,
+          "title": "Enabled",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "type",
+        "url"
+      ],
+      "title": "RssSource",
+      "type": "object"
+    },
+    "ScheduleConfig": {
+      "additionalProperties": false,
+      "description": "When the job runs.",
+      "properties": {
+        "frequency": {
+          "$ref": "#/$defs/Frequency"
+        },
+        "time": {
+          "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$",
+          "title": "Time",
+          "type": "string"
+        },
+        "weekday": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Weekday"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "day_of_month": {
+          "anyOf": [
+            {
+              "maximum": 31,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Day Of Month"
+        },
+        "timezone": {
+          "title": "Timezone",
+          "type": "string"
+        }
+      },
+      "required": [
+        "frequency",
+        "time",
+        "timezone"
+      ],
+      "title": "ScheduleConfig",
+      "type": "object"
+    },
+    "SearchConfig": {
+      "additionalProperties": false,
+      "description": "What the job is looking for.",
+      "properties": {
+        "keywords": {
+          "$ref": "#/$defs/KeywordsConfig"
+        },
+        "semantic_description": {
+          "minLength": 1,
+          "title": "Semantic Description",
+          "type": "string"
+        },
+        "min_relevance": {
+          "default": 0.6,
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Min Relevance",
+          "type": "number"
+        }
+      },
+      "required": [
+        "semantic_description"
+      ],
+      "title": "SearchConfig",
+      "type": "object"
+    },
+    "SitemapSource": {
+      "additionalProperties": false,
+      "description": "A sitemap.",
+      "properties": {
+        "type": {
+          "const": "sitemap",
+          "title": "Type",
+          "type": "string"
+        },
+        "url": {
+          "format": "uri",
+          "maxLength": 2083,
+          "minLength": 1,
+          "title": "Url",
+          "type": "string"
+        },
+        "name": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Name"
+        },
+        "enabled": {
+          "default": true,
+          "title": "Enabled",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "type",
+        "url"
+      ],
+      "title": "SitemapSource",
+      "type": "object"
+    },
+    "WebSource": {
+      "additionalProperties": false,
+      "description": "A web page.",
+      "properties": {
+        "type": {
+          "const": "web",
+          "title": "Type",
+          "type": "string"
+        },
+        "url": {
+          "format": "uri",
+          "maxLength": 2083,
+          "minLength": 1,
+          "title": "Url",
+          "type": "string"
+        },
+        "name": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Name"
+        },
+        "enabled": {
+          "default": true,
+          "title": "Enabled",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "type",
+        "url"
+      ],
+      "title": "WebSource",
+      "type": "object"
+    },
+    "Weekday": {
+      "description": "Day of the week for weekly jobs.\n\nInput is case-insensitive; the JSON Schema lists the lowercase values only.",
+      "enum": [
+        "monday",
+        "tuesday",
+        "wednesday",
+        "thursday",
+        "friday",
+        "saturday",
+        "sunday"
+      ],
+      "title": "Weekday",
+      "type": "string"
+    },
+    "YoutubeChannelSource": {
+      "additionalProperties": false,
+      "description": "A YouTube channel.",
+      "properties": {
+        "type": {
+          "const": "youtube_channel",
+          "title": "Type",
+          "type": "string"
+        },
+        "channel_id": {
+          "minLength": 1,
+          "title": "Channel Id",
+          "type": "string"
+        },
+        "name": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Name"
+        },
+        "enabled": {
+          "default": true,
+          "title": "Enabled",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "type",
+        "channel_id"
+      ],
+      "title": "YoutubeChannelSource",
+      "type": "object"
+    },
+    "YoutubePlaylistSource": {
+      "additionalProperties": false,
+      "description": "A YouTube playlist.",
+      "properties": {
+        "type": {
+          "const": "youtube_playlist",
+          "title": "Type",
+          "type": "string"
+        },
+        "playlist_id": {
+          "minLength": 1,
+          "title": "Playlist Id",
+          "type": "string"
+        },
+        "name": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Name"
+        },
+        "enabled": {
+          "default": true,
+          "title": "Enabled",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "type",
+        "playlist_id"
+      ],
+      "title": "YoutubePlaylistSource",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "A complete research job definition.",
+  "properties": {
+    "schema_version": {
+      "default": 1,
+      "maximum": 1,
+      "minimum": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "schedule": {
+      "$ref": "#/$defs/ScheduleConfig"
+    },
+    "notification": {
+      "$ref": "#/$defs/NotificationConfig"
+    },
+    "sources": {
+      "items": {
+        "discriminator": {
+          "mapping": {
+            "rss": "#/$defs/RssSource",
+            "sitemap": "#/$defs/SitemapSource",
+            "web": "#/$defs/WebSource",
+            "youtube_channel": "#/$defs/YoutubeChannelSource",
+            "youtube_playlist": "#/$defs/YoutubePlaylistSource"
+          },
+          "propertyName": "type"
+        },
+        "oneOf": [
+          {
+            "$ref": "#/$defs/RssSource"
+          },
+          {
+            "$ref": "#/$defs/WebSource"
+          },
+          {
+            "$ref": "#/$defs/SitemapSource"
+          },
+          {
+            "$ref": "#/$defs/YoutubeChannelSource"
+          },
+          {
+            "$ref": "#/$defs/YoutubePlaylistSource"
+          }
+        ]
+      },
+      "minItems": 1,
+      "title": "Sources",
+      "type": "array"
+    },
+    "search": {
+      "$ref": "#/$defs/SearchConfig"
+    },
+    "llm": {
+      "$ref": "#/$defs/LLMConfig"
+    },
+    "limits": {
+      "$ref": "#/$defs/LimitsConfig"
+    }
+  },
+  "required": [
+    "schedule",
+    "notification",
+    "sources",
+    "search",
+    "llm"
+  ],
+  "title": "JobConfig",
+  "type": "object"
+}

@@ -6,7 +6,9 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "pydantic-settings>=2.15.0",
+    "pydantic[email]>=2.13",
     "python-dotenv>=1.0",
+    "pyyaml>=6.0",
     "typer>=0.27.2",
 ]
 
@@ -19,11 +21,14 @@ build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
+    "jsonschema>=4",
     "mypy>=2.4.0",
     "pre-commit>=4.6.2",
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
+    "pytest-cov>=7.1.0",
     "ruff>=0.16.10",
+    "types-pyyaml>=6.0.12.20260906",
 ]
 
 [tool.ruff]
@@ -50,3 +55,13 @@ testpaths = ["tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 addopts = ["-ra", "--strict-markers", "--strict-config"]
+
+[tool.coverage.run]
+source = ["invio"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+fail_under = 95
+exclude_also = ['if __name__ == "__main__":']

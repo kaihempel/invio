@@ -73,12 +73,52 @@ with run_context(job="digest") as run_id:
     logging.getLogger(__name__).info("started", extra={"sources": 3})
 ```
 
+## Job files
+
+A job file is a YAML description of one research job: schedule, notification, sources, search,
+LLM and limits. See [docs/job.example.yaml](docs/job.example.yaml) for a complete example and
+[docs/job.schema.json](docs/job.schema.json) for the JSON Schema (for editor validation).
+
+```python
+from invio.config.job import JobConfigError, dump_yaml, load_yaml, write_yaml
+
+try:
+    job = load_yaml("docs/job.example.yaml")
+except JobConfigError as exc:
+    print(exc)  # one line per problem
+write_yaml(job, "job.yaml")  # or dump_yaml(job) for a string
+```
+
+- Unknown keys are errors at every level. Scalars follow YAML 1.2 style: `time: 17:30`, `on`
+  and `2026-10-04` stay strings.
+- Comments are not preserved on save, and every field (defaults included) is written.
+- `write_yaml` replaces the file atomically, keeps an existing file's mode and follows
+  symlinks (the link stays, its target is updated).
+- `weekday` accepts any capitalisation, but the JSON Schema lists the lowercase values only.
+- Cross-field errors (e.g. `schedule: weekday is required ...`) may appear only after the
+  field errors of the same section are fixed.
+
+```text
+invalid job file job.yaml:
+  schedule.timezone: unknown timezone 'Europe/Atlantis'
+  notification.to[0]: value is not a valid email address: An email address must have an @-sign.
+  sources[2].url: URL scheme should be 'http' or 'https'
+  llm.frequncy: Extra inputs are not permitted
+```
+
+Regenerate the schema after changing the models (a test fails when it is stale):
+
+```bash
+uv run python -m invio.config.job
+```
+
 ## Layout
 
 ```
 src/invio/
   cli/          Typer app (main.py) and auto-discovered commands/
-  config/       settings
+  config/       settings, job.py (job file models + YAML load/save)
+  domain.py     shared Candidate / ProcessedItem records (stdlib only)
   db/           SQLAlchemy models and sessions
   graph/        LangGraph pipelines
   sources/      source adapters
