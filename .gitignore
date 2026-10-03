@@ -56,6 +56,8 @@ coverage.xml
 local_settings.py
 db.sqlite3
 db.sqlite3-journal
+*.sqlite
+*.sqlite3
 
 # PyBuilder
 target/
@@ -77,6 +79,7 @@ __pypackages__/
 # Environments
 .env
 .env.*
+!.env.example
 .envrc
 *.crt
 *.key
