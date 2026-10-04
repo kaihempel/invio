@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Literal
 
 from dotenv import dotenv_values
-from pydantic import SecretStr, field_validator
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 ENV_PREFIX = "INVIO_"
@@ -73,6 +73,7 @@ class Settings(BaseSettings):
     anthropic_api_key: SecretStr | None = None
     google_api_key: SecretStr | None = None
     ollama_base_url: str = "http://localhost:11434"
+    llm_timeout_seconds: float = Field(default=60.0, gt=0, allow_inf_nan=False)
 
     # E-mail notifications
     smtp_host: str | None = None

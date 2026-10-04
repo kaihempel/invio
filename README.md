@@ -48,7 +48,8 @@ Settings come from `INVIO_*` environment variables or a `.env` file in the worki
 (see `.env.example`; real environment variables win over `.env`). Set `INVIO_ENV_FILE` to load
 the file from elsewhere, e.g. under cron/systemd where the working directory differs; a missing
 file is then an error. Secrets are `SecretStr` and never appear in `repr`/logs. Provider keys
-are optional until the provider is actually used:
+are optional until the provider is actually used. `INVIO_LLM_TIMEOUT_SECONDS` (default `60`,
+must be > 0) bounds every single LLM request:
 
 ```python
 from invio.config.settings import get_settings
@@ -192,6 +193,54 @@ warning). Disabling a job with a broken stored config still pauses it, then rais
 Record repositories for runs, items, digests, notifications and LLM usage live in
 `invio.db.repositories`; they flush but never commit (use `session_scope`).
 
+## LLM layer
+
+`invio.llm` is the provider-neutral LLM contract used by pipeline nodes. A provider offers
+`complete(system, user, *, model, temperature, max_tokens)` and
+`complete_structured(system, user, schema, *, model, temperature)`; both return the result plus
+a `Usage` (`input_tokens`, `output_tokens`, `requests`). `resolve` maps a job's `llm` section
+and a role (`fast` or `smart`) to a provider and a model id, checked against the model registry:
+
+```python
+from invio.llm.factory import resolve
+
+provider, model = resolve(job.llm, "fast")  # LLMConfigError if the model is not registered
+text, usage = await provider.complete("system", "user", model=model, temperature=0, max_tokens=500)
+score, usage = await provider.complete_structured(
+    "system", "user", Score, model=model, temperature=0
+)
+```
+
+Structured answers are validated against the Pydantic schema; an invalid answer gets exactly one
+repair request, then `LLMInvalidOutputError` (`usage.requests == 2` marks a repair). Failures are
+typed: `LLMRateLimitError`, `LLMAuthError` (a missing key names the `INVIO_<PROVIDER>_API_KEY`
+variable), `LLMUnavailableError` (also a request timeout) and `LLMInvalidOutputError`;
+configuration problems raise `LLMConfigError`. Every call logs one `llm.call` line (provider,
+model, tokens, `cost_usd`, `duration_ms`, `repaired`) and never logs prompts, answers or keys.
+
+Models and prices live in `src/invio/llm/models.d/<provider>.yaml` (USD per 1M tokens):
+
+```yaml
+schema_version: 1
+provider: <provider>   # must equal the file name
+models:
+  <model-id>:
+    input_price_per_mtok: 0.5
+    output_price_per_mtok: 1.5
+    context_window: 128000
+```
+
+`default_registry().cost(model, usage)` returns the cost as a `Decimal` with 6 decimals (or
+`None` for unknown models). Tests use `invio.llm.fake.FakeProvider`, a scripted provider that
+records requests (replies, `FakeDelay`, or `LLMError` instances).
+
+To add a provider, create one module `src/invio/llm/<name>.py` whose class is decorated with
+`@register_provider("<name>")` and has a `from_settings(settings)` classmethod (use
+`require_api_key` and `settings.llm_timeout_seconds`; wrap each request in `with_timeout` and
+use `structured_with_repair`), plus one `models.d/<name>.yaml` file. Modules are discovered
+automatically; no shared file changes. A provider beyond the five in the job schema also needs
+the `LLMProvider` enum in `invio.config.job` extended.
+
 ## Layout
 
 ```
@@ -203,7 +252,7 @@ src/invio/
   services/     jobs.py (JobService: job CRUD, YAML import/export)
   graph/        LangGraph pipelines
   sources/      source adapters
-  llm/          LLM providers
+  llm/          base, registry, factory, fake, models.d/ (LLM layer)
   notify/       notifications
   scheduling/   next-run calculation (next_run.py)
 alembic.ini     developer entry point for `uv run alembic ...`

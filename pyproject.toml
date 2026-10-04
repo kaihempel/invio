@@ -73,10 +73,11 @@ markers = [
 
 [tool.coverage.run]
 source_dirs = ["src/invio"]
+omit = ["*/pytest-of-*/*"]  # temporary provider modules created by tests
 branch = true
 
 [tool.coverage.report]
 show_missing = true
 skip_covered = true
 fail_under = 95
-exclude_also = ['if __name__ == "__main__":']
+exclude_also = ['if __name__ == "__main__":', "if TYPE_CHECKING:"]
