@@ -15,6 +15,7 @@ from tests.cli_helpers import JobCli, job_cli  # noqa: F401 (fixture)
 pytestmark = pytest.mark.db
 
 NEXT_RUN_RE = r"\d{4}-\d{2}-\d{2} \d{2}:\d{2} (CET|CEST)"
+ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 
 def _create(cli: JobCli, name: str, data: dict[str, Any], *, enabled: bool = True) -> None:
@@ -27,6 +28,8 @@ def test_help_lists_all_nine_commands(job_cli: JobCli) -> None:
     result = job_cli.invoke(["--help"])
 
     assert result.exit_code == 0
+    # Typer forces a Rich terminal on CI (GITHUB_ACTIONS), so help output may carry ANSI codes.
+    output = ANSI_RE.sub("", result.output)
     for command in (
         "create",
         "list",
@@ -38,7 +41,7 @@ def test_help_lists_all_nine_commands(job_cli: JobCli) -> None:
         "export",
         "import",
     ):
-        assert re.search(rf"^\s*│?\s*{command}\s", result.output, re.MULTILINE), command
+        assert re.search(rf"^\s*│?\s*{command}\s", output, re.MULTILINE), command
 
 
 def test_fmt_next_run() -> None:
