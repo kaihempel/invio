@@ -7,8 +7,15 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from sqlalchemy import Engine, text
+from sqlalchemy.orm import Session
+from sqlalchemy.pool import StaticPool
 
 from invio.config.settings import get_settings
+from invio.db import migrate
+from invio.db.models import Base
+from invio.db.session import create_db_engine
+from tests.db_helpers import TEST_DATABASE_URL, uses_sqlite
 
 
 @pytest.fixture(autouse=True)
@@ -57,3 +64,53 @@ def job_data() -> dict[str, Any]:
         "search": {"semantic_description": "LLM agent frameworks"},
         "llm": {"provider": "openai", "models": {"fast": "gpt-small", "smart": "gpt-large"}},
     }
+
+
+@pytest.fixture(scope="session")
+def _server_engine() -> Iterator[Engine | None]:
+    """Engine for the MariaDB/MySQL test server, upgraded to head once; ``None`` on SQLite."""
+    if uses_sqlite():
+        yield None
+        return
+    assert TEST_DATABASE_URL is not None
+    engine = create_db_engine(TEST_DATABASE_URL)
+    # Reset stale state from an aborted earlier run before bringing the schema to head.
+    with engine.begin() as conn:
+        migrate.downgrade(migrate.alembic_config(connection=conn), "base")
+        conn.execute(text("DROP TABLE IF EXISTS other"))
+    with engine.begin() as conn:
+        migrate.upgrade(migrate.alembic_config(connection=conn), "head")
+    yield engine
+    engine.dispose()
+
+
+@pytest.fixture
+def db_engine(_server_engine: Engine | None) -> Iterator[Engine]:
+    """SQLite: a fresh in-memory engine per test. MariaDB: the shared server engine."""
+    if _server_engine is not None:
+        yield _server_engine
+        return
+    engine = create_db_engine(
+        "sqlite+pysqlite://", poolclass=StaticPool, connect_args={"check_same_thread": False}
+    )
+    Base.metadata.create_all(engine)
+    yield engine
+    engine.dispose()
+
+
+@pytest.fixture
+def db_session(db_engine: Engine, _server_engine: Engine | None) -> Iterator[Session]:
+    """A session isolated per test (closed on SQLite, rolled back via savepoints on MariaDB)."""
+    if _server_engine is None:
+        with Session(db_engine) as session:
+            yield session
+        return
+    connection = db_engine.connect()
+    transaction = connection.begin()
+    session = Session(bind=connection, join_transaction_mode="create_savepoint")
+    try:
+        yield session
+    finally:
+        session.close()
+        transaction.rollback()
+        connection.close()

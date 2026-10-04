@@ -62,7 +62,12 @@ def _version_callback(value: bool) -> None:
 
 def create_app(package: ModuleType = commands) -> typer.Typer:
     """Build the root Typer app and register all sub-commands found in ``package``."""
-    root = typer.Typer(name="invio", help="Invio: AI research system.", no_args_is_help=True)
+    root = typer.Typer(
+        name="invio",
+        help="Invio: AI research system.",
+        no_args_is_help=True,
+        pretty_exceptions_show_locals=False,  # locals may hold the database URL
+    )
 
     @root.callback()
     def main(

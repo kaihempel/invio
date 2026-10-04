@@ -30,3 +30,36 @@ jobs:
 
       - name: Tests (pytest)
         run: uv run pytest --cov
+
+  mariadb:
+    # Optional: runs the persistence tests against a real MariaDB (non-blocking).
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    services:
+      mariadb:
+        image: mariadb:11.4
+        env:
+          MARIADB_ALLOW_EMPTY_ROOT_PASSWORD: "1"
+          MARIADB_DATABASE: invio_test
+        ports: ["3306:3306"]
+        options: >-
+          --health-cmd "healthcheck.sh --connect --innodb_initialized"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      INVIO_TEST_DATABASE_URL: mysql+pymysql://root@127.0.0.1:3306/invio_test?charset=utf8mb4
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: Persistence tests on MariaDB
+        run: uv run pytest -m db
