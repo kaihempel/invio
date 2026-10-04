@@ -243,8 +243,9 @@ class SafeHttpClient:
     Always use it as ``async with``, or call :meth:`aclose`. ``allow_networks``, ``resolver``
     and ``transport`` exist for tests only.
 
-    ``total_timeout`` is a deadline per request (hop), not for a whole redirect chain. URL
-    userinfo (``user:password@``) is never sent and never appears in results, errors or logs.
+    ``total_timeout`` bounds one :meth:`get` including all redirect hops, measured from the
+    first send (the robots.txt fetch has its own budget). URL userinfo (``user:password@``)
+    is never sent and never appears in results, errors or logs.
     """
 
     def __init__(
