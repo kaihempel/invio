@@ -112,19 +112,67 @@ Regenerate the schema after changing the models (a test fails when it is stale):
 uv run python -m invio.config.job
 ```
 
+## Database
+
+Invio stores jobs, runs, items, digests, notifications and LLM usage in MariaDB (production) or
+SQLite (development and tests) through SQLAlchemy 2.x. Configure the engine in
+`INVIO_DATABASE_URL`:
+
+```bash
+INVIO_DATABASE_URL=mysql+pymysql://user:pass@host:3306/invio?charset=utf8mb4
+INVIO_DATABASE_URL=sqlite:////absolute/path/invio.sqlite   # development only
+```
+
+- MariaDB needs `utf8mb4` (emoji). Invio forces `charset=utf8mb4`, strict SQL mode and a UTC
+  session on every connection, and creates all tables as InnoDB / `utf8mb4_unicode_ci`.
+- Set the server's `max_allowed_packet` to at least 32M if you store raw content up to 16 MB.
+- Timestamps are aware UTC in Python (naive datetimes are rejected) and naive UTC in the database.
+- The schema is versioned with Alembic; the migrations ship inside the package.
+
+```bash
+uv run invio db upgrade       # apply migrations; prints "database at revision 0001"
+```
+
+DDL is not transactional on MariaDB: if an upgrade fails midway, earlier steps stay applied and
+may need manual cleanup before retrying. Job names are unique case-insensitively on MariaDB
+(`utf8mb4_unicode_ci`), so `Digest` and `digest` collide; SQLite compares them case-sensitively.
+
+Exit codes: `0` success (also when already up to date), `2` `INVIO_DATABASE_URL` missing or not a
+valid URL, `1` any other failure (unreachable server, migration error, unknown revision). The
+password never appears in output.
+
+Developers can use Alembic directly (reads `INVIO_DATABASE_URL`):
+
+```bash
+uv run alembic downgrade base
+uv run alembic revision --autogenerate -m "describe the change"
+```
+
+Tests marked `db` (`uv run pytest -m db`) run on in-memory SQLite by default. To run them on
+MariaDB, point `INVIO_TEST_DATABASE_URL` at an empty test database (the schema is managed by the
+tests, so never use a database you care about):
+
+```bash
+INVIO_TEST_DATABASE_URL="mysql+pymysql://root@127.0.0.1:3306/invio_test?charset=utf8mb4" \
+  uv run pytest -m db
+```
+
+Run them serially against MariaDB (no `pytest -n`): the migration tests downgrade and re-upgrade
+the shared test database.
+
 ## Layout
 
 ```
 src/invio/
   cli/          Typer app (main.py) and auto-discovered commands/
   config/       settings, job.py (job file models + YAML load/save)
-  domain.py     shared Candidate / ProcessedItem records (stdlib only)
-  db/           SQLAlchemy models and sessions
+  domain.py     shared records, status enums, url_hash (stdlib only)
+  db/           models, engine/session helpers, migrations/ (Alembic env + versions)
   graph/        LangGraph pipelines
   sources/      source adapters
   llm/          LLM providers
   notify/       notifications
   scheduling/   scheduling
-alembic/        database migrations (placeholder)
+alembic.ini     developer entry point for `uv run alembic ...`
 tests/
 ```

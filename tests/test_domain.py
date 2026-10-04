@@ -1,13 +1,22 @@
 """Tests for the dependency-free domain records."""
 
 import dataclasses
+import enum
+import hashlib
 import subprocess
 import sys
 from datetime import UTC, datetime
 
 import pytest
 
-from invio.domain import Candidate, ProcessedItem
+from invio.domain import (
+    Candidate,
+    ItemStatus,
+    NotificationStatus,
+    ProcessedItem,
+    RunStatus,
+    url_hash,
+)
 
 
 def _candidate() -> Candidate:
@@ -72,3 +81,41 @@ def test_import_loads_no_heavy_dependencies() -> None:
     )
 
     subprocess.run([sys.executable, "-c", code], check=True)
+
+
+@pytest.mark.parametrize(
+    ("enum_cls", "values"),
+    [
+        (
+            ItemStatus,
+            [
+                "new",
+                "extracted",
+                "skipped_keyword",
+                "skipped_irrelevant",
+                "relevant",
+                "summarized",
+                "failed",
+            ],
+        ),
+        (RunStatus, ["running", "succeeded", "partial", "failed"]),
+        (NotificationStatus, ["pending", "sent", "failed", "skipped"]),
+    ],
+)
+def test_status_enums_have_exact_values(enum_cls: type[enum.StrEnum], values: list[str]) -> None:
+    assert [m.value for m in enum_cls] == values
+    assert issubclass(enum_cls, enum.StrEnum)
+
+
+def test_status_members_compare_equal_to_strings() -> None:
+    assert ItemStatus.SKIPPED_KEYWORD == "skipped_keyword"
+
+
+def test_url_hash_is_sha256_hex_of_utf8() -> None:
+    url = "https://example.com/ä"
+
+    digest = url_hash(url)
+
+    assert len(digest) == 64
+    assert digest == digest.lower()
+    assert digest == hashlib.sha256(url.encode("utf-8")).hexdigest()
