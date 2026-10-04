@@ -164,6 +164,12 @@ class _Hop:
     body: bytes
 
 
+@dataclass(frozen=True, slots=True)
+class _Validators:
+    etag: str | None
+    last_modified: str | None
+
+
 class SafeHttpClient:
     """HTTP GET client for fetching untrusted URLs; one instance per run.
 
@@ -187,6 +193,7 @@ class SafeHttpClient:
         self._resolver: Resolver = resolver if resolver is not None else SystemResolver()
         self._robots = RobotsCache(self._fetch_robots)
         self._limiter = HostRateLimiter()
+        self._validators: dict[str, _Validators] = {}  # by requested URL, never persisted
         # Redirects are followed by ``_fetch`` so each hop is checked; no proxies from the
         # environment; no idle connections, so a pinned connection is never reused for another
         # host name.
@@ -221,15 +228,17 @@ class SafeHttpClient:
         This is the only place that classifies the outcome and logs failures, so each failed
         fetch is logged exactly once.
         """
+        requested_url = redact(url)
+        sent = self._with_validators(requested_url, headers or {})
         try:
             hop = await self._fetch(
                 url,
-                headers or {},
+                sent,
                 check_robots=True,
                 max_bytes=self._config.max_response_bytes,
                 truncate=False,
             )
-            return self._classify(hop, requested_url=redact(url))
+            return self._classify(hop, requested_url=requested_url, sent=sent)
         except FetchError as error:
             self._log_failure(error)
             raise
@@ -429,10 +438,35 @@ class SafeHttpClient:
                 raise TooLargeError(url=str(url), limit=max_bytes)
         return bytes(body)
 
-    def _classify(self, hop: _Hop, *, requested_url: str) -> FetchResult:
-        """Map a final (non-redirect) hop to a result or an ``http_status`` error."""
+    def _with_validators(self, requested_url: str, headers: Mapping[str, str]) -> Mapping[str, str]:
+        """Add cached validators as conditional headers unless the caller set them."""
+        cached = self._validators.get(requested_url)
+        if cached is None:
+            return headers
+        names = {name.lower() for name in headers}
+        merged = dict(headers)
+        if cached.etag and "if-none-match" not in names:
+            merged["If-None-Match"] = cached.etag
+        if cached.last_modified and "if-modified-since" not in names:
+            merged["If-Modified-Since"] = cached.last_modified
+        return merged
+
+    def _classify(
+        self, hop: _Hop, *, requested_url: str, sent: Mapping[str, str]
+    ) -> FetchResult | NotModified:
+        """Map a final (non-redirect) hop to a result, ``NotModified`` or an error."""
+        if hop.status == 304:
+            lowered = {name.lower(): value for name, value in sent.items()}
+            return NotModified(
+                url=requested_url,
+                etag=lowered.get("if-none-match"),
+                last_modified=lowered.get("if-modified-since"),
+            )
         if not 200 <= hop.status < 300:
             raise FetchError("http_status", url=str(hop.url), status=hop.status)
+        etag, last_modified = hop.headers.get("etag"), hop.headers.get("last-modified")
+        if etag or last_modified:
+            self._validators[requested_url] = _Validators(etag, last_modified)
         return FetchResult(
             url=str(hop.url),
             requested_url=requested_url,

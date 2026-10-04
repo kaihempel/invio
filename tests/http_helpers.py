@@ -44,6 +44,8 @@ class Route:
     delay: float = 0.0  # seconds to wait before answering
     stall: bool = False  # send the headers, then never finish the body
     drip: float = 0.0  # send the body one byte per this many seconds
+    # Answer 304 when If-None-Match equals the route's ETag or If-Modified-Since its Last-Modified.
+    conditional: bool = False
 
 
 @dataclass(frozen=True)
@@ -127,7 +129,7 @@ class LoopbackServer:
         headers = {key.lower(): value for key, value in handler.headers.items()}
         with self._lock:
             self._requests.append(RecordedRequest(handler.path, headers, started))
-        route = self.routes.get(handler.path, Route(status=404))
+        route = self._conditional(self.routes.get(handler.path, Route(status=404)), headers)
         if route.delay:
             self._release.wait(route.delay)
         handler.send_response(route.status)
@@ -145,6 +147,18 @@ class LoopbackServer:
             self._send_body(handler, route)
         except (BrokenPipeError, ConnectionResetError):
             pass  # the client gave up (limit hit, timeout): expected in the limit tests
+
+    @staticmethod
+    def _conditional(route: Route, request_headers: dict[str, str]) -> Route:
+        if not route.conditional:
+            return route
+        lowered = {name.lower(): value for name, value in route.headers.items()}
+        etag, modified = lowered.get("etag"), lowered.get("last-modified")
+        if (etag and request_headers.get("if-none-match") == etag) or (
+            modified and request_headers.get("if-modified-since") == modified
+        ):
+            return Route(status=304, headers=route.headers)
+        return route
 
     def _send_body(self, handler: http.server.BaseHTTPRequestHandler, route: Route) -> None:
         if route.stall:
