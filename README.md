@@ -160,6 +160,29 @@ INVIO_TEST_DATABASE_URL="mysql+pymysql://root@127.0.0.1:3306/invio_test?charset=
 Run them serially against MariaDB (no `pytest -n`): the migration tests downgrade and re-upgrade
 the shared test database.
 
+### Job service
+
+`invio.services.jobs.JobService` manages jobs; use it instead of touching SQLAlchemy directly
+(records and errors never expose SQLAlchemy types).
+
+```python
+from invio.services.jobs import JobService
+
+service = JobService.from_settings()  # needs INVIO_DATABASE_URL
+service.import_yaml("docs/job.example.yaml")  # stored as "job.example"; replace=True to overwrite
+record = service.create("ai-news", {...})  # mapping or JobConfig; JobConfigError if invalid
+service.list(enabled_only=True)  # ordered by name
+service.set_enabled("ai-news", False)  # keeps history, clears next_run_at
+print(service.export_yaml("ai-news"))  # YAML text; pass a path to write a file
+service.delete("ai-news")  # removes the job and its history
+```
+
+Errors: `JobNameError`, `JobExistsError`, `JobNotFoundError`, `JobConfigError` (invalid input) and
+`StoredJobConfigError` (a stored config no longer validates; `list` skips such jobs and logs a
+warning). `next_run_at` is a placeholder (the current time) until scheduling (#6) lands.
+Record repositories for runs, items, digests, notifications and LLM usage live in
+`invio.db.repositories`; they flush but never commit (use `session_scope`).
+
 ## Layout
 
 ```
@@ -167,7 +190,8 @@ src/invio/
   cli/          Typer app (main.py) and auto-discovered commands/
   config/       settings, job.py (job file models + YAML load/save)
   domain.py     shared records, status enums, url_hash (stdlib only)
-  db/           models, engine/session helpers, migrations/ (Alembic env + versions)
+  db/           models, engine/session helpers, repositories.py, migrations/ (Alembic)
+  services/     jobs.py (JobService: job CRUD, YAML import/export)
   graph/        LangGraph pipelines
   sources/      source adapters
   llm/          LLM providers

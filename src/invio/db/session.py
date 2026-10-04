@@ -4,6 +4,8 @@ The database URL usually contains a password. This module never logs it; use :fu
 before showing any text that might echo it.
 """
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any
 from urllib.parse import quote, quote_plus
 
@@ -72,6 +74,20 @@ def create_db_engine(url: str | URL, **kwargs: Any) -> Engine:
 def session_factory(engine: Engine) -> sessionmaker[Session]:
     """Return a session factory with ``expire_on_commit=False``."""
     return sessionmaker(engine, expire_on_commit=False)
+
+
+@contextmanager
+def session_scope(factory: sessionmaker[Session]) -> Iterator[Session]:
+    """Commit on success, roll back on any exception (re-raised), always close."""
+    session = factory()
+    try:
+        yield session
+        session.commit()
+    except BaseException:
+        session.rollback()
+        raise
+    finally:
+        session.close()
 
 
 def redact(text: str, url: str | URL) -> str:

@@ -2,20 +2,25 @@
 
 import logging
 import os
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
-from sqlalchemy import Engine, text
+from sqlalchemy import Engine, select, text
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
 from invio.config.settings import get_settings
 from invio.db import migrate
-from invio.db.models import Base
-from invio.db.session import create_db_engine
+from invio.db.models import Base, Job
+from invio.db.session import create_db_engine, session_factory, session_scope
 from tests.db_helpers import TEST_DATABASE_URL, uses_sqlite
+
+if TYPE_CHECKING:
+    from invio.config.job import ScheduleConfig
+    from invio.services.jobs import JobService
 
 
 @pytest.fixture(autouse=True)
@@ -114,3 +119,62 @@ def db_session(db_engine: Engine, _server_engine: Engine | None) -> Iterator[Ses
         session.close()
         transaction.rollback()
         connection.close()
+
+
+@pytest.fixture
+def clean_jobs(db_engine: Engine) -> Iterator[None]:
+    """Delete every job (and, by cascade, its history) at teardown.
+
+    For tests that commit through ``session_scope``: the MariaDB engine is shared between tests.
+    """
+    yield
+    with session_scope(session_factory(db_engine)) as session:
+        for job in session.scalars(select(Job)).all():
+            session.delete(job)
+
+
+class FakeClock:
+    """A settable clock: call it for ``now``; ``advance`` moves it forward."""
+
+    def __init__(self) -> None:
+        self.now = datetime(2026, 10, 4, 12, 0, tzinfo=UTC)
+
+    def __call__(self) -> datetime:
+        return self.now
+
+    def advance(self, delta: timedelta) -> None:
+        self.now += delta
+
+
+@pytest.fixture
+def fake_clock() -> FakeClock:
+    return FakeClock()
+
+
+@pytest.fixture
+def next_run_calls() -> "list[tuple[ScheduleConfig, datetime]]":
+    return []
+
+
+@pytest.fixture
+def recording_next_run(
+    next_run_calls: "list[tuple[ScheduleConfig, datetime]]",
+) -> "Callable[[ScheduleConfig, datetime], datetime]":
+    def _next_run(schedule: "ScheduleConfig", after: datetime) -> datetime:
+        next_run_calls.append((schedule, after))
+        return after + timedelta(hours=1)
+
+    return _next_run
+
+
+@pytest.fixture
+def job_service(
+    db_engine: Engine,
+    fake_clock: FakeClock,
+    recording_next_run: "Callable[[ScheduleConfig, datetime], datetime]",
+    clean_jobs: None,
+) -> "JobService":
+    """A ``JobService`` on the test engine; jobs are deleted at teardown by ``clean_jobs``."""
+    from invio.services.jobs import JobService
+
+    return JobService(session_factory(db_engine), next_run=recording_next_run, clock=fake_clock)

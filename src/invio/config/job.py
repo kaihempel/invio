@@ -12,7 +12,7 @@ import os
 import re
 import secrets
 import stat
-from collections.abc import Hashable
+from collections.abc import Hashable, Mapping
 from enum import StrEnum
 from pathlib import Path
 from typing import Annotated, Any, Final, Literal, Self, get_args
@@ -57,6 +57,7 @@ __all__ = [
     "dump_yaml",
     "job_json_schema",
     "load_yaml",
+    "validate_job",
     "write_yaml",
 ]
 
@@ -372,6 +373,14 @@ def _format_validation_error(exc: ValidationError) -> list[str]:
     return lines
 
 
+def validate_job(data: Mapping[str, Any]) -> JobConfig:
+    """Validate a job mapping; raises ``JobConfigError`` (``path`` is ``None``) on any problem."""
+    try:
+        return JobConfig.model_validate(dict(data))
+    except ValidationError as exc:
+        raise JobConfigError(None, _format_validation_error(exc)) from exc
+
+
 def _yaml_problem(exc: Exception) -> str:
     """Describe a YAML error on a single line."""
     if isinstance(exc, yaml.MarkedYAMLError) and exc.problem_mark is not None:
@@ -397,9 +406,9 @@ def load_yaml(path: str | os.PathLike[str]) -> JobConfig:
     if not isinstance(data, dict):
         raise JobConfigError(file, [f"job file {file} must contain a mapping at the top level"])
     try:
-        return JobConfig.model_validate(data)
-    except ValidationError as exc:
-        raise JobConfigError(file, _format_validation_error(exc)) from exc
+        return validate_job(data)
+    except JobConfigError as exc:
+        raise JobConfigError(file, exc.errors) from exc
 
 
 class _JobYamlDumper(yaml.SafeDumper):
