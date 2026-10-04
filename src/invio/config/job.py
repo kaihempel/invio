@@ -6,6 +6,7 @@ job file are not preserved when a job is saved; every field is written on save.
 """
 
 import contextlib
+import datetime as dt
 import functools
 import json
 import os
@@ -86,6 +87,11 @@ class Weekday(StrEnum):
     SATURDAY = "saturday"
     SUNDAY = "sunday"
 
+    @property
+    def number(self) -> int:
+        """Day number as returned by ``datetime.date.weekday()`` (Monday is 0)."""
+        return list(Weekday).index(self)
+
 
 class LLMProvider(StrEnum):
     """Supported LLM providers (kept in sync with ``Settings`` by a test)."""
@@ -158,6 +164,12 @@ class ScheduleConfig(_StrictModel):
         if self.day_of_month is not None and not monthly:
             raise ValueError("day_of_month is only allowed when frequency is 'monthly'")
         return self
+
+    @property
+    def local_time(self) -> dt.time:
+        """``time`` as a ``datetime.time`` in the schedule's time zone."""
+        hours, minutes = self.time.split(":")
+        return dt.time(int(hours), int(minutes))
 
 
 class NotificationConfig(_StrictModel):

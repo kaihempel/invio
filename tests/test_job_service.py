@@ -35,6 +35,7 @@ from invio.db.models import Digest, Item, Job, LlmUsage, Notification, Run
 from invio.db.repositories import JobRepository
 from invio.db.session import session_factory, session_scope
 from invio.log import configure_logging
+from invio.scheduling.next_run import compute_next_run
 from invio.services.jobs import (
     JobExistsError,
     JobNameError,
@@ -334,6 +335,30 @@ def test_reenable_recalculates(
     record = job_service.set_enabled("j", True)
     assert record.enabled is True
     assert record.next_run_at == fake_clock.now + timedelta(hours=1)
+
+
+def test_default_next_run_uses_schedule_calculation(
+    db_engine: Engine, job_data: dict[str, Any], fake_clock: FakeClock, clean_jobs: None
+) -> None:
+    service = JobService(session_factory(db_engine), clock=fake_clock)
+
+    created = service.create("j", job_data)
+    schedule = created.config.schedule
+    assert created.next_run_at == compute_next_run(schedule, fake_clock.now)
+    assert created.next_run_at == datetime(2026, 10, 5, 5, 30, tzinfo=UTC)
+    assert created.next_run_at > fake_clock.now
+
+    assert service.set_enabled("j", False).next_run_at is None
+    fake_clock.advance(timedelta(days=3))
+    reenabled = service.set_enabled("j", True)
+    assert reenabled.next_run_at == compute_next_run(schedule, fake_clock.now)
+    assert reenabled.next_run_at is not None
+    assert reenabled.next_run_at > fake_clock.now
+
+    fake_clock.advance(timedelta(days=1))
+    new_data = {**job_data, "schedule": {**job_data["schedule"], "time": "10:00"}}
+    updated = service.update("j", new_data)
+    assert updated.next_run_at == compute_next_run(updated.config.schedule, fake_clock.now)
 
 
 @pytest.mark.parametrize("enabled", [True, False])
@@ -636,14 +661,16 @@ def test_from_settings(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     service._session_factory.kw["bind"].dispose()
 
 
-def test_default_clock_and_next_run_stub(
+def test_default_clock_and_next_run(
     db_engine: Engine, job_data: dict[str, Any], clean_jobs: None
 ) -> None:
     service = JobService(session_factory(db_engine))
     before = datetime.now(UTC)
     record = service.create("j", job_data)
     assert record.next_run_at is not None
-    assert before - timedelta(seconds=1) <= record.next_run_at <= datetime.now(UTC)
+    # A weekly job runs within the next 7 days (+1 day of slack for zone offset and DST).
+    assert job_data["schedule"]["frequency"] == "weekly"
+    assert before < record.next_run_at <= before + timedelta(days=8)
 
 
 # --- QA edge cases ---------------------------------------------------------------------------

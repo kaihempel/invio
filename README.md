@@ -181,7 +181,14 @@ service.delete("ai-news")  # removes the job and its history
 Errors: `JobNameError`, `JobExistsError`, `JobNotFoundError`, `JobConfigError` (invalid input) and
 `StoredJobConfigError` (a stored config no longer validates; `list` skips such jobs and logs a
 warning). Disabling a job with a broken stored config still pauses it, then raises
-`StoredJobConfigError`. `next_run_at` is a placeholder (the current time) until scheduling (#6) lands.
+`StoredJobConfigError`. `next_run_at` is computed by `invio.scheduling.next_run.compute_next_run`:
+
+- the configured local time in the job's time zone, stored as UTC and always strictly in the future
+- monthly day 29-31 falls back to the last day of shorter months
+- a time skipped by a DST jump runs shifted by the gap (02:30 becomes 03:30, or the next local
+  day if the gap ends at midnight); a repeated time runs at its first occurrence
+- missed runs are not replayed
+
 Record repositories for runs, items, digests, notifications and LLM usage live in
 `invio.db.repositories`; they flush but never commit (use `session_scope`).
 
@@ -198,7 +205,7 @@ src/invio/
   sources/      source adapters
   llm/          LLM providers
   notify/       notifications
-  scheduling/   scheduling
+  scheduling/   next-run calculation (next_run.py)
 alembic.ini     developer entry point for `uv run alembic ...`
 tests/
 ```
