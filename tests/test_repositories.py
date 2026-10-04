@@ -4,7 +4,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
-from sqlalchemy import Engine
+from sqlalchemy import Engine, event
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -128,6 +128,53 @@ def test_run_list_for_job_newest_first(db_session: Session) -> None:
     repo.start(other.id, started_at=t + timedelta(days=5))
     assert repo.list_for_job(job.id) == [tie2, tie1, old]
     assert repo.list_for_job(job.id, limit=1) == [tie2]
+
+
+def test_latest_status_by_job_newest_run_per_job(db_session: Session) -> None:
+    repo = RunRepository(db_session)
+    job, other = make_job(db_session, "a"), make_job(db_session, "b")
+    make_job(db_session, "never")
+    t = datetime(2026, 1, 1, tzinfo=UTC)
+    old = repo.start(job.id, started_at=t)
+    repo.finish(old, RunStatus.FAILED)
+    tie1 = repo.start(job.id, started_at=t + timedelta(days=1))
+    repo.finish(tie1, RunStatus.FAILED)
+    tie2 = repo.start(job.id, started_at=t + timedelta(days=1))
+    repo.finish(tie2, RunStatus.PARTIAL)
+    only = repo.start(other.id, started_at=t - timedelta(days=9))
+    repo.finish(only, RunStatus.SUCCEEDED)
+
+    assert repo.latest_status_by_job() == {
+        job.id: RunStatus.PARTIAL,
+        other.id: RunStatus.SUCCEEDED,
+    }
+
+
+def test_latest_status_by_job_empty(db_session: Session) -> None:
+    make_job(db_session, "a")
+
+    assert RunRepository(db_session).latest_status_by_job() == {}
+
+
+def test_latest_status_by_job_is_one_select(db_session: Session) -> None:
+    repo = RunRepository(db_session)
+    for name in ("a", "b", "c"):
+        repo.start(make_job(db_session, name).id)
+    statements: list[str] = []
+
+    def record(conn: object, cursor: object, statement: str, *args: object) -> None:
+        statements.append(statement)
+
+    engine = db_session.get_bind()
+    event.listen(engine, "before_cursor_execute", record)
+    try:
+        result = repo.latest_status_by_job()
+    finally:
+        event.remove(engine, "before_cursor_execute", record)
+
+    assert len(result) == 3
+    assert len(statements) == 1
+    assert statements[0].lstrip().upper().startswith("SELECT")
 
 
 # --- ItemRepository ------------------------------------------------------------------------

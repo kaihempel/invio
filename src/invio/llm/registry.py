@@ -69,6 +69,10 @@ class ModelRegistry:
         """Return all registered model ids."""
         return frozenset(self._models)
 
+    def models_for(self, provider: str) -> list[str]:
+        """Return the sorted ids registered for ``provider`` (empty if it has none)."""
+        return sorted(m.model_id for m in self._models.values() if m.provider == provider)
+
     def cost(self, model_id: str, usage: Usage) -> Decimal | None:
         """Return the USD cost of ``usage`` (6 decimals) or ``None`` for an unknown model."""
         info = self._models.get(model_id)

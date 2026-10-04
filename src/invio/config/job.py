@@ -36,6 +36,7 @@ from pydantic import (
 
 __all__ = [
     "SUPPORTED_SCHEMA_VERSION",
+    "TIME_PATTERN",
     "Frequency",
     "JobConfig",
     "JobConfigError",
@@ -57,12 +58,16 @@ __all__ = [
     "YoutubePlaylistSource",
     "dump_yaml",
     "job_json_schema",
+    "known_timezones",
     "load_yaml",
+    "loads_yaml",
     "validate_job",
     "write_yaml",
 ]
 
 SUPPORTED_SCHEMA_VERSION: Final = 1
+TIME_PATTERN: Final = r"^([01][0-9]|2[0-3]):[0-5][0-9]$"
+"""Pattern of ``schedule.time`` (``HH:MM``); [0-9] on purpose, see ``ScheduleConfig``."""
 
 
 class Frequency(StrEnum):
@@ -123,7 +128,7 @@ class JobConfigError(Exception):
 
 
 @functools.cache
-def _known_timezones() -> frozenset[str]:
+def known_timezones() -> frozenset[str]:
     return frozenset(available_timezones())
 
 
@@ -132,7 +137,7 @@ class ScheduleConfig(_StrictModel):
 
     frequency: Frequency
     # [0-9], not \d: pydantic-core's regex treats \d as any Unicode digit (e.g. "0\u0663:30").
-    time: str = Field(pattern=r"^([01][0-9]|2[0-3]):[0-5][0-9]$")
+    time: str = Field(pattern=TIME_PATTERN)
     weekday: Weekday | None = None
     day_of_month: StrictInt | None = Field(default=None, ge=1, le=31)
     timezone: str
@@ -147,7 +152,7 @@ class ScheduleConfig(_StrictModel):
     def _known_timezone(cls, value: str) -> str:
         # Exact IANA names only: ``ZoneInfo`` alone would accept ``europe/berlin`` on
         # case-insensitive filesystems (macOS) but not on Linux.
-        if value not in _known_timezones():
+        if value not in known_timezones():
             raise ValueError(f"unknown timezone {value!r}")
         return value
 
@@ -402,6 +407,26 @@ def _yaml_problem(exc: Exception) -> str:
     return lines[0] if lines else type(exc).__name__
 
 
+def loads_yaml(text: str, *, source: Path | None = None) -> JobConfig:
+    """Parse and validate job YAML text; raises ``JobConfigError(source, [...])`` on any problem.
+
+    Same loader and messages as ``load_yaml``; ``source`` only names the file in the messages.
+    """
+    text = text.removeprefix("\ufeff")
+    where = f"job file {source}" if source is not None else "job file"
+    try:
+        data: object = yaml.load(text, Loader=JobYamlLoader)
+    except (yaml.YAMLError, ValueError) as exc:
+        prefix = f"invalid YAML in {where}" if source is not None else "invalid YAML"
+        raise JobConfigError(source, [f"{prefix}: {_yaml_problem(exc)}"]) from exc
+    if not isinstance(data, dict):
+        raise JobConfigError(source, [f"{where} must contain a mapping at the top level"])
+    try:
+        return validate_job(data)
+    except JobConfigError as exc:
+        raise JobConfigError(source, exc.errors) from exc
+
+
 def load_yaml(path: str | os.PathLike[str]) -> JobConfig:
     """Load and validate a job file; raises ``JobConfigError`` on any problem."""
     file = Path(path)
@@ -409,18 +434,7 @@ def load_yaml(path: str | os.PathLike[str]) -> JobConfig:
         text = file.read_text(encoding="utf-8-sig")
     except (OSError, UnicodeDecodeError) as exc:
         raise JobConfigError(file, [f"cannot read job file {file}: {exc}"]) from exc
-    try:
-        data: object = yaml.load(text, Loader=JobYamlLoader)
-    except (yaml.YAMLError, ValueError) as exc:
-        raise JobConfigError(
-            file, [f"invalid YAML in job file {file}: {_yaml_problem(exc)}"]
-        ) from exc
-    if not isinstance(data, dict):
-        raise JobConfigError(file, [f"job file {file} must contain a mapping at the top level"])
-    try:
-        return validate_job(data)
-    except JobConfigError as exc:
-        raise JobConfigError(file, exc.errors) from exc
+    return loads_yaml(text, source=file)
 
 
 class _JobYamlDumper(yaml.SafeDumper):
@@ -452,14 +466,15 @@ def dump_yaml(config: JobConfig) -> str:
 
 
 def _create_temp(target: Path) -> tuple[int, Path]:
-    """Create an exclusive temp file next to ``target`` with mode ``0o666`` minus umask.
+    """Create an exclusive temp file next to ``target`` with mode ``0o600``.
 
-    The kernel applies the umask on creation, so the process-wide umask is never touched.
+    Job files hold recipient addresses (and maybe URL credentials), so a new file is private.
+    The mode is passed to ``os.open``, so the process-wide umask is never touched.
     """
     while True:
         tmp = target.with_name(f".{target.name}.{secrets.token_hex(8)}.tmp")
         try:
-            return os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666), tmp
+            return os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), tmp
         except FileExistsError:
             continue
 
@@ -481,7 +496,7 @@ def write_yaml(config: JobConfig, path: str | os.PathLike[str]) -> str:
     Raises ``OSError``.
 
     A symlinked ``path`` is followed, so the link stays and its target is updated. An existing
-    file keeps its mode; a new file gets ``0o666`` minus umask.
+    file keeps its mode; a new file is private (``0o600``).
     """
     target = Path(os.path.realpath(path))
     text = dump_yaml(config)
@@ -491,7 +506,7 @@ def write_yaml(config: JobConfig, path: str | os.PathLike[str]) -> str:
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
-        with contextlib.suppress(FileNotFoundError):  # new file: keep the umask-based mode
+        with contextlib.suppress(FileNotFoundError):  # new file: keep the private mode
             os.chmod(tmp, stat.S_IMODE(target.stat().st_mode))
         os.replace(tmp, target)
     except BaseException:
