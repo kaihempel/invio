@@ -95,10 +95,28 @@ class Settings(BaseSettings):
     # Transcription
     whisper_model_size: WhisperModelSize = "small"
 
+    # HTTP client for sources
+    http_contact: str = Field(default="admin@example.invalid", min_length=1)
+    http_max_response_bytes: int = Field(default=10_485_760, gt=0)
+    http_max_redirects: int = Field(default=5, ge=0)
+    http_connect_timeout_seconds: float = Field(default=10.0, gt=0, allow_inf_nan=False)
+    http_read_timeout_seconds: float = Field(default=30.0, gt=0, allow_inf_nan=False)
+    http_total_timeout_seconds: float = Field(default=60.0, gt=0, allow_inf_nan=False)
+    http_host_interval_seconds: float = Field(default=1.0, gt=0, allow_inf_nan=False)
+    http_respect_robots: bool = True
+
     @field_validator("log_level")
     @classmethod
     def _validate_log_level(cls, value: str) -> str:
         return parse_log_level(value)
+
+    @field_validator("http_contact")
+    @classmethod
+    def _validate_http_contact(cls, value: str) -> str:
+        # The contact ends up in the User-Agent header; a line break would allow header injection.
+        if "\r" in value or "\n" in value:
+            raise ValueError("must not contain line breaks")
+        return value
 
     def require_secret(self, name: SecretName) -> str:
         """Return the plain value of secret ``name`` or raise :class:`MissingSettingError`."""

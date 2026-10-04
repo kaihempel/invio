@@ -191,3 +191,39 @@ def test_unknown_env_keys_reports_typos_from_env_and_dotenv(
     monkeypatch.setenv("INVIO_ENV_FILE", str(tmp_path / ".env"))
 
     assert unknown_env_keys() == ["INVIO_OPENAI_APIKEY", "invio_smpt_port"]
+
+
+def test_http_client_defaults() -> None:
+    settings = Settings()
+
+    assert settings.http_contact == "admin@example.invalid"
+    assert settings.http_max_response_bytes == 10_485_760
+    assert settings.http_max_redirects == 5
+    assert settings.http_connect_timeout_seconds == 10.0
+    assert settings.http_read_timeout_seconds == 30.0
+    assert settings.http_total_timeout_seconds == 60.0
+    assert settings.http_host_interval_seconds == 1.0
+    assert settings.http_respect_robots is True
+
+
+@pytest.mark.parametrize(
+    ("name", "raw"),
+    [
+        ("HTTP_HOST_INTERVAL_SECONDS", "0"),
+        ("HTTP_MAX_RESPONSE_BYTES", "0"),
+        ("HTTP_MAX_REDIRECTS", "-1"),
+        ("HTTP_READ_TIMEOUT_SECONDS", "nan"),
+        ("HTTP_CONNECT_TIMEOUT_SECONDS", "inf"),
+        ("HTTP_TOTAL_TIMEOUT_SECONDS", "-5"),
+        ("HTTP_CONTACT", "ops@example.org\nX-Injected: 1"),
+        ("HTTP_CONTACT", "a\rb"),
+        ("HTTP_CONTACT", ""),
+    ],
+)
+def test_invalid_http_settings_are_rejected(
+    monkeypatch: pytest.MonkeyPatch, name: str, raw: str
+) -> None:
+    monkeypatch.setenv(f"INVIO_{name}", raw)
+
+    with pytest.raises(ValidationError, match=name.lower()):
+        Settings()

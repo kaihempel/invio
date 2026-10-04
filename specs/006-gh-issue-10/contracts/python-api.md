@@ -17,21 +17,21 @@ async with SafeHttpClient(HttpClientConfig.from_settings()) as client:
 class SafeHttpClient:
     def __init__(
         self,
-        config: HttpClientConfig | None = None,     # None -> HttpClientConfig.from_settings()
+        config: HttpClientConfig | None = None,  # None -> HttpClientConfig.from_settings()
         *,
         allow_networks: Iterable[IPv4Network | IPv6Network] = (),  # TEST ONLY (FR-010)
-        resolver: Resolver | None = None,            # TEST ONLY; default: loop.getaddrinfo
+        resolver: Resolver | None = None,  # TEST ONLY; default: loop.getaddrinfo
         transport: httpx.AsyncBaseTransport | None = None,  # TEST ONLY (MockTransport)
     ) -> None: ...
     async def __aenter__(self) -> Self: ...
-    async def __aexit__(self, *exc: object) -> None: ...   # closes the pool
+    async def __aexit__(self, *exc: object) -> None: ...  # closes the pool
     async def aclose(self) -> None: ...
 
     async def get(
         self,
         url: str,
         *,
-        headers: Mapping[str, str] | None = None,    # extra request headers
+        headers: Mapping[str, str] | None = None,  # extra request headers
     ) -> FetchResult | NotModified: ...
 ```
 
