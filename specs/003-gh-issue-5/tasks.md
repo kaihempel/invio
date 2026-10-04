@@ -195,6 +195,16 @@ repository; check ordering, filters and item idempotency.
 
 ---
 
+## Phase 8: Review follow-ups (PR #43)
+
+- [X] T037 SQLite: `create_db_engine` disables pysqlite's implicit transaction handling and emits `BEGIN` itself, so the savepoint in `ItemRepository.add` can no longer commit on its own when it is the first write; regression test `test_savepoint_as_first_write_rolls_back`
+- [X] T038 MariaDB: the engine runs at `READ COMMITTED`, so `ItemRepository.add` sees a concurrent writer's committed row after the duplicate-key error (under REPEATABLE READ the plain re-query missed it, and with `innodb_snapshot_isolation` a locking read fails with error 1020); two-session test `test_item_add_concurrent_writer_returns_winner` (server only)
+- [X] T039 Migration `0002`: binary collation for `jobs.name` on MariaDB, so names compare exactly as on SQLite; `test_names_compare_exactly`
+- [X] T040 Contract: document the commit-then-raise behaviour of disabling a job with a broken stored config, and test that repeating it is a silent no-op
+- [X] T041 Cleanups: fixed log message `"job changed"`, `_next_run_due`, no re-validation of a just-stored config, `export_yaml` serialises once (`write_yaml` returns the text), `_all` helper in repositories, `make_candidate` test helper, de-duplicated log tests, TODO(#6) on the `next_run` stub
+
+---
+
 ## Dependencies & Execution Order
 
 ### Phase Dependencies

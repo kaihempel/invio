@@ -324,6 +324,14 @@ def test_write_yaml_leaves_no_temp_files(tmp_path: Path) -> None:
     assert [p.name for p in tmp_path.iterdir()] == ["out.yaml"]
 
 
+def test_write_yaml_returns_written_text(tmp_path: Path) -> None:
+    out = tmp_path / "out.yaml"
+
+    text = write_yaml(load_yaml(EXAMPLE), out)
+
+    assert text == out.read_text(encoding="utf-8") == dump_yaml(load_yaml(EXAMPLE))
+
+
 def test_write_yaml_missing_directory_raises_oserror(tmp_path: Path) -> None:
     with pytest.raises(OSError):
         write_yaml(load_yaml(EXAMPLE), tmp_path / "nope" / "out.yaml")

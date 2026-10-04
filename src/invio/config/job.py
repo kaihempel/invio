@@ -463,8 +463,10 @@ def _fsync_directory(directory: Path) -> None:
         os.close(fd)
 
 
-def write_yaml(config: JobConfig, path: str | os.PathLike[str]) -> None:
-    """Write a job as UTF-8 YAML atomically (temp file + replace); raises ``OSError``.
+def write_yaml(config: JobConfig, path: str | os.PathLike[str]) -> str:
+    """Write a job as UTF-8 YAML atomically (temp file + replace) and return the text.
+
+    Raises ``OSError``.
 
     A symlinked ``path`` is followed, so the link stays and its target is updated. An existing
     file keeps its mode; a new file gets ``0o666`` minus umask.
@@ -484,6 +486,7 @@ def write_yaml(config: JobConfig, path: str | os.PathLike[str]) -> None:
         tmp.unlink(missing_ok=True)
         raise
     _fsync_directory(target.parent)
+    return text
 
 
 def job_json_schema() -> dict[str, Any]:

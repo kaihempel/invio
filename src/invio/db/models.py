@@ -82,7 +82,13 @@ class Job(Base):
     )
 
     id: Mapped[int] = mapped_column(PK, primary_key=True, autoincrement=True)
-    name: Mapped[str] = mapped_column(String(200), unique=True)
+    # Binary collation: names compare exactly (case and accents), as on SQLite.
+    name: Mapped[str] = mapped_column(
+        String(200).with_variant(
+            mysql.VARCHAR(200, charset="utf8mb4", collation="utf8mb4_bin"), "mysql", "mariadb"
+        ),
+        unique=True,
+    )
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default=text("1"))
     config: Mapped[dict[str, Any] | None] = mapped_column(JSON(none_as_null=True), default=None)
     next_run_at: Mapped[datetime | None] = mapped_column(UTCDateTime, default=None)

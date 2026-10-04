@@ -61,7 +61,7 @@ class JobService:
     def update(self, name: str, config: JobConfig | Mapping[str, Any]) -> JobRecord
         # full replacement; JobNotFoundError, JobConfigError
     def set_enabled(self, name: str, enabled: bool) -> JobRecord
-        # JobNotFoundError; no-op if already in that state
+        # JobNotFoundError; no-op if already in that state; StoredJobConfigError (see below)
     def delete(self, name: str) -> None
         # JobNotFoundError; history removed by cascade
     def export_yaml(self, name: str, path: str | os.PathLike[str] | None = None) -> str
@@ -74,7 +74,12 @@ class JobService:
 
 Guarantees:
 
-- Each method runs in exactly one `session_scope`; on any exception nothing is stored.
+- Each method runs in exactly one `session_scope`; on any exception nothing is stored, with one
+  deliberate exception: `set_enabled(name, False)` on a job whose stored config no longer
+  validates commits the disable (`enabled=False`, `next_run_at=None`), logs `job.disabled`, and
+  then raises `StoredJobConfigError`, because pausing a broken job must never be blocked but no
+  `JobRecord` can be built. Repeating the call is a no-op (no write, no log) that raises again.
+- Job names compare exactly (case and accents) on every backend.
 - No SQLAlchemy type or exception crosses the service boundary (`IntegrityError` on create →
   `JobExistsError`). `MissingSettingError` and `OSError` are the only non-service errors besides
   `JobConfigError`.
@@ -114,6 +119,8 @@ class RunRepository:
 class ItemRepository:
     def add(self, job_id: int, candidate: Candidate, *, run_id: int | None = None
             ) -> tuple[Item, bool]                                     # (item, created)
+        # a concurrent writer's row is returned with created=False; relies on the engine
+        # rules of create_db_engine (explicit BEGIN on SQLite, READ COMMITTED on MariaDB)
     def get(self, item_id: int) -> Item | None
     def seen(self, job_id: int, url_hash: str) -> bool
     def list_for_job(self, job_id: int, *, status: ItemStatus | None = None) -> list[Item]

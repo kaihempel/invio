@@ -52,7 +52,8 @@ MAX_NAME_LENGTH: Final = 200
 
 
 def _next_run_stub(schedule: ScheduleConfig, after: datetime) -> datetime:
-    # Placeholder: #6's ``invio.scheduling.next_run.compute_next_run`` replaces it.
+    # TODO(#6): replace with ``invio.scheduling.next_run.compute_next_run``. Until then every
+    # created or re-enabled job is due immediately; the scheduler (#23) must not ship first.
     return after
 
 
@@ -128,11 +129,13 @@ def _validate(config: JobConfig | Mapping[str, Any]) -> JobConfig:
     return validate_job(data)
 
 
-def _record(job: Job) -> JobRecord:
-    try:
-        config = validate_job(job.config or {})
-    except JobConfigError as exc:
-        raise StoredJobConfigError(job.name, exc.errors) from exc
+def _record(job: Job, config: JobConfig | None = None) -> JobRecord:
+    """Build the record; pass ``config`` when it was just validated and stored."""
+    if config is None:
+        try:
+            config = validate_job(job.config or {})
+        except JobConfigError as exc:
+            raise StoredJobConfigError(job.name, exc.errors) from exc
     return JobRecord(
         name=job.name,
         enabled=job.enabled,
@@ -152,7 +155,7 @@ def _require(repo: JobRepository, name: str) -> Job:
 
 def _log_change(event: str, name: str) -> None:
     # Never log configuration contents; ``job_name`` because ``job`` is reserved by the formatter.
-    logger.info(f"job {event.removeprefix('job.')}", extra={"event": event, "job_name": name})
+    logger.info("job changed", extra={"event": event, "job_name": name})
 
 
 class JobService:
@@ -168,6 +171,9 @@ class JobService:
         self._session_factory = session_factory
         self._next_run = next_run
         self._clock = clock
+
+    def _next_run_due(self, cfg: JobConfig) -> datetime:
+        return self._next_run(cfg.schedule, self._clock())
 
     @classmethod
     def from_settings(cls, settings: Settings | None = None) -> "JobService":
@@ -185,7 +191,7 @@ class JobService:
             name=name,
             enabled=True,
             config=cfg.model_dump(mode="json"),
-            next_run_at=self._next_run(cfg.schedule, self._clock()),
+            next_run_at=self._next_run_due(cfg),
         )
         try:
             JobRepository(session).add(job)
@@ -197,7 +203,7 @@ class JobService:
     def _apply_update(self, session: Session, job: Job, cfg: JobConfig) -> None:
         job.config = cfg.model_dump(mode="json")
         if job.enabled:
-            job.next_run_at = self._next_run(cfg.schedule, self._clock())
+            job.next_run_at = self._next_run_due(cfg)
         session.flush()
         session.refresh(job)  # pick up ``updated_at`` set by ``onupdate``
 
@@ -210,7 +216,7 @@ class JobService:
         with session_scope(self._session_factory) as session:
             if JobRepository(session).get_by_name(name) is not None:
                 raise JobExistsError(name)
-            record = _record(self._insert(session, name, cfg))
+            record = _record(self._insert(session, name, cfg), cfg)
         _log_change("job.created", name)
         return record
 
@@ -243,15 +249,16 @@ class JobService:
         with session_scope(self._session_factory) as session:
             job = _require(JobRepository(session), name)
             self._apply_update(session, job, cfg)
-            record = _record(job)
+            record = _record(job, cfg)
         _log_change("job.updated", name)
         return record
 
     def set_enabled(self, name: str, enabled: bool) -> JobRecord:
         """Enable or disable a job; a no-op (no write, no log) when already in that state.
 
-        Disabling a job whose stored configuration no longer validates is persisted, then
-        raises ``StoredJobConfigError`` because no record can be built for it.
+        A job whose stored configuration no longer validates cannot be enabled, but it can
+        always be paused: the disable is committed and logged, then ``StoredJobConfigError`` is
+        raised because no record can be built. Repeating the call is a no-op that raises again.
         """
         with session_scope(self._session_factory) as session:
             job = _require(JobRepository(session), name)
@@ -260,7 +267,7 @@ class JobService:
             if enabled:
                 cfg = _record(job).config  # refuse to enable an invalid stored config
                 job.enabled = True
-                job.next_run_at = self._next_run(cfg.schedule, self._clock())
+                job.next_run_at = self._next_run_due(cfg)
             else:
                 job.enabled = False
                 job.next_run_at = None
@@ -280,11 +287,8 @@ class JobService:
 
     def export_yaml(self, name: str, path: str | os.PathLike[str] | None = None) -> str:
         """Return the job as YAML text; also write it atomically to ``path`` when given."""
-        record = self.get_by_name(name)
-        text = dump_yaml(record.config)
-        if path is not None:
-            write_yaml(record.config, path)
-        return text
+        config = self.get_by_name(name).config
+        return dump_yaml(config) if path is None else write_yaml(config, path)
 
     def import_yaml(
         self,
@@ -308,6 +312,6 @@ class JobService:
                 self._apply_update(session, job, cfg)
             else:
                 raise JobExistsError(job_name)
-            record = _record(job)
+            record = _record(job, cfg)
         _log_change("job.imported", job_name)
         return record

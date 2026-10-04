@@ -71,6 +71,10 @@ def store(db_engine: Engine, clean_jobs: None) -> Callable[[], Any]:
     return _scope
 
 
+def _service_records(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    return [r for r in caplog.records if r.name == "invio.services.jobs"]
+
+
 def _stored_job(store: Callable[[], Any], name: str) -> dict[str, Any]:
     with store() as s:
         job = s.scalars(select(Job).where(Job.name == name)).one()
@@ -184,6 +188,16 @@ def test_list_order_and_filter(
         JobRepository(s).get_by_name("c").enabled = False  # type: ignore[union-attr]
     assert [r.name for r in job_service.list()] == ["a", "b", "c"]
     assert [r.name for r in job_service.list(enabled_only=True)] == ["a", "b"]
+
+
+def test_names_compare_exactly(job_service: JobService, job_data: dict[str, Any]) -> None:
+    # MariaDB's default collation would treat these as equal; jobs.name is binary (0002).
+    for name in ("ai-news", "AI-News", "café", "cafe"):
+        job_service.create(name, job_data)
+    assert [r.name for r in job_service.list()] == ["AI-News", "ai-news", "cafe", "café"]
+    assert job_service.get_by_name("AI-News").name == "AI-News"
+    with pytest.raises(JobNotFoundError):
+        job_service.get_by_name("AI-NEWS")
 
 
 def test_get_missing(job_service: JobService) -> None:
@@ -539,10 +553,6 @@ def test_change_logging(
     path = tmp_path / "imp.yaml"
     write_yaml(JobConfig.model_validate(job_data), path)
     caplog.set_level(logging.INFO, logger="invio.services.jobs")
-
-    def records() -> list[logging.LogRecord]:
-        return [r for r in caplog.records if r.name == "invio.services.jobs"]
-
     steps: list[tuple[str, str, Callable[[], Any]]] = [
         ("job.created", "j", lambda: job_service.create("j", job_data)),
         ("job.updated", "j", lambda: job_service.update("j", job_data)),
@@ -554,25 +564,10 @@ def test_change_logging(
     for event, name, action in steps:
         caplog.clear()
         action()
-        assert len(records()) == 1, event
-        record = records()[0]
+        [record] = _service_records(caplog)
         assert record.levelno == logging.INFO
-        assert record.__dict__["event"] == event
-        assert record.__dict__["job_name"] == name
-        for value in (record.getMessage(), *record.__dict__.values()):
-            assert "research@example.com" not in str(value)
-            assert "example.com/feed.xml" not in str(value)
-
-    caplog.clear()
-    job_service.create("dup", job_data)
-    caplog.clear()
-    with pytest.raises(JobExistsError):
-        job_service.create("dup", job_data)
-    with pytest.raises(JobConfigError):
-        job_service.create("other", {**job_data, "sources": []})
-    with pytest.raises(JobNotFoundError):
-        job_service.delete("nope")
-    assert records() == []
+        assert record.getMessage() == "job changed"
+        assert (record.__dict__["event"], record.__dict__["job_name"]) == (event, name)
 
     configure_logging("INFO")
     capsys.readouterr()
@@ -652,10 +647,6 @@ def test_default_clock_and_next_run_stub(
 
 
 # --- QA edge cases ---------------------------------------------------------------------------
-
-
-def _service_records(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
-    return [r for r in caplog.records if r.name == "invio.services.jobs"]
 
 
 def test_create_race_leaves_existing_job_unchanged(
@@ -748,14 +739,23 @@ def test_export_broken_stored_config_raises_and_writes_nothing(
 
 
 def test_disable_broken_stored_config_is_persisted(
-    job_service: JobService, store: Callable[[], Any]
+    job_service: JobService, store: Callable[[], Any], caplog: pytest.LogCaptureFixture
 ) -> None:
     _add_broken(store, enabled=True)
+    caplog.set_level(logging.INFO, logger="invio.services.jobs")
     with pytest.raises(StoredJobConfigError):
         job_service.set_enabled("broken", False)
     stored = _stored_job(store, "broken")
     assert stored["enabled"] is False
     assert stored["next_run_at"] is None
+    [record] = _service_records(caplog)  # the disable took effect, so it is logged
+    assert record.__dict__["event"] == "job.disabled"
+
+    caplog.clear()
+    with pytest.raises(StoredJobConfigError):
+        job_service.set_enabled("broken", False)  # already disabled: no write, no log
+    assert _stored_job(store, "broken") == stored
+    assert _service_records(caplog) == []
 
 
 @pytest.mark.parametrize(
@@ -910,6 +910,9 @@ def test_failed_operations_emit_no_change_line(
         lambda: job_service.import_yaml(path, " bad "),
         lambda: job_service.export_yaml("missing"),
         lambda: job_service.create("", job_data),
+        lambda: job_service.create("j", job_data),
+        lambda: job_service.create("other", {**job_data, "sources": []}),
+        lambda: job_service.delete("missing"),
     ]
     for call in failing:
         with pytest.raises((JobConfigError, JobNotFoundError, JobExistsError, JobNameError)):

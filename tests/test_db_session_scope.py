@@ -1,12 +1,14 @@
 """Tests for the ``session_scope`` unit of work."""
 
 import pytest
-from sqlalchemy import Engine, select
+from sqlalchemy import Engine, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from invio.db.models import Job
+from invio.db.models import Item, Job
+from invio.db.repositories import ItemRepository, JobRepository
 from invio.db.session import session_factory, session_scope
+from tests.db_helpers import make_candidate
 
 pytestmark = pytest.mark.db
 
@@ -94,3 +96,18 @@ def test_base_exception_rolls_back(db_engine: Engine) -> None:
         raise KeyboardInterrupt
     assert session.in_transaction() is False
     assert _names(db_engine) == []
+
+
+@pytest.mark.usefixtures("clean_jobs")
+def test_savepoint_as_first_write_rolls_back(db_engine: Engine) -> None:
+    # On SQLite a SAVEPOINT outside a transaction would become the transaction itself and its
+    # RELEASE would commit; the engine must have begun a real transaction by then.
+    factory = session_factory(db_engine)
+    with session_scope(factory) as session:
+        job_id = JobRepository(session).add(Job(name="a", config={})).id
+    with pytest.raises(RuntimeError, match="boom"), session_scope(factory) as session:
+        _, created = ItemRepository(session).add(job_id, make_candidate())
+        assert created is True
+        raise RuntimeError("boom")
+    with Session(db_engine) as session:
+        assert session.scalar(select(func.count()).select_from(Item)) == 0

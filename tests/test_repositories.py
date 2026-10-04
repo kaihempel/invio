@@ -2,9 +2,9 @@
 
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import Any
 
 import pytest
+from sqlalchemy import Engine
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -18,8 +18,9 @@ from invio.db.repositories import (
     UsageRepository,
     UsageTotals,
 )
-from invio.domain import Candidate, ItemStatus, NotificationStatus, RunStatus, url_hash
-from tests.db_helpers import make_item, make_job, make_run
+from invio.db.session import session_factory, session_scope
+from invio.domain import ItemStatus, NotificationStatus, RunStatus, url_hash
+from tests.db_helpers import make_candidate, make_item, make_job, make_run, uses_sqlite
 
 pytestmark = pytest.mark.db
 
@@ -132,24 +133,10 @@ def test_run_list_for_job_newest_first(db_session: Session) -> None:
 # --- ItemRepository ------------------------------------------------------------------------
 
 
-def _candidate(url: str = "https://example.com/a", **kw: Any) -> Candidate:
-    values: dict[str, Any] = {
-        "url": url,
-        "url_hash": url_hash(url),
-        "title": "Title",
-        "published_at": datetime(2026, 1, 1, tzinfo=UTC),
-        "type": "article",
-        "teaser": "teaser",
-        "content_hash": "c" * 64,
-    }
-    values.update(kw)
-    return Candidate(**values)
-
-
 def test_item_add_creates_with_copied_fields(db_session: Session) -> None:
     job = make_job(db_session)
     run = make_run(db_session, job)
-    cand = _candidate()
+    cand = make_candidate()
     item, created = ItemRepository(db_session).add(job.id, cand, run_id=run.id)
     assert created is True
     assert item.status == ItemStatus.NEW
@@ -171,8 +158,8 @@ def test_item_add_creates_with_copied_fields(db_session: Session) -> None:
 def test_item_add_is_idempotent(db_session: Session) -> None:
     job = make_job(db_session)
     repo = ItemRepository(db_session)
-    first, created1 = repo.add(job.id, _candidate())
-    second, created2 = repo.add(job.id, _candidate())
+    first, created1 = repo.add(job.id, make_candidate())
+    second, created2 = repo.add(job.id, make_candidate())
     assert (created1, created2) == (True, False)
     assert second.id == first.id
     assert db_session.query(Item).count() == 1
@@ -181,23 +168,23 @@ def test_item_add_is_idempotent(db_session: Session) -> None:
 def test_item_add_same_url_other_job(db_session: Session) -> None:
     a, b = make_job(db_session, "a"), make_job(db_session, "b")
     repo = ItemRepository(db_session)
-    repo.add(a.id, _candidate())
-    _, created = repo.add(b.id, _candidate())
+    repo.add(a.id, make_candidate())
+    _, created = repo.add(b.id, make_candidate())
     assert created is True
 
 
 def test_item_add_reraises_non_duplicate_integrity_error(db_session: Session) -> None:
     make_job(db_session)
     with pytest.raises(IntegrityError):
-        ItemRepository(db_session).add(99999, _candidate())
+        ItemRepository(db_session).add(99999, make_candidate())
     db_session.rollback()
 
 
 def test_item_seen_get_and_list(db_session: Session) -> None:
     job = make_job(db_session)
     repo = ItemRepository(db_session)
-    one, _ = repo.add(job.id, _candidate("https://example.com/1"))
-    two, _ = repo.add(job.id, _candidate("https://example.com/2"))
+    one, _ = repo.add(job.id, make_candidate("https://example.com/1"))
+    two, _ = repo.add(job.id, make_candidate("https://example.com/2"))
     two.status = ItemStatus.FAILED
     db_session.flush()
     assert repo.seen(job.id, url_hash("https://example.com/1")) is True
@@ -316,30 +303,56 @@ def test_item_add_race_creates_no_duplicate_and_keeps_winner(
     winner_run = make_run(db_session, job)
     loser_run = make_run(db_session, job)
     existing = make_item(db_session, job, run_id=winner_run.id, title="winner")
-    # Patching the private pre-check is the only deterministic way to reach the
-    # unique-constraint branch: it simulates another writer committing right after the check.
-    monkeypatch.setattr(ItemRepository, "_find", lambda self, job_id, h: None)
+    # Hiding the row from the private pre-check (only) is the only deterministic way to reach
+    # the unique-constraint branch in one session: it simulates another writer committing
+    # right after the check.
+    real_find = ItemRepository._find
+    calls: list[str] = []
+
+    def find_after_first(self: ItemRepository, job_id: int, h: str) -> Item | None:
+        calls.append(h)
+        return None if len(calls) == 1 else real_find(self, job_id, h)
+
+    monkeypatch.setattr(ItemRepository, "_find", find_after_first)
     repo = ItemRepository(db_session)
-    item, created = repo.add(job.id, _candidate(title="loser"), run_id=loser_run.id)
+    item, created = repo.add(job.id, make_candidate(title="loser"), run_id=loser_run.id)
     assert created is False
     assert item is existing
     assert (item.title, item.run_id) == ("winner", winner_run.id)
     assert db_session.query(Item).count() == 1
     # the session remains usable after the savepoint rollback
-    other, created = repo.add(job.id, _candidate("https://example.com/b"))
+    other, created = repo.add(job.id, make_candidate("https://example.com/b"))
     assert created is True and other.id != existing.id
+
+
+@pytest.mark.skipif(uses_sqlite(), reason="needs two connections; SQLite tests share one")
+@pytest.mark.usefixtures("clean_jobs")
+def test_item_add_concurrent_writer_returns_winner(db_engine: Engine) -> None:
+    # Two real sessions: the loser's snapshot (REPEATABLE READ on MariaDB) predates the winner's
+    # commit, so only a locking re-query after the duplicate-key error can see the winner.
+    factory = session_factory(db_engine)
+    with session_scope(factory) as session:
+        job_id = JobRepository(session).add(Job(name="a", config={})).id
+    with session_scope(factory) as loser:
+        repo = ItemRepository(loser)
+        assert repo.seen(job_id, make_candidate().url_hash) is False  # takes the snapshot
+        with session_scope(factory) as winner:
+            won, _ = ItemRepository(winner).add(job_id, make_candidate(title="winner"))
+        item, created = repo.add(job_id, make_candidate(title="loser"))
+        assert created is False
+        assert (item.id, item.title) == (won.id, "winner")
 
 
 def test_item_add_fk_violation_keeps_outer_transaction(db_session: Session) -> None:
     job = make_job(db_session)
     repo = ItemRepository(db_session)
-    kept, _ = repo.add(job.id, _candidate("https://example.com/kept"))
+    kept, _ = repo.add(job.id, make_candidate("https://example.com/kept"))
     with pytest.raises(IntegrityError):
-        repo.add(99999, _candidate())
+        repo.add(99999, make_candidate())
     # Only the savepoint was rolled back: earlier work survives and the session is usable.
     assert repo.get(kept.id) is kept
     assert JobRepository(db_session).get_by_name(job.name) is job
-    _, created = repo.add(job.id, _candidate("https://example.com/next"))
+    _, created = repo.add(job.id, make_candidate("https://example.com/next"))
     assert created is True
     assert db_session.query(Item).count() == 2
 
@@ -347,7 +360,7 @@ def test_item_add_fk_violation_keeps_outer_transaction(db_session: Session) -> N
 def test_item_add_unknown_run_id_is_reraised(db_session: Session) -> None:
     job = make_job(db_session)
     with pytest.raises(IntegrityError):
-        ItemRepository(db_session).add(job.id, _candidate(), run_id=99999)
+        ItemRepository(db_session).add(job.id, make_candidate(), run_id=99999)
     assert ItemRepository(db_session).seen(job.id, url_hash("https://example.com/a")) is False
 
 
@@ -356,7 +369,7 @@ def test_no_repository_commits(db_session: Session) -> None:
     job = JobRepository(db_session).add(Job(name="a", config={}))
     run = RunRepository(db_session).start(job.id)
     RunRepository(db_session).finish(run, RunStatus.SUCCEEDED)
-    ItemRepository(db_session).add(job.id, _candidate(), run_id=run.id)
+    ItemRepository(db_session).add(job.id, make_candidate(), run_id=run.id)
     DigestRepository(db_session).add(job.id, "t", "b", [], run_id=run.id)
     n = NotificationRepository(db_session).add(job.id, "email", "a@example.com", run_id=run.id)
     NotificationRepository(db_session).mark(n, NotificationStatus.SENT)

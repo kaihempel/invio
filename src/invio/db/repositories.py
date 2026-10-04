@@ -10,7 +10,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import Select, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -29,6 +29,10 @@ __all__ = [
 ]
 
 
+def _all[T](session: Session, stmt: Select[T]) -> builtins.list[T]:
+    return builtins.list(session.scalars(stmt).all())
+
+
 class JobRepository:
     """Access to the ``jobs`` table."""
 
@@ -44,7 +48,7 @@ class JobRepository:
         stmt = select(Job).order_by(Job.name)
         if enabled_only:
             stmt = stmt.where(Job.enabled.is_(True))
-        return builtins.list(self._session.scalars(stmt).all())
+        return _all(self._session, stmt)
 
     def add(self, job: Job) -> Job:
         """Insert ``job`` and flush; a duplicate name raises ``IntegrityError``."""
@@ -99,7 +103,7 @@ class RunRepository:
         )
         if limit is not None:
             stmt = stmt.limit(limit)
-        return builtins.list(self._session.scalars(stmt).all())
+        return _all(self._session, stmt)
 
 
 class ItemRepository:
@@ -120,11 +124,8 @@ class ItemRepository:
         A concurrent insert of the same item is detected through the unique constraint: the
         insert runs in a savepoint, so the session stays usable and the existing row is
         returned. Other integrity errors (for example an unknown ``job_id``) are re-raised.
-
-        Caveat: with the pysqlite driver SAVEPOINT handling depends on the driver's implicit
-        transaction control, and the engine does not apply the usual pysqlite BEGIN workaround.
-        The savepoint is reliable on MariaDB; on SQLite it works as long as a transaction has
-        already begun, which any earlier statement in the session ensures.
+        This relies on the engine rules of ``create_db_engine``: a real transaction around the
+        savepoint (SQLite) and ``READ COMMITTED`` isolation (MariaDB).
         """
         existing = self._find(job_id, candidate.url_hash)
         if existing is not None:
@@ -145,9 +146,9 @@ class ItemRepository:
                 self._session.add(item)
                 self._session.flush()
         except IntegrityError:
-            # Re-query inline (not via ``_find``): only a duplicate means "already stored".
-            stmt = select(Item).where(Item.job_id == job_id, Item.url_hash == candidate.url_hash)
-            winner = self._session.scalars(stmt).one_or_none()
+            # Only a duplicate means "already stored". The concurrent winner's row is visible
+            # because the engine runs READ COMMITTED on MariaDB (see ``create_db_engine``).
+            winner = self._find(job_id, candidate.url_hash)
             if winner is None:
                 raise
             return winner, False
@@ -166,7 +167,7 @@ class ItemRepository:
         stmt = select(Item).where(Item.job_id == job_id).order_by(Item.id)
         if status is not None:
             stmt = stmt.where(Item.status == status)
-        return builtins.list(self._session.scalars(stmt).all())
+        return _all(self._session, stmt)
 
 
 class DigestRepository:
@@ -197,7 +198,7 @@ class DigestRepository:
             .where(Digest.job_id == job_id)
             .order_by(Digest.created_at.desc(), Digest.id.desc())
         )
-        return builtins.list(self._session.scalars(stmt).all())
+        return _all(self._session, stmt)
 
 
 class NotificationRepository:
@@ -253,12 +254,12 @@ class NotificationRepository:
         stmt = select(Notification).where(Notification.job_id == job_id).order_by(Notification.id)
         if status is not None:
             stmt = stmt.where(Notification.status == status)
-        return builtins.list(self._session.scalars(stmt).all())
+        return _all(self._session, stmt)
 
     def list_for_run(self, run_id: int) -> builtins.list[Notification]:
         """Return the run's notifications by id."""
         stmt = select(Notification).where(Notification.run_id == run_id).order_by(Notification.id)
-        return builtins.list(self._session.scalars(stmt).all())
+        return _all(self._session, stmt)
 
 
 @dataclass(frozen=True, slots=True)

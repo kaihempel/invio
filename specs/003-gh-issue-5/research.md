@@ -109,6 +109,9 @@ NEEDS CLARIFICATION items remain.
   silent acceptance on SQLite.
 - **Alternatives**: Slug-only names (`[a-z0-9-]`) — reasonable but not requested; would reject
   names users may already plan to use. Can be tightened later.
+- **Follow-up (PR #43 review)**: names compare exactly on every backend. Migration `0002` gives
+  `jobs.name` the `utf8mb4_bin` collation on MariaDB, whose table default `utf8mb4_unicode_ci`
+  made `AI-News`/`ai-news` and `café`/`cafe` collide while SQLite kept them apart.
 
 ## R8 — Disable/enable semantics and update of disabled jobs
 
