@@ -7,6 +7,7 @@ them create the client with ``allow_networks=LOOPBACK``.
 import http.server
 import socket
 import socketserver
+import sys
 import threading
 import time
 from collections import deque
@@ -42,6 +43,7 @@ class Route:
     chunked: bool = False  # send the body with chunked transfer encoding (no Content-Length)
     delay: float = 0.0  # seconds to wait before answering
     stall: bool = False  # send the headers, then never finish the body
+    drip: float = 0.0  # send the body one byte per this many seconds
 
 
 @dataclass(frozen=True)
@@ -58,6 +60,11 @@ class _Server(http.server.ThreadingHTTPServer):
         # Skip HTTPServer's reverse DNS lookup (socket.getfqdn), which can take seconds.
         socketserver.TCPServer.server_bind(self)
         self.server_name, self.server_port = "127.0.0.1", self.server_address[1]
+
+    def handle_error(self, request: object, client_address: object) -> None:
+        # Clients that hang up on purpose raise ConnectionError in the handler thread; stay quiet.
+        if not isinstance(sys.exc_info()[1], ConnectionError):
+            super().handle_error(request, client_address)  # type: ignore[arg-type]
 
 
 class LoopbackServer:
@@ -133,10 +140,22 @@ class LoopbackServer:
             handler.send_header("Transfer-Encoding", "chunked")
         elif not has_length and not route.stall:
             handler.send_header("Content-Length", str(len(route.body)))
-        handler.end_headers()
+        try:
+            handler.end_headers()
+            self._send_body(handler, route)
+        except (BrokenPipeError, ConnectionResetError):
+            pass  # the client gave up (limit hit, timeout): expected in the limit tests
+
+    def _send_body(self, handler: http.server.BaseHTTPRequestHandler, route: Route) -> None:
         if route.stall:
             handler.wfile.flush()
             self._release.wait(30)  # never block a handler thread forever
+        elif route.drip:
+            for start in range(len(route.body)):
+                handler.wfile.write(route.body[start : start + 1])
+                handler.wfile.flush()
+                if self._release.wait(route.drip):
+                    break
         elif route.chunked:
             for start in range(0, len(route.body), 1024):
                 chunk = route.body[start : start + 1024]
