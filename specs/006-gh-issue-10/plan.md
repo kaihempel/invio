@@ -46,8 +46,8 @@ layer in the `sources` adapter package.
 **Performance Goals**: Not throughput-bound; politeness dominates (≥ 1 s between requests per
 host). Overhead per request: one `getaddrinfo` + robots lookup (cached).
 
-**Constraints**: ≤ 10 MiB body (+ one decoded chunk) in memory per fetch; total per-request
-(per-hop) deadline 60 s; no internet in tests; mypy strict; coverage ≥ 95 %.
+**Constraints**: ≤ 10 MiB decoded body in memory per fetch (bounded decoder); total
+deadline 60 s per get(); no internet in tests; mypy strict; coverage ≥ 95 %.
 
 **Scale/Scope**: Tens of URLs per job run, a handful of hosts; ~4 small modules (~400–500 LOC)
 plus tests.
@@ -99,18 +99,23 @@ src/invio/
 │   └── source_check.py      # redact() now imported from invio.sources.urls
 └── sources/
     ├── __init__.py
-    ├── urls.py              # NEW: redact(), origin_of() helpers (no network)
-    ├── netguard.py          # NEW: Origin, Resolver protocol, is_public_address(), guard_url()
+    ├── urls.py              # NEW: redact(), redact_url() helpers (no network)
+    ├── errors.py            # NEW: BlockReason, FetchError, BlockedError, TooLargeError
+    ├── netguard.py          # NEW: Origin, origin_of(), Resolver, SystemResolver,
+    │                        #      is_public_address(), check_scheme(), guard_url()
     ├── robots.py            # NEW: RobotsPolicy, RobotsCache (fetch via injected callable)
     ├── ratelimit.py         # NEW: HostRateLimiter (per-origin lock + spacing)
-    └── http.py              # NEW: HttpClientConfig, SafeHttpClient, FetchResult, NotModified,
-                             #      FetchError, BlockedError, TooLargeError, BlockReason
+    └── http.py              # NEW: HttpClientConfig, SafeHttpClient, FetchResult, NotModified
+                             #      (re-exports the error types)
 
 tests/
 ├── http_helpers.py          # NEW: loopback server fixture (routes, request log w/ timestamps),
 │                            #      FakeResolver, recording MockTransport
 ├── test_http_netguard.py    # NEW: scheme/address classification (+ Hypothesis), pinning
-├── test_http_client.py      # NEW: size limits, redirects, timeouts, UA, conditional GET, errors
+├── test_http_client.py      # NEW: result mapping, errors, redirects, config, lifecycle
+├── test_http_ssrf.py        # NEW: blocked targets, pinning, rebinding, userinfo, logging
+├── test_http_limits.py      # NEW: size/decompression limits, redirect cap, timeouts, UA
+├── test_http_conditional.py # NEW: ETag / Last-Modified, NotModified
 ├── test_http_robots.py      # NEW: allow/deny, 404/503 semantics, single fetch, feeds, Crawl-delay
 ├── test_http_ratelimit.py   # NEW: spacing, one-in-flight, cross-origin independence
 ├── test_settings.py         # + INVIO_HTTP_* validation cases

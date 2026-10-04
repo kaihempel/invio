@@ -18,7 +18,7 @@ Frozen Pydantic model, `extra="forbid"`. Built from `Settings` via `from_setting
 | `host_interval` | `float` | `1.0` | `> 0`, finite | `INVIO_HTTP_HOST_INTERVAL_SECONDS` |
 | `respect_robots` | `bool` | `True` | — | `INVIO_HTTP_RESPECT_ROBOTS` |
 
-`total_timeout` is a per-request (per-hop) deadline; see research R9 for the bound on a whole fetch.
+`total_timeout` is the deadline of one `get()` including all redirect hops, measured from the first send (see research R9); the robots.txt fetch has its own.
 
 Derived: `user_agent` = `invio/<version> (+https://github.com/kaihempel/invio; contact: <contact>)`.
 
@@ -74,7 +74,8 @@ FetchError(Exception)            url: str (redacted), status: int | None, reason
 `NON_PUBLIC_ADDRESS = "non_public_address"`, `BLOCKED_BY_ROBOTS = "blocked_by_robots"`.
 
 `FetchError.reason` values used: `"timeout"`, `"connection_failed"`, `"dns_failed"`,
-`"too_many_redirects"`, `"missing_location"`, `"http_status"` (with `status` set), `"invalid_url"`.
+`"too_many_redirects"`, `"missing_location"`, `"http_status"` (with `status` set), `"invalid_url"`,
+`"invalid_response"` (corrupt, truncated or stacked/unsupported `Content-Encoding`, malformed redirect target).
 
 ## RobotsPolicy (`robots.py`)
 

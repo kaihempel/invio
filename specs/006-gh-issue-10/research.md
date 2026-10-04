@@ -126,15 +126,16 @@ All Technical Context unknowns are resolved below. Each entry: Decision / Ration
 
 ## R9 — Timeouts
 
-- **Decision**: `httpx.Timeout(connect=10, read=30, write=10, pool=10)` plus a **total per-request (per-hop)
-  deadline** (`asyncio.timeout`, default 60 s) around sending and reading (excluding the
-  rate-limiter wait). Timeout → `FetchError(reason="timeout")`.
+- **Decision**: `httpx.Timeout(connect=10, read=30, write=10, pool=10)` plus a **total deadline
+  for the whole `get()`** (`asyncio.timeout_at`, default 60 s) that starts when the first
+  request is about to be sent (after the first rate-limiter slot) and is shared by all redirect
+  hops. Timeout → `FetchError(reason="timeout")`.
 - **Rationale**: Read timeout is per socket read, so a server dripping one byte every 29 s would
   never trip it; the total deadline makes SC-006 hold.
-- **Scope**: a whole `get()` is therefore bounded by `(max_redirects + 2) × total_timeout`
-  plus rate-limit waits (initial hop, up to `max_redirects` redirects, and one robots.txt
-  fetch). This is deliberate: a single budget across hops would need wait-time accounting
-  for little gain.
+- **Scope**: a `get()` is bounded by `total_timeout` plus the wait for its first rate-limit
+  slot and the robots.txt fetch, which has its own `total_timeout` budget. (An earlier draft
+  used one deadline per hop; the security review found that a chain of slow hops then
+  multiplied the bound.)
 
 ## R10 — Configuration
 

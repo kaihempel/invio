@@ -74,6 +74,50 @@ with run_context(job="digest") as run_id:
     logging.getLogger(__name__).info("started", extra={"sources": 3})
 ```
 
+### Fetching sources safely
+
+Source fetchers get web content only through `invio.sources.http.SafeHttpClient`; importing
+`httpx` or `urllib.request` in `src/invio/sources/` outside the client modules fails `ruff check`.
+
+```python
+from invio.sources.http import HttpClientConfig, SafeHttpClient
+
+async with SafeHttpClient(HttpClientConfig.from_settings()) as client:
+    result = await client.get("https://example.org/feed.xml")  # FetchResult or NotModified
+```
+
+- **Blocked targets**: only `http` and `https`. Every hop (the first URL and each redirect) is
+  resolved first and refused (`BlockedError`) if any address is not public: loopback, private,
+  link-local (cloud metadata), carrier-grade NAT, multicast and IPv6 forms that embed such an
+  address. The connection goes to the validated address, so DNS rebinding does not help.
+  `user:password@` in a URL is dropped, never sent and never logged.
+- **robots.txt**: fetched once per site and run, for feeds as well as pages. A disallowed path
+  raises `BlockedError` with `reason == "blocked_by_robots"` and is never requested. A 4xx on
+  robots.txt allows everything; a 5xx or network failure blocks the site for the rest of the
+  run. Set `INVIO_HTTP_RESPECT_ROBOTS=false` to switch the check off.
+- **Rate limiting**: per site at most one request at a time, starts spaced by
+  `INVIO_HTTP_HOST_INTERVAL_SECONDS`. A `Crawl-delay` in robots.txt can raise that spacing, by at
+  most 30 s; other sites are not slowed down.
+- **Limits**: responses over `INVIO_HTTP_MAX_RESPONSE_BYTES` (decoded size) raise
+  `TooLargeError`; only one layer of gzip or deflate is accepted. At most
+  `INVIO_HTTP_MAX_REDIRECTS` redirects; `INVIO_HTTP_TOTAL_TIMEOUT_SECONDS` bounds one `get()` from
+  its first request. Requests identify as
+  `invio/<version> (+https://github.com/kaihempel/invio; contact: <INVIO_HTTP_CONTACT>)`, so
+  **set `INVIO_HTTP_CONTACT`** to an address site owners can reach.
+- **Conditional requests**: `ETag`/`Last-Modified` are remembered per URL for the client's
+  lifetime; a repeated `get` returns `NotModified` on 304.
+
+| Setting | Default |
+|---------|---------|
+| `INVIO_HTTP_CONTACT` | `admin@example.invalid` |
+| `INVIO_HTTP_MAX_RESPONSE_BYTES` | `10485760` |
+| `INVIO_HTTP_MAX_REDIRECTS` | `5` |
+| `INVIO_HTTP_CONNECT_TIMEOUT_SECONDS` | `10` |
+| `INVIO_HTTP_READ_TIMEOUT_SECONDS` | `30` |
+| `INVIO_HTTP_TOTAL_TIMEOUT_SECONDS` | `60` (must be >= the read timeout) |
+| `INVIO_HTTP_HOST_INTERVAL_SECONDS` | `1` |
+| `INVIO_HTTP_RESPECT_ROBOTS` | `true` |
+
 ## Job files
 
 A job file is a YAML description of one research job: schedule, notification, sources, search,
@@ -280,7 +324,7 @@ src/invio/
   db/           models, engine/session helpers, repositories.py, migrations/ (Alembic)
   services/     jobs.py (JobService: job CRUD, YAML import/export)
   graph/        LangGraph pipelines
-  sources/      source adapters
+  sources/      source adapters; http.py (SafeHttpClient) with netguard, robots, ratelimit
   llm/          base, registry, factory, fake, models.d/ (LLM layer)
   notify/       notifications
   scheduling/   next-run calculation (next_run.py)

@@ -203,7 +203,7 @@ Many sources (feeds, pages) change rarely. When a URL is fetched again during th
 - **SC-003**: Paths disallowed by robots.txt receive zero requests from invio, and robots.txt is requested at most once per host per run.
 - **SC-004**: Consecutive requests to the same host are never closer together than the effective interval — the configured interval or a larger, capped `Crawl-delay` — (measured at the test server), while requests to different hosts proceed without waiting.
 - **SC-005**: A re-fetch of unchanged content with change markers transfers no body and returns a not-modified result.
-- **SC-006**: No single request (one redirect hop or one robots.txt retrieval) runs longer than the configured total timeout, so one fetch is bounded by (maximum redirects + 2) × total timeout plus per-host waiting time; a stalled server never stalls a run indefinitely.
+- **SC-006**: No single request (one redirect hop or one robots.txt retrieval) runs longer than the configured total timeout, so one fetch is bounded by the total timeout (shared by all redirect hops) plus per-host waiting time; a stalled server never stalls a run indefinitely.
 - **SC-007**: The full test suite for this feature runs without internet access and passes deterministically in CI.
 
 ## Assumptions

@@ -41,6 +41,13 @@ class SafeHttpClient:
   rate-limit and size rules still apply. Not wired to settings or job files.
 - Caller-provided `User-Agent`, `Host` headers are ignored (client controls them);
   caller-provided `If-None-Match` / `If-Modified-Since` override cached validators.
+- Caller headers are forwarded to redirect hops on the same origin; on another origin only
+  `Accept*`, `If-None-Match` and `If-Modified-Since` are kept.
+- URL userinfo (`user:password@`) is stripped before anything else: it is never sent, and never
+  appears in `FetchResult.url`, errors or logs.
+- `total_timeout` bounds one `get()` including all redirect hops, measured from the first send.
+- Only one layer of `gzip` or `deflate` content encoding is accepted; the size limit applies to
+  the decoded body.
 
 ## `get` outcome table
 
@@ -59,6 +66,7 @@ class SafeHttpClient:
 | connect/read/total timeout | `FetchError(reason="timeout")` |
 | other transport error | `FetchError(reason="connection_failed")` |
 | malformed URL | `FetchError(reason="invalid_url")` |
+| corrupt/truncated body, stacked or unsupported `Content-Encoding`, malformed redirect target | `FetchError(reason="invalid_response")` |
 
 Guarantees:
 - A `BlockedError` for `UNSUPPORTED_SCHEME`/`NON_PUBLIC_ADDRESS` is raised **before** any
