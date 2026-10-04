@@ -124,18 +124,19 @@ INVIO_DATABASE_URL=sqlite:////absolute/path/invio.sqlite   # development only
 ```
 
 - MariaDB needs `utf8mb4` (emoji). Invio forces `charset=utf8mb4`, strict SQL mode and a UTC
-  session on every connection, and creates all tables as InnoDB / `utf8mb4_unicode_ci`.
+  session on every connection, runs transactions at `READ COMMITTED`, and creates all tables as
+  InnoDB / `utf8mb4_unicode_ci`.
 - Set the server's `max_allowed_packet` to at least 32M if you store raw content up to 16 MB.
 - Timestamps are aware UTC in Python (naive datetimes are rejected) and naive UTC in the database.
 - The schema is versioned with Alembic; the migrations ship inside the package.
 
 ```bash
-uv run invio db upgrade       # apply migrations; prints "database at revision 0001"
+uv run invio db upgrade       # apply migrations; prints "database at revision 0002"
 ```
 
 DDL is not transactional on MariaDB: if an upgrade fails midway, earlier steps stay applied and
-may need manual cleanup before retrying. Job names are unique case-insensitively on MariaDB
-(`utf8mb4_unicode_ci`), so `Digest` and `digest` collide; SQLite compares them case-sensitively.
+may need manual cleanup before retrying. Job names compare exactly on every backend (binary
+collation on MariaDB since revision `0002`), so `Digest` and `digest` are two different jobs.
 
 Exit codes: `0` success (also when already up to date), `2` `INVIO_DATABASE_URL` missing or not a
 valid URL, or its driver is not installed, `1` any other failure (unreachable server, migration error, unknown revision). The
@@ -160,6 +161,30 @@ INVIO_TEST_DATABASE_URL="mysql+pymysql://root@127.0.0.1:3306/invio_test?charset=
 Run them serially against MariaDB (no `pytest -n`): the migration tests downgrade and re-upgrade
 the shared test database.
 
+### Job service
+
+`invio.services.jobs.JobService` manages jobs; use it instead of touching SQLAlchemy directly
+(records and errors never expose SQLAlchemy types).
+
+```python
+from invio.services.jobs import JobService
+
+service = JobService.from_settings()  # needs INVIO_DATABASE_URL
+service.import_yaml("docs/job.example.yaml")  # stored as "job.example"; replace=True to overwrite
+record = service.create("ai-news", {...})  # mapping or JobConfig; JobConfigError if invalid
+service.list(enabled_only=True)  # ordered by name
+service.set_enabled("ai-news", False)  # keeps history, clears next_run_at
+print(service.export_yaml("ai-news"))  # YAML text; pass a path to write a file
+service.delete("ai-news")  # removes the job and its history
+```
+
+Errors: `JobNameError`, `JobExistsError`, `JobNotFoundError`, `JobConfigError` (invalid input) and
+`StoredJobConfigError` (a stored config no longer validates; `list` skips such jobs and logs a
+warning). Disabling a job with a broken stored config still pauses it, then raises
+`StoredJobConfigError`. `next_run_at` is a placeholder (the current time) until scheduling (#6) lands.
+Record repositories for runs, items, digests, notifications and LLM usage live in
+`invio.db.repositories`; they flush but never commit (use `session_scope`).
+
 ## Layout
 
 ```
@@ -167,7 +192,8 @@ src/invio/
   cli/          Typer app (main.py) and auto-discovered commands/
   config/       settings, job.py (job file models + YAML load/save)
   domain.py     shared records, status enums, url_hash (stdlib only)
-  db/           models, engine/session helpers, migrations/ (Alembic env + versions)
+  db/           models, engine/session helpers, repositories.py, migrations/ (Alembic)
+  services/     jobs.py (JobService: job CRUD, YAML import/export)
   graph/        LangGraph pipelines
   sources/      source adapters
   llm/          LLM providers

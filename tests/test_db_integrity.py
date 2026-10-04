@@ -72,8 +72,8 @@ def test_migrations_upgrade_an_in_memory_sqlite_database() -> None:
     )
     try:
         with engine.begin() as conn:
-            assert upgrade(alembic_config(connection=conn)) == "0001"
-            assert current_revision(conn) == "0001"
+            assert upgrade(alembic_config(connection=conn)) == "0002"
+            assert current_revision(conn) == "0002"
         assert set(inspect(engine).get_table_names()) == APP_TABLES | {"alembic_version"}
     finally:
         engine.dispose()

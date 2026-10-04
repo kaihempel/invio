@@ -62,17 +62,17 @@ def _tables(engine: Engine) -> set[str]:
 
 
 def test_upgrade_creates_all_tables_and_reports_revision(migration_engine: Engine) -> None:
-    assert _upgrade(migration_engine) == "0001"
+    assert _upgrade(migration_engine) == "0002"
 
     assert _tables(migration_engine) == APP_TABLES | {"alembic_version"}
     with migration_engine.begin() as conn:
-        assert current_revision(conn) == "0001"
+        assert current_revision(conn) == "0002"
 
 
 def test_second_upgrade_is_a_noop(migration_engine: Engine) -> None:
     _upgrade(migration_engine)
 
-    assert _upgrade(migration_engine) == "0001"
+    assert _upgrade(migration_engine) == "0002"
     assert _tables(migration_engine) == APP_TABLES | {"alembic_version"}
 
 
@@ -202,8 +202,8 @@ def test_upgrade_to_unknown_revision_fails(migration_engine: Engine) -> None:
 def test_upgrade_with_url_creates_its_own_engine(tmp_path: Path) -> None:
     url = f"sqlite:///{tmp_path}/own.sqlite"
 
-    assert upgrade(alembic_config(url=url)) == "0001"
-    assert upgrade(alembic_config(url=url)) == "0001"
+    assert upgrade(alembic_config(url=url)) == "0002"
+    assert upgrade(alembic_config(url=url)) == "0002"
     downgrade(alembic_config(url=url))
 
     engine = create_db_engine(url)

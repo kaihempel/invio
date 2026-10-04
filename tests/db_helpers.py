@@ -3,6 +3,7 @@
 import os
 from collections.abc import Iterator
 from contextlib import contextmanager
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -10,7 +11,7 @@ from sqlalchemy.exc import DataError, IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
 from invio.db.models import Digest, Item, Job, LlmUsage, Notification, Run
-from invio.domain import url_hash
+from invio.domain import Candidate, url_hash
 
 # Captured at import time: the autouse ``isolated_settings`` fixture strips INVIO_* variables.
 TEST_DATABASE_URL: str | None = os.environ.get("INVIO_TEST_DATABASE_URL") or None
@@ -63,6 +64,20 @@ def make_item(session: Session, job: Job, url: str = "https://example.com/a", **
     kw.setdefault("type", "article")
     kw.setdefault("title", "t")
     return _add(session, Item(job_id=job.id, url=url, **kw))  # type: ignore[no-any-return]
+
+
+def make_candidate(url: str = "https://example.com/a", **kw: Any) -> Candidate:
+    values: dict[str, Any] = {
+        "url": url,
+        "url_hash": url_hash(url),
+        "title": "Title",
+        "published_at": datetime(2026, 1, 1, tzinfo=UTC),
+        "type": "article",
+        "teaser": "teaser",
+        "content_hash": "c" * 64,
+    }
+    values.update(kw)
+    return Candidate(**values)
 
 
 def make_digest(session: Session, job: Job, **kw: Any) -> Digest:

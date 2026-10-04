@@ -4,10 +4,12 @@ The database URL usually contains a password. This module never logs it; use :fu
 before showing any text that might echo it.
 """
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any
 from urllib.parse import quote, quote_plus
 
-from sqlalchemy import Engine, create_engine, event
+from sqlalchemy import Connection, Engine, create_engine, event
 from sqlalchemy.engine import URL, make_url
 from sqlalchemy.exc import ArgumentError
 from sqlalchemy.orm import Session, sessionmaker
@@ -44,14 +46,19 @@ def connect_args_for(url: URL) -> dict[str, str]:
 def create_db_engine(url: str | URL, **kwargs: Any) -> Engine:
     """Create an engine that follows invio's connection rules.
 
-    mysql/mariadb: utf8mb4, strict mode, UTC session, ``pool_pre_ping``, ``pool_recycle``.
-    sqlite: ``PRAGMA foreign_keys=ON`` on every connection.
+    mysql/mariadb: utf8mb4, strict mode, UTC session, ``pool_pre_ping``, ``pool_recycle`` and
+    ``READ COMMITTED`` isolation, so a statement sees rows other transactions committed after
+    this one began (``ItemRepository.add`` relies on it to return a concurrent writer's row).
+    sqlite: ``PRAGMA foreign_keys=ON`` on every connection, and SQLAlchemy emits ``BEGIN``
+    itself. pysqlite only opens a transaction implicitly before DML, so a SAVEPOINT issued
+    after mere SELECTs would become the outermost transaction and its RELEASE would commit.
     """
     parsed = normalize_url(url)
     backend = parsed.get_backend_name()
     if backend in _MYSQL_BACKENDS:
         kwargs.setdefault("pool_pre_ping", True)
         kwargs.setdefault("pool_recycle", 3600)
+        kwargs.setdefault("isolation_level", "READ COMMITTED")
         connect_args = {**connect_args_for(parsed), **kwargs.pop("connect_args", {})}
         engine = create_engine(parsed, connect_args=connect_args, **kwargs)
     else:
@@ -59,12 +66,17 @@ def create_db_engine(url: str | URL, **kwargs: Any) -> Engine:
     if backend == "sqlite":
 
         @event.listens_for(engine, "connect")
-        def _enable_foreign_keys(dbapi_connection: Any, _record: Any) -> None:  # Any: DBAPI
+        def _on_connect(dbapi_connection: Any, _record: Any) -> None:  # Any: DBAPI
             cursor = dbapi_connection.cursor()
             try:
                 cursor.execute("PRAGMA foreign_keys=ON")
             finally:
                 cursor.close()
+            dbapi_connection.isolation_level = None  # disable pysqlite's implicit BEGIN
+
+        @event.listens_for(engine, "begin")
+        def _begin(connection: Connection) -> None:
+            connection.exec_driver_sql("BEGIN")
 
     return engine
 
@@ -72,6 +84,20 @@ def create_db_engine(url: str | URL, **kwargs: Any) -> Engine:
 def session_factory(engine: Engine) -> sessionmaker[Session]:
     """Return a session factory with ``expire_on_commit=False``."""
     return sessionmaker(engine, expire_on_commit=False)
+
+
+@contextmanager
+def session_scope(factory: sessionmaker[Session]) -> Iterator[Session]:
+    """Commit on success, roll back on any exception (re-raised), always close."""
+    session = factory()
+    try:
+        yield session
+        session.commit()
+    except BaseException:
+        session.rollback()
+        raise
+    finally:
+        session.close()
 
 
 def redact(text: str, url: str | URL) -> str:
