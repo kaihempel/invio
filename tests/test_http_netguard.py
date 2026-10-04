@@ -1,5 +1,6 @@
 """Unit tests for ``invio.sources.netguard``: scheme check, address classes and ``guard_url``."""
 
+import asyncio
 import socket
 from ipaddress import IPv4Address, IPv6Address, ip_address, ip_network
 
@@ -50,6 +51,14 @@ from tests.http_helpers import LOOPBACK, FakeResolver
         "5f00::1",  # SRv6 SIDs
         "192.88.99.1",  # deprecated 6to4 relay anycast
         "2002:c058:6301::1",  # 6to4 of 192.88.99.1
+        "100.127.255.255",  # end of shared address space 100.64.0.0/10
+        "192.0.2.1",  # documentation TEST-NET-1
+        "198.51.100.1",  # documentation TEST-NET-2
+        "203.0.113.1",  # documentation TEST-NET-3
+        "2001:db8::1",  # documentation (IPv6)
+        "198.18.0.1",  # benchmarking
+        "240.0.0.1",  # reserved (class E)
+        "192.0.0.8",  # IETF protocol assignments
     ],
 )
 def test_non_public_addresses(address: str) -> None:
@@ -145,7 +154,14 @@ async def test_allow_networks_accepts_other_network_objects() -> None:
 
 @pytest.mark.parametrize(
     "url",
-    ["http://127.0.0.1/", "http://[::1]/", "http://[::ffff:10.0.0.1]/", "http://10.1.2.3:8080/"],
+    [
+        "http://127.0.0.1/",
+        "http://[::1]/",
+        "http://[::ffff:127.0.0.1]/",
+        "http://[::ffff:10.0.0.1]/",
+        "http://10.1.2.3:8080/",
+        "http://user:pass@127.0.0.1:2222/",
+    ],
 )
 async def test_ip_literals_are_checked_without_resolving(url: str) -> None:
     resolver = FakeResolver({})
@@ -177,7 +193,14 @@ async def test_system_resolver_resolves_numeric_host() -> None:
     assert await SystemResolver().resolve("127.0.0.1", 80) == ["127.0.0.1"]
 
 
-async def test_system_resolver_propagates_gaierror() -> None:
+async def test_system_resolver_propagates_gaierror(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A real lookup of an unknown name would send a DNS query; fake the loop's getaddrinfo.
+    async def failing_getaddrinfo(*args: object, **kwargs: object) -> list[object]:
+        raise socket.gaierror(socket.EAI_NONAME, "Name or service not known")
+
+    loop = asyncio.get_running_loop()
+    monkeypatch.setattr(loop, "getaddrinfo", failing_getaddrinfo)
+
     with pytest.raises(socket.gaierror):
         await SystemResolver().resolve("no-such-host.invalid", 80)
 

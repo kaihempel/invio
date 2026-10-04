@@ -1,6 +1,7 @@
 """Resource limits of ``SafeHttpClient``: body size, redirects, timeouts and the User-Agent."""
 
 import gzip
+import random
 import re
 import time
 
@@ -239,3 +240,26 @@ async def test_truncated_gzip_stream_is_invalid_response(
             await client.get(f"{server.base_url}/t")
 
     assert info.value.reason == "invalid_response"
+
+
+async def test_corrupt_gzip_body_is_invalid_response(server: LoopbackServer) -> None:
+    server.routes["/c"] = Route(headers={"Content-Encoding": "gzip"}, body=b"not gzip at all")
+
+    async with make_client() as client:
+        with pytest.raises(FetchError) as info:
+            await client.get(f"{server.base_url}/c")
+
+    assert info.value.reason == "invalid_response"
+
+
+async def test_gzip_body_split_over_many_chunks_is_decoded(server: LoopbackServer) -> None:
+    payload = random.Random(10).randbytes(50_000)  # incompressible: ~50 chunks on the wire
+    server.routes["/g"] = Route(
+        headers={"Content-Encoding": "gzip"}, body=gzip.compress(payload), chunked=True
+    )
+
+    async with make_client(max_response_bytes=100_000) as client:
+        result = await client.get(f"{server.base_url}/g")
+
+    assert isinstance(result, FetchResult)
+    assert result.content == payload

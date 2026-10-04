@@ -384,10 +384,13 @@ class SafeHttpClient:
 
     @classmethod
     def _join(cls, base: httpx.URL, location: str) -> httpx.URL:
+        """Resolve a redirect target; a malformed one is the server's fault (invalid_response)."""
         try:
             return cls._parse(str(base.join(location)))
-        except (httpx.InvalidURL, ValueError):
-            raise FetchError("invalid_url", url=str(base)) from None
+        except BlockedError:
+            raise  # a non-web scheme stays a blocked error
+        except (httpx.InvalidURL, ValueError, FetchError):
+            raise FetchError("invalid_response", url=str(base)) from None
 
     # --- the pipeline of one hop -------------------------------------------------------------
 
@@ -424,8 +427,13 @@ class SafeHttpClient:
             except (TimeoutError, httpx.TimeoutException):
                 raise FetchError("timeout", url=str(url)) from None
             except (httpx.DecodingError, httpx.InvalidURL):
-                # httpx also parses the Location of a redirect it was told not to follow.
                 raise FetchError("invalid_response", url=str(url)) from None
+            except httpx.RemoteProtocolError as exc:
+                # httpx parses the Location of a redirect even when it does not follow it, and
+                # reports an unparsable one as a protocol error: that is a malformed response.
+                malformed = "location header" in str(exc).lower()
+                reason = "invalid_response" if malformed else "connection_failed"
+                raise FetchError(reason, url=str(url)) from None
             except httpx.RequestError:
                 raise FetchError("connection_failed", url=str(url)) from None
 

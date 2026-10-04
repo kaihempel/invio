@@ -265,3 +265,54 @@ async def test_policy_modes_and_robots_url() -> None:
     assert policy.allows("https://example.org:8443/") is False
     assert cache.known(origin) is policy
     assert seen == ["https://example.org:8443/robots.txt"]
+
+
+async def test_robots_redirect_on_the_same_origin_is_followed(server: LoopbackServer) -> None:
+    server.routes["/robots.txt"] = Route(status=301, headers={"Location": "/real-robots.txt"})
+    server.routes["/real-robots.txt"] = Route(body=b"User-agent: *\nDisallow: /private/\n")
+    pages(server, "/private/page", "/ok")
+
+    async with make_client() as client:
+        with pytest.raises(BlockedError) as info:
+            await client.get(f"{server.base_url}/private/page")
+        result = await client.get(f"{server.base_url}/ok")
+
+    assert info.value.reason is BlockReason.BLOCKED_BY_ROBOTS
+    assert isinstance(result, FetchResult)
+    assert server.paths() == ["/robots.txt", "/real-robots.txt", "/ok"]
+
+
+async def test_concurrent_first_lookups_share_one_robots_fetch() -> None:
+    from invio.sources.netguard import Origin
+    from invio.sources.robots import RobotsCache
+
+    release = asyncio.Event()
+    calls: list[object] = []
+
+    async def fetch(url: object) -> tuple[int, bytes]:
+        calls.append(url)
+        await release.wait()
+        return 404, b""
+
+    cache = RobotsCache(fetch)  # type: ignore[arg-type]
+    origin = Origin("http", "h", 80)
+    first = asyncio.create_task(cache.policy(origin))
+    second = asyncio.create_task(cache.policy(origin))
+    await asyncio.sleep(0)  # both tasks are inside policy(): one fetching, one on the lock
+    release.set()
+
+    assert await first is await second
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("raw", ["abc", "nan", "-1", None])
+def test_unusable_crawl_delay_values_are_ignored(
+    monkeypatch: pytest.MonkeyPatch, raw: object
+) -> None:
+    from urllib.robotparser import RobotFileParser
+
+    from invio.sources.robots import _crawl_delay
+
+    monkeypatch.setattr(RobotFileParser, "crawl_delay", lambda self, agent: raw)
+
+    assert _crawl_delay(RobotFileParser()) is None

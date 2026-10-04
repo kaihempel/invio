@@ -110,3 +110,32 @@ async def test_304_reports_the_validators_the_caller_sent(
         result = await client.get(url, headers={"If-None-Match": ETAG})
 
     assert result == NotModified(url, ETAG, None)
+
+
+async def test_last_modified_alone_makes_the_request_conditional(
+    server: LoopbackServer,
+) -> None:
+    server.routes["/lm"] = Route(headers={"Last-Modified": MODIFIED}, body=b"x", conditional=True)
+    url = f"{server.base_url}/lm"
+
+    async with make_client() as client:
+        await client.get(url)
+        second = await client.get(url)
+
+    assert "if-none-match" not in server.requests[1].headers
+    assert server.requests[1].headers["if-modified-since"] == MODIFIED
+    assert second == NotModified(url, None, MODIFIED)
+
+
+async def test_caller_if_modified_since_overrides_the_cached_one(
+    server: LoopbackServer,
+) -> None:
+    url = validated(server)
+    older = "Tue, 20 Oct 2015 07:28:00 GMT"
+
+    async with make_client() as client:
+        await client.get(url)
+        await client.get(url, headers={"if-modified-since": older})
+
+    assert server.requests[1].headers["if-modified-since"] == older
+    assert server.requests[1].headers["if-none-match"] == ETAG  # still from the cache

@@ -1,5 +1,6 @@
 """Foundation tests for ``SafeHttpClient``: result mapping, errors, redirects and lifecycle."""
 
+import httpx
 import pytest
 from pydantic import ValidationError
 
@@ -15,7 +16,14 @@ from invio.sources.http import (
     SafeHttpClient,
     TooLargeError,
 )
-from tests.http_helpers import LOOPBACK, LoopbackServer, Route, server  # noqa: F401
+from tests.http_helpers import (  # noqa: F401
+    LOOPBACK,
+    FakeResolver,
+    LoopbackServer,
+    RecordingTransport,
+    Route,
+    server,
+)
 
 
 def make_client(**overrides: object) -> SafeHttpClient:
@@ -299,3 +307,58 @@ async def test_default_config_comes_from_settings(
 def test_config_rejects_non_ascii_contact() -> None:
     with pytest.raises(ValidationError, match="contact"):
         HttpClientConfig(contact="café@example.org")
+
+
+async def test_error_status_after_redirect_carries_the_final_url(server: LoopbackServer) -> None:
+    server.routes["/old"] = Route(status=301, headers={"Location": "/gone"})
+    server.routes["/gone"] = Route(status=410)
+
+    async with make_client() as client:
+        with pytest.raises(FetchError) as info:
+            await client.get(f"{server.base_url}/old")
+
+    assert (info.value.reason, info.value.status) == ("http_status", 410)
+    assert info.value.url == f"{server.base_url}/gone"
+
+
+@pytest.mark.parametrize(
+    "location", ["http://[::1/broken", "https:?x"], ids=["bad-port", "no-host"]
+)
+async def test_malformed_redirect_target_is_invalid_response(
+    server: LoopbackServer, location: str
+) -> None:
+    # contracts/python-api.md: "malformed redirect target" -> invalid_response (the caller's
+    # URL was fine; the server's answer was not).
+    server.routes["/r"] = Route(status=302, headers={"Location": location})
+
+    async with make_client() as client:
+        with pytest.raises(FetchError) as info:
+            await client.get(f"{server.base_url}/r")
+
+    assert type(info.value) is FetchError
+    assert info.value.reason == "invalid_response"
+    assert server.paths() == ["/r"]
+
+
+async def test_other_protocol_errors_are_connection_failed() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.RemoteProtocolError("Server disconnected without sending a response.")
+
+    client = SafeHttpClient(
+        HttpClientConfig(respect_robots=False, host_interval=0.01),
+        resolver=FakeResolver({"example.org": ["93.184.216.34"]}),
+        transport=RecordingTransport(handler),
+    )
+    async with client:
+        with pytest.raises(FetchError) as info:
+            await client.get("http://example.org/")
+
+    assert info.value.reason == "connection_failed"
+
+
+def test_non_public_allowance_is_not_configurable() -> None:
+    # FR-010: only the ``allow_networks`` constructor argument can open loopback/private
+    # targets; neither the client config nor the application settings (env, job files) can.
+    with pytest.raises(ValidationError):
+        HttpClientConfig.model_validate({"allow_networks": ["127.0.0.0/8"]})
+    assert not [name for name in Settings.model_fields if "allow" in name or "network" in name]

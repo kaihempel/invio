@@ -78,8 +78,9 @@ async def test_dns_failure_is_dns_failed() -> None:
     assert getattr(info.value, "reason", None) == "dns_failed"
 
 
-async def test_redirect_to_private_address_is_blocked(server: LoopbackServer) -> None:
-    server.routes["/r"] = Route(status=302, headers={"Location": "http://10.0.0.5/admin"})
+@pytest.mark.parametrize("target", ["http://10.0.0.5/admin", "http://192.168.1.1/admin"])
+async def test_redirect_to_private_address_is_blocked(server: LoopbackServer, target: str) -> None:
+    server.routes["/r"] = Route(status=302, headers={"Location": target})
 
     async with SafeHttpClient(config(), allow_networks=LOOPBACK) as client:
         with pytest.raises(BlockedError) as info:

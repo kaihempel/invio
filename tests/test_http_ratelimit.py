@@ -249,3 +249,26 @@ async def test_crawl_delay_raises_the_interval(server: LoopbackServer) -> None:
 
     _robots, first, second = starts(server)
     assert second - first >= 1.0 - TOLERANCE
+
+
+def test_crawl_delay_cap_is_thirty_seconds() -> None:
+    assert CRAWL_DELAY_CAP == 30.0
+    assert effective_interval(1.0, 120) == 30.0
+
+
+async def test_redirect_to_another_origin_obeys_that_origins_interval(
+    server: LoopbackServer,
+    second_server: LoopbackServer,
+) -> None:
+    second_server.routes["/x"] = Route(body=b"x")
+    second_server.routes["/y"] = Route(body=b"y")
+    server.routes["/go"] = Route(status=302, headers={"Location": f"{second_server.base_url}/y"})
+
+    async with make_client() as client:
+        await client.get(f"{second_server.base_url}/x")
+        result = await client.get(f"{server.base_url}/go")
+
+    assert isinstance(result, FetchResult)
+    assert second_server.paths() == ["/x", "/y"]
+    first, second = starts(second_server)
+    assert second - first >= 0.2 - TOLERANCE
