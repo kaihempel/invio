@@ -436,9 +436,11 @@ async def test_422_message_names_the_field_location() -> None:
 
 
 async def test_timeout_deadline_is_unavailable_and_not_retried() -> None:
-    provider, recorder, waits = make_provider(HANG, timeout_seconds=0.01)
+    # The deadline also covers client construction and request serialisation, so it must
+    # leave enough room for the request to reach the transport even on a slow CI runner.
+    provider, recorder, waits = make_provider(HANG, timeout_seconds=0.5)
 
-    with pytest.raises(LLMUnavailableError, match=r"did not answer within 0\.01 s"):
+    with pytest.raises(LLMUnavailableError, match=r"did not answer within 0\.5 s"):
         await _complete(provider)
 
     assert len(recorder.requests) == 1
