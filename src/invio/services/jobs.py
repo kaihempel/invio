@@ -28,9 +28,10 @@ from invio.config.job import (
 )
 from invio.config.settings import Settings, get_settings
 from invio.db.models import Job
-from invio.db.repositories import JobRepository
+from invio.db.repositories import JobRepository, RunRepository
 from invio.db.session import create_db_engine, session_factory, session_scope
 from invio.db.types import utcnow
+from invio.domain import RunStatus
 from invio.scheduling.next_run import compute_next_run
 
 __all__ = [
@@ -40,8 +41,10 @@ __all__ = [
     "JobNotFoundError",
     "JobRecord",
     "JobService",
+    "JobSummary",
     "NextRun",
     "StoredJobConfigError",
+    "check_job_name",
 ]
 
 logger = logging.getLogger(__name__)
@@ -62,6 +65,21 @@ class JobRecord:
     next_run_at: datetime | None
     created_at: datetime
     updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class JobSummary:
+    """One row of the job overview; unlike ``JobRecord`` it can describe an invalid job.
+
+    ``config`` is ``None`` exactly when ``config_errors`` is non-empty.
+    """
+
+    name: str
+    enabled: bool
+    next_run_at: datetime | None
+    config: JobConfig | None
+    config_errors: list[str]
+    last_run_status: RunStatus | None
 
 
 class JobExistsError(Exception):
@@ -109,7 +127,8 @@ class StoredJobConfigError(JobConfigError):
         return "\n".join([f"invalid stored job '{self.name}':", *(f"  {e}" for e in self.errors)])
 
 
-def _check_name(name: str) -> None:
+def check_job_name(name: str) -> None:
+    """Raise ``JobNameError`` if ``name`` is empty, padded with whitespace or too long."""
     if name == "":
         raise JobNameError(name, "must not be empty")
     if name != name.strip():
@@ -206,7 +225,7 @@ class JobService:
 
     def create(self, name: str, config: JobConfig | Mapping[str, Any]) -> JobRecord:
         """Create an enabled job (``JobNameError``, ``JobConfigError``, ``JobExistsError``)."""
-        _check_name(name)
+        check_job_name(name)
         cfg = _validate(config)
         with session_scope(self._session_factory) as session:
             if JobRepository(session).get_by_name(name) is not None:
@@ -237,6 +256,35 @@ class JobService:
                         },
                     )
         return records
+
+    def overview(self) -> builtins.list[JobSummary]:
+        """Return every job ordered by name, including ones whose stored config is invalid."""
+        with session_scope(self._session_factory) as session:
+            statuses = RunRepository(session).latest_status_by_job()
+            summaries: builtins.list[JobSummary] = []
+            for job in JobRepository(session).list():
+                config: JobConfig | None = None
+                errors: builtins.list[str] = []
+                try:
+                    config = validate_job(job.config or {})
+                except JobConfigError as exc:
+                    errors = exc.errors
+                summaries.append(
+                    JobSummary(
+                        name=job.name,
+                        enabled=job.enabled,
+                        next_run_at=job.next_run_at,
+                        config=config,
+                        config_errors=errors,
+                        last_run_status=statuses.get(job.id),
+                    )
+                )
+        return summaries
+
+    def stored_config(self, name: str) -> dict[str, Any]:
+        """Return the raw stored config (possibly invalid); ``JobNotFoundError`` if absent."""
+        with session_scope(self._session_factory) as session:
+            return dict(_require(JobRepository(session), name).config or {})
 
     def update(self, name: str, config: JobConfig | Mapping[str, Any]) -> JobRecord:
         """Replace the whole configuration; the name never changes."""
@@ -298,7 +346,7 @@ class JobService:
         """
         cfg = load_yaml(path)
         job_name = name if name is not None else Path(path).stem
-        _check_name(job_name)
+        check_job_name(job_name)
         with session_scope(self._session_factory) as session:
             job = JobRepository(session).get_by_name(job_name)
             if job is None:

@@ -105,6 +105,21 @@ class RunRepository:
             stmt = stmt.limit(limit)
         return _all(self._session, stmt)
 
+    def latest_status_by_job(self) -> dict[int, RunStatus]:
+        """Return ``job_id -> status`` of each job's newest run (one query).
+
+        "Newest" is by ``started_at`` descending, ties broken by the higher id; jobs without
+        runs are absent.
+        """
+        rank = (
+            func.row_number()
+            .over(partition_by=Run.job_id, order_by=(Run.started_at.desc(), Run.id.desc()))
+            .label("rn")
+        )
+        ranked = select(Run.job_id, Run.status, rank).subquery()
+        stmt = select(ranked.c.job_id, ranked.c.status).where(ranked.c.rn == 1)
+        return {job_id: RunStatus(status) for job_id, status in self._session.execute(stmt)}
+
 
 class ItemRepository:
     """Access to the ``items`` table; ``add`` is idempotent per ``(job_id, url_hash)``."""

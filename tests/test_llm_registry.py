@@ -339,3 +339,14 @@ def test_no_well_known_model_id_literals_in_source() -> None:
         if pattern.search(path.read_text(encoding="utf-8"))
     }
     assert not offenders
+
+
+def test_models_for_returns_sorted_ids_of_one_provider() -> None:
+    registry = load_registry([FIXTURE_REGISTRY_DIR])
+
+    assert registry.models_for("fakeco") == sorted([PRICED, FREE])
+    assert "other-model" not in registry.models_for("fakeco")
+
+
+def test_models_for_unknown_provider_is_empty() -> None:
+    assert load_registry([FIXTURE_REGISTRY_DIR]).models_for("nobody") == []

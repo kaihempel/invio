@@ -193,6 +193,34 @@ warning). Disabling a job with a broken stored config still pauses it, then rais
 Record repositories for runs, items, digests, notifications and LLM usage live in
 `invio.db.repositories`; they flush but never commit (use `session_scope`).
 
+### Managing jobs
+
+`invio job` manages jobs through `JobService`; every command needs `INVIO_DATABASE_URL`.
+
+| Command | What it does |
+|---|---|
+| `create [--from-file PATH] [--name NAME]` | Interactive wizard, or create from a job YAML without prompts |
+| `list` | Table of all jobs: enabled, frequency, next run, last run status |
+| `show NAME` | Status header plus the full YAML |
+| `edit NAME` | Edit the YAML in `$VISUAL` / `$EDITOR` (falls back to `vi`, or `notepad` on Windows) |
+| `enable NAME` / `disable NAME` | Schedule or pause a job (repeating is a no-op) |
+| `delete NAME [--yes/-y]` | Delete a job and its run history (asks first unless `--yes`) |
+| `export NAME [-o PATH]` | Write the YAML to stdout or atomically to a file |
+| `import FILE [--name NAME] [--replace]` | Store a job file under `--name` or the file stem |
+
+The wizard asks for schedule, recipients, sources, keywords, description, LLM and limits, rejects
+invalid answers inline and shows the YAML before saving. Source URLs are checked for reachability
+(and, for RSS, for a feed document); a failed check is only a warning you can override. A model
+that is not registered for the chosen provider is accepted after a warning: runs fail until
+`models.d/<provider>.yaml` lists it. `create --from-file`, `import` and `delete --yes` never
+prompt, so they work in scripts without a terminal; the wizard and an unconfirmed `delete` exit 2
+without one. `edit` validates the saved text and offers to re-open the editor with your edits;
+the job name is never read from the file. Ctrl+C prints `aborted; nothing saved`.
+
+Exit codes: `0` success (including a no-op enable/disable and an unchanged edit); `1` not found,
+already exists, invalid name, aborted, declined preview or delete, aborted edit; `2` invalid job
+file or stored config, missing setting, or an interactive command without a terminal.
+
 ## LLM layer
 
 `invio.llm` is the provider-neutral LLM contract used by pipeline nodes. A provider offers
@@ -245,7 +273,8 @@ the `LLMProvider` enum in `invio.config.job` extended.
 
 ```
 src/invio/
-  cli/          Typer app (main.py) and auto-discovered commands/
+  cli/          Typer app (main.py) and auto-discovered commands/ (db.py, job.py);
+                wizard.py, prompts.py (prompt seam), source_check.py, editor.py
   config/       settings, job.py (job file models + YAML load/save)
   domain.py     shared records, status enums, url_hash (stdlib only)
   db/           models, engine/session helpers, repositories.py, migrations/ (Alembic)

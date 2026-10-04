@@ -26,6 +26,7 @@ from invio.config.job import (
     dump_yaml,
     job_json_schema,
     load_yaml,
+    loads_yaml,
     write_yaml,
 )
 from tests.job_helpers import BAD_JOB, EXAMPLE
@@ -890,3 +891,71 @@ def test_write_yaml_retries_temp_name_collision(
     write_yaml(load_yaml(EXAMPLE), tmp_path / "job.yaml")
 
     assert sorted(p.name for p in tmp_path.iterdir()) == [".job.yaml.taken.tmp", "job.yaml"]
+
+
+# --- loads_yaml ----------------------------------------------------------------------------
+
+
+def test_loads_yaml_matches_load_yaml() -> None:
+    text = EXAMPLE.read_text(encoding="utf-8")
+
+    assert loads_yaml(text) == load_yaml(EXAMPLE)
+
+
+def test_loads_yaml_strips_bom() -> None:
+    assert loads_yaml("\ufeff" + EXAMPLE.read_text(encoding="utf-8")) == load_yaml(EXAMPLE)
+
+
+def test_loads_yaml_malformed_yaml_has_position() -> None:
+    with pytest.raises(JobConfigError) as info:
+        loads_yaml("a: 1\nb: [unclosed\n")
+
+    assert len(info.value.errors) == 1
+    assert info.value.errors[0].startswith("invalid YAML: ")
+    assert re.search(r"\(line \d+, column \d+\)$", info.value.errors[0])
+    assert info.value.path is None
+
+
+@pytest.mark.parametrize("text", ["", "- a\n", "just text\n"])
+def test_loads_yaml_requires_mapping(text: str) -> None:
+    with pytest.raises(JobConfigError) as info:
+        loads_yaml(text)
+
+    assert info.value.errors == ["job file must contain a mapping at the top level"]
+
+
+def test_loads_yaml_field_errors_match_load_yaml(tmp_path: Path) -> None:
+    file = tmp_path / "bad.yaml"
+    file.write_text(BAD_JOB, encoding="utf-8")
+    with pytest.raises(JobConfigError) as from_file:
+        load_yaml(file)
+    with pytest.raises(JobConfigError) as from_text:
+        loads_yaml(BAD_JOB)
+
+    assert from_text.value.errors == from_file.value.errors
+    assert from_text.value.path is None
+
+
+def test_loads_yaml_rejects_duplicate_keys() -> None:
+    with pytest.raises(JobConfigError) as info:
+        loads_yaml("a: 1\na: 2\n")
+
+    assert "found duplicate key" in info.value.errors[0]
+
+
+def test_loads_yaml_source_is_reflected_in_error_path() -> None:
+    with pytest.raises(JobConfigError) as info:
+        loads_yaml(BAD_JOB, source=Path("x.yaml"))
+
+    assert info.value.path == Path("x.yaml")
+    assert str(info.value).startswith("invalid job file x.yaml:")
+
+
+def test_loads_yaml_source_keeps_file_messages() -> None:
+    with pytest.raises(JobConfigError) as info:
+        loads_yaml("a: [x\n", source=Path("x.yaml"))
+    assert info.value.errors[0].startswith("invalid YAML in job file x.yaml: ")
+
+    with pytest.raises(JobConfigError) as info:
+        loads_yaml("- a\n", source=Path("x.yaml"))
+    assert info.value.errors == ["job file x.yaml must contain a mapping at the top level"]
