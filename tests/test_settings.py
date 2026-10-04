@@ -218,7 +218,7 @@ def test_http_client_defaults() -> None:
         ("HTTP_CONTACT", "ops@example.org\nX-Injected: 1"),
         ("HTTP_CONTACT", "a\rb"),
         ("HTTP_CONTACT", ""),
-        ("HTTP_CONTACT", "a\x00b"),
+        ("HTTP_CONTACT", "a\x07b"),
         ("HTTP_CONTACT", "a\tb"),
     ],
 )

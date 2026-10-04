@@ -331,6 +331,9 @@ def test_total_deadline_stops_slow_drip(monkeypatch: pytest.MonkeyPatch) -> None
         ("see http://bob:s3cret@h/x", "see http://h/x"),
         ("https://bob:pa@ss@h/x", "https://h/x"),
         ("https://h/x?a=b@c", "https://h/x?a=b@c"),
+        ("http://host?x=a@b", "http://host?x=a@b"),
+        ("http://host#a@b", "http://host#a@b"),
+        ("http://u:p@host?x=a@b", "http://host?x=a@b"),
         ("no url here", "no url here"),
     ],
 )
