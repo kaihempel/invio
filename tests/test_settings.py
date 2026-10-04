@@ -117,6 +117,24 @@ def test_invalid_log_level_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
         Settings()
 
 
+def test_llm_timeout_defaults_to_sixty_seconds() -> None:
+    assert Settings().llm_timeout_seconds == 60.0
+
+
+def test_llm_timeout_is_read_from_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("INVIO_LLM_TIMEOUT_SECONDS", "2.5")
+
+    assert Settings().llm_timeout_seconds == 2.5
+
+
+@pytest.mark.parametrize("raw", ["0", "-1", "abc", "inf", "nan"])
+def test_invalid_llm_timeout_is_rejected(monkeypatch: pytest.MonkeyPatch, raw: str) -> None:
+    monkeypatch.setenv("INVIO_LLM_TIMEOUT_SECONDS", raw)
+
+    with pytest.raises(ValidationError, match="llm_timeout_seconds"):
+        Settings()
+
+
 def test_get_settings_is_cached(monkeypatch: pytest.MonkeyPatch) -> None:
     first = get_settings()
     monkeypatch.setenv("INVIO_SMTP_HOST", "changed")

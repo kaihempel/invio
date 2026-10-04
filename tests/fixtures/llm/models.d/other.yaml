@@ -1,0 +1,7 @@
+schema_version: 1
+provider: other
+models:
+  other-model:
+    input_price_per_mtok: 1
+    output_price_per_mtok: 3
+    context_window: 32000

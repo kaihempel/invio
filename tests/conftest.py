@@ -178,3 +178,43 @@ def job_service(
     from invio.services.jobs import JobService
 
     return JobService(session_factory(db_engine), next_run=recording_next_run, clock=fake_clock)
+
+
+@pytest.fixture
+def llm_registry_dir(tmp_path: Path, job_data: dict[str, Any]) -> Path:
+    """A ``models.d`` directory declaring the ``job_data`` models as ``mistral`` models.
+
+    Also switches ``job_data`` to the ``mistral`` provider.
+    """
+    from tests.llm_helpers import write_registry
+
+    job_data["llm"]["provider"] = "mistral"
+    entry: dict[str, object] = {
+        "input_price_per_mtok": 1,
+        "output_price_per_mtok": 2,
+        "context_window": 1000,
+    }
+    models = {model: entry for model in job_data["llm"]["models"].values()}
+    return write_registry(tmp_path / "registry", "mistral", models)
+
+
+@pytest.fixture
+def patched_providers(monkeypatch: pytest.MonkeyPatch) -> Callable[[str, Any], None]:
+    """Isolate the provider registry; returns ``register(name, provider_instance)``.
+
+    Discovery is marked as done, so only providers registered through the helper exist.
+    """
+    from invio.llm import factory
+
+    monkeypatch.setattr(factory, "_REGISTRY", {})
+    monkeypatch.setattr(factory, "_discovered", True)
+
+    def register(name: str, provider: Any) -> None:
+        class _Registered:
+            @classmethod
+            def from_settings(cls, settings: Any) -> Any:
+                return provider
+
+        factory.register_provider(name)(_Registered)
+
+    return register
