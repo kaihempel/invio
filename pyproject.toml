@@ -6,6 +6,8 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "alembic>=1.20",
+    "httpx2>=2.13",
+    "mistralai>=3.0,<4",
     "pydantic-settings>=2.15.0",
     "pydantic[email]>=2.13",
     "pymysql>=1.2",
@@ -72,6 +74,7 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 addopts = ["-ra", "--strict-markers", "--strict-config"]
 markers = [
+    "live: real calls to external LLM providers (skipped unless -m names live, e.g. -m live)",
     "db: persistence tests that run on SQLite and, with INVIO_TEST_DATABASE_URL, on MariaDB",
 ]
 

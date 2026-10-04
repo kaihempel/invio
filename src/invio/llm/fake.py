@@ -105,7 +105,12 @@ class FakeProvider:
                 system_text, user_text, model=model, temperature=temperature, max_tokens=None
             )
 
-        return await structured_with_repair(request, system, user, schema)
+        return await structured_with_repair(
+            request, system, user, schema, provider=self.name, model=model
+        )
+
+    async def aclose(self) -> None:
+        """Nothing to release: the fake opens no connections."""
 
 
 if TYPE_CHECKING:

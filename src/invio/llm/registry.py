@@ -16,7 +16,7 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, ValidationError, field_validator
 
 import invio.llm
-from invio.llm.base import ModelRegistryError, Usage
+from invio.llm.base import LLMConfigError, ModelRegistryError, Usage
 
 _PRICE_UNIT = Decimal(1_000_000)
 _COST_PRECISION = Decimal("0.000001")
@@ -69,9 +69,29 @@ class ModelRegistry:
         """Return all registered model ids."""
         return frozenset(self._models)
 
-    def models_for(self, provider: str) -> list[str]:
-        """Return the sorted ids registered for ``provider`` (empty if it has none)."""
-        return sorted(m.model_id for m in self._models.values() if m.provider == provider)
+    def models_for(self, provider: str) -> list[ModelInfo]:
+        """Return the entries of ``provider``, ordered by model id."""
+        return sorted(
+            (info for info in self._models.values() if info.provider == provider),
+            key=lambda info: info.model_id,
+        )
+
+    def cheapest(self, provider: str) -> ModelInfo | None:
+        """Return the model of ``provider`` with the lowest input + output price (ties: by id)."""
+        return min(
+            self.models_for(provider),
+            key=lambda info: info.input_price_per_mtok + info.output_price_per_mtok,
+            default=None,
+        )
+
+    def require(self, model_id: str, provider: str) -> ModelInfo:
+        """Return the entry of ``model_id``; ``LLMConfigError`` unless ``provider`` owns it."""
+        info = self._models.get(model_id)
+        if info is None or info.provider != provider:
+            raise LLMConfigError(
+                f"model '{model_id}' is not registered for LLM provider '{provider}'"
+            )
+        return info
 
     def cost(self, model_id: str, usage: Usage) -> Decimal | None:
         """Return the USD cost of ``usage`` (6 decimals) or ``None`` for an unknown model."""

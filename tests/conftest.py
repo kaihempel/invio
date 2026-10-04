@@ -23,6 +23,32 @@ if TYPE_CHECKING:
     from invio.services.jobs import JobService
 
 
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    """Skip ``live`` tests unless the ``-m`` expression names them (e.g. ``-m live``).
+
+    Unlike ``addopts = -m "not live"``, this keeps them skipped when another ``-m`` expression
+    such as ``-m db`` replaces the default one.
+    """
+    if "live" in config.getoption("markexpr"):
+        return
+    skip = pytest.mark.skip(reason="live test: opt in with -m live")
+    for item in items:
+        if item.get_closest_marker("live") is not None:
+            item.add_marker(skip)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _discovered_providers() -> None:
+    """Run real provider discovery once, so provider modules register in the real registry.
+
+    Tests that empty the registry and re-run discovery cannot re-register a module that is
+    already imported; this keeps the order of the tests irrelevant.
+    """
+    from invio.llm import factory
+
+    factory._discover()
+
+
 @pytest.fixture(autouse=True)
 def isolated_settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """Keep the developer's real ``.env`` and ``INVIO_*`` variables out of every test."""

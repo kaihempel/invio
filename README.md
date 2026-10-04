@@ -246,6 +246,39 @@ variable), `LLMUnavailableError` (also a request timeout) and `LLMInvalidOutputE
 configuration problems raise `LLMConfigError`. Every call logs one `llm.call` line (provider,
 model, tokens, `cost_usd`, `duration_ms`, `repaired`) and never logs prompts, answers or keys.
 
+### Mistral
+
+Set `INVIO_MISTRAL_API_KEY` (see `.env.example`) and name `provider: mistral` in a job's `llm`
+section. The shipped, version-pinned models are listed in `src/invio/llm/models.d/mistral.yaml`
+(no `-latest` aliases). The provider uses the official `mistralai` SDK; all retrying is done by
+invio: 429, 5xx and connection failures are retried up to 3 times with exponential backoff
+(1, 2, 4 s, +-25 % jitter), a `Retry-After` header is honoured up to 60 s (a longer one fails
+at once), and timeouts, authentication failures, other 4xx answers and requests that cannot be
+sent (bad URL, unsupported protocol) are not retried. Every failure, including an undecodable
+or redirect-looping response, maps to the typed errors above; `LLMRateLimitError.retry_after`
+carries the wait the provider asked for, and the new `LLMInvalidRequestError` (with `status`)
+means the provider rejected the request itself. Each retry logs one `llm.retry` line.
+Structured requests send the schema in strict mode (`additionalProperties: false` on every
+object).
+
+The HTTP client is created per event loop. Call `await provider.aclose()` before the loop ends
+to close its connections (the CLI does this); the provider stays usable afterwards.
+
+Check a provider setup with one tiny request:
+
+```
+invio llm test mistral [--model MODEL]
+```
+
+It prints `ok provider=... model=... input_tokens=... output_tokens=... duration_ms=...` and
+exits 0; exit 1 means the provider call failed (`Error: <ErrorType>: ...`), exit 2 a
+configuration problem (unknown provider, missing key, model not in the registry). The default
+model is the provider's cheapest registered one.
+
+The test suite never touches the network. Optional live tests (plain and structured call)
+use the real API when `INVIO_MISTRAL_API_KEY` is set: `uv run pytest -m live`. Without a `-m`
+expression that names `live`, they are skipped.
+
 Models and prices live in `src/invio/llm/models.d/<provider>.yaml` (USD per 1M tokens):
 
 ```yaml
@@ -281,7 +314,7 @@ src/invio/
   services/     jobs.py (JobService: job CRUD, YAML import/export)
   graph/        LangGraph pipelines
   sources/      source adapters
-  llm/          base, registry, factory, fake, models.d/ (LLM layer)
+  llm/          base, registry, factory, fake, mistral, models.d/ (LLM layer)
   notify/       notifications
   scheduling/   next-run calculation (next_run.py)
 alembic.ini     developer entry point for `uv run alembic ...`

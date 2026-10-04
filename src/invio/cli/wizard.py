@@ -364,7 +364,7 @@ def _known_models(s: _Session) -> list[str] | None:
     if s.registry is None or s.registry_broken:
         return None
     try:
-        return s.registry.models_for(s.provider)
+        return [info.model_id for info in s.registry.models_for(s.provider)]
     except ModelRegistryError as exc:
         s.registry_broken = True
         s.warn(WARNING_NO_REGISTRY.format(exc))
