@@ -218,6 +218,8 @@ def test_http_client_defaults() -> None:
         ("HTTP_CONTACT", "ops@example.org\nX-Injected: 1"),
         ("HTTP_CONTACT", "a\rb"),
         ("HTTP_CONTACT", ""),
+        ("HTTP_CONTACT", "a\x00b"),
+        ("HTTP_CONTACT", "a\tb"),
     ],
 )
 def test_invalid_http_settings_are_rejected(
@@ -226,4 +228,12 @@ def test_invalid_http_settings_are_rejected(
     monkeypatch.setenv(f"INVIO_{name}", raw)
 
     with pytest.raises(ValidationError, match=name.lower()):
+        Settings()
+
+
+def test_http_total_timeout_must_cover_read_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("INVIO_HTTP_READ_TIMEOUT_SECONDS", "20")
+    monkeypatch.setenv("INVIO_HTTP_TOTAL_TIMEOUT_SECONDS", "10")
+
+    with pytest.raises(ValidationError, match="http_total_timeout_seconds"):
         Settings()

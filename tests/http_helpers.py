@@ -29,7 +29,7 @@ __all__ = [
     "server",
 ]
 
-LOOPBACK: list[IPv4Network | IPv6Network] = [ip_network("127.0.0.0/8")]
+LOOPBACK: tuple[IPv4Network | IPv6Network, ...] = (ip_network("127.0.0.0/8"),)
 
 
 @dataclass
@@ -74,6 +74,8 @@ class LoopbackServer:
         owner = self
 
         class Handler(http.server.BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"  # chunked framing needs HTTP/1.1
+
             def log_message(self, format: str, *args: object) -> None:
                 pass
 
@@ -120,8 +122,10 @@ class LoopbackServer:
             self._requests.append(RecordedRequest(handler.path, headers, started))
         route = self.routes.get(handler.path, Route(status=404))
         if route.delay:
-            time.sleep(route.delay)
+            self._release.wait(route.delay)
         handler.send_response(route.status)
+        handler.send_header("Connection", "close")  # one request per connection
+        handler.close_connection = True
         for name, value in route.headers.items():
             handler.send_header(name, value)
         has_length = any(name.lower() == "content-length" for name in route.headers)
@@ -132,7 +136,7 @@ class LoopbackServer:
         handler.end_headers()
         if route.stall:
             handler.wfile.flush()
-            self._release.wait()
+            self._release.wait(30)  # never block a handler thread forever
         elif route.chunked:
             for start in range(0, len(route.body), 1024):
                 chunk = route.body[start : start + 1024]

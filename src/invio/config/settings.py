@@ -12,10 +12,10 @@ import logging
 import os
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Self
 
 from dotenv import dotenv_values
-from pydantic import Field, SecretStr, field_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 ENV_PREFIX = "INVIO_"
@@ -113,10 +113,17 @@ class Settings(BaseSettings):
     @field_validator("http_contact")
     @classmethod
     def _validate_http_contact(cls, value: str) -> str:
-        # The contact ends up in the User-Agent header; a line break would allow header injection.
-        if "\r" in value or "\n" in value:
-            raise ValueError("must not contain line breaks")
+        # The contact ends up in the User-Agent header; control characters (CR/LF in
+        # particular) would allow header injection.
+        if any(ord(char) < 32 or ord(char) == 127 for char in value):
+            raise ValueError("must not contain control characters")
         return value
+
+    @model_validator(mode="after")
+    def _validate_http_timeouts(self) -> Self:
+        if self.http_total_timeout_seconds < self.http_read_timeout_seconds:
+            raise ValueError("http_total_timeout_seconds must be >= http_read_timeout_seconds")
+        return self
 
     def require_secret(self, name: SecretName) -> str:
         """Return the plain value of secret ``name`` or raise :class:`MissingSettingError`."""
