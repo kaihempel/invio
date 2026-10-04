@@ -94,6 +94,9 @@ def server(monkeypatch: pytest.MonkeyPatch) -> Iterator[Server]:
             if path == "/nohead" and self.command == "HEAD":
                 self.send_error(405)
                 return
+            if path == "/headforbidden" and self.command == "HEAD":
+                self.send_error(403)
+                return
             body, ctype = {
                 "/feed": (RSS, "application/rss+xml"),
                 "/nohead": (RSS, "application/rss+xml"),
@@ -169,6 +172,19 @@ def test_head_not_allowed_falls_back_to_get(server: Server) -> None:
     result = HttpSourceChecker().check(f"{server.base}/nohead", expect_feed=False)
 
     assert result.reachable is True
+    assert [m for m, _, _ in server.requests] == ["HEAD", "GET"]
+
+
+def test_head_rejected_falls_back_to_get(server: Server) -> None:
+    result = HttpSourceChecker().check(f"{server.base}/headforbidden", expect_feed=False)
+
+    assert (result.reachable, result.status) == (True, 200)
+    assert [m for m, _, _ in server.requests] == ["HEAD", "GET"]
+
+
+def test_get_error_is_reported_after_head_error(server: Server) -> None:
+    HttpSourceChecker().check(f"{server.base}/missing", expect_feed=False)
+
     assert [m for m, _, _ in server.requests] == ["HEAD", "GET"]
 
 
@@ -307,3 +323,16 @@ def test_total_deadline_stops_slow_drip(monkeypatch: pytest.MonkeyPatch) -> None
 
     assert result.reachable is False
     assert result.reason == "timeout after 10s"
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("see http://bob:s3cret@h/x", "see http://h/x"),
+        ("https://bob:pa@ss@h/x", "https://h/x"),
+        ("https://h/x?a=b@c", "https://h/x?a=b@c"),
+        ("no url here", "no url here"),
+    ],
+)
+def test_redact(text: str, expected: str) -> None:
+    assert source_check.redact(text) == expected

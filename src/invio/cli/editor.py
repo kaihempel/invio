@@ -10,6 +10,7 @@ import shlex
 import subprocess
 import tempfile
 from collections.abc import Mapping
+from pathlib import Path
 
 __all__ = ["EditorError", "default_editor", "edit_text"]
 
@@ -29,7 +30,7 @@ def edit_text(text: str, *, env: Mapping[str, str] = os.environ) -> str | None:
     Raises :class:`EditorError` when the editor cannot be started or exits non-zero.
     """
     try:
-        command = shlex.split(default_editor(env=env), posix=os.name != "nt")
+        command = _split_command(default_editor(env=env))
     except ValueError as exc:
         raise EditorError(f"cannot parse editor command: {exc}") from exc
     if not command:
@@ -48,6 +49,22 @@ def edit_text(text: str, *, env: Mapping[str, str] = os.environ) -> str | None:
             edited = handle.read()
     except UnicodeDecodeError as exc:
         raise EditorError(f"edited file is not valid UTF-8: {exc}") from exc
+    except OSError as exc:  # e.g. the editor removed or renamed the file
+        raise EditorError(f"cannot read edited file: {exc}") from exc
     finally:
-        os.unlink(path)
+        Path(path).unlink(missing_ok=True)
     return None if edited == text else edited
+
+
+def _split_command(command: str, *, name: str = os.name) -> list[str]:
+    """Split an editor command; on Windows also drop the quotes around a token.
+
+    ``shlex.split(posix=False)`` keeps quote characters, so ``"C:\\Program Files\\x.exe"``
+    would otherwise not be found.
+    """
+    if name != "nt":
+        return shlex.split(command)
+    return [
+        token[1:-1] if len(token) >= 2 and token[0] == token[-1] == '"' else token
+        for token in shlex.split(command, posix=False)
+    ]

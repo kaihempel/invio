@@ -39,13 +39,18 @@ class JobSummary:
     name: str
     enabled: bool
     next_run_at: datetime | None
-    config: JobConfig | None          # None iff config_errors
-    config_errors: list[str]
+    config: JobConfig | None          # None iff the stored config does not validate
     last_run_status: RunStatus | None # None = never run
 
 class JobService:
     def overview(self) -> list[JobSummary]
         """All jobs ordered by name, including ones whose stored config is invalid."""
+
+    def names(self) -> list[str]
+        """All job names ordered by name; no config validation (cheap existence checks)."""
+
+    def is_enabled(self, name: str) -> bool
+        """Whether the job is enabled, even with an invalid config; JobNotFoundError if missing."""
 
     def stored_config(self, name: str) -> dict[str, Any]
         """The raw stored config mapping (may be invalid); JobNotFoundError if missing."""

@@ -10,7 +10,7 @@ import json
 import logging
 import pickle
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -1041,7 +1041,6 @@ def test_overview_orders_by_name_and_passes_through_fields(
     assert rows[0].enabled is True
     assert rows[0].next_run_at == fake_clock.now + timedelta(hours=1)
     assert rows[0].config == validate_job(job_data)
-    assert rows[0].config_errors == []
     assert rows[0].last_run_status is None
     assert rows[1].enabled is False
     assert rows[1].next_run_at is None
@@ -1061,7 +1060,6 @@ def test_overview_includes_invalid_config(
         rows = {r.name: r for r in job_service.overview()}
 
     assert rows["broken"].config is None
-    assert rows["broken"].config_errors == ["schedule.timezone: unknown timezone 'Europe/Atlantis'"]
     assert rows["ok"].config is not None
     assert not [r for r in caplog.records if r.name == "invio.services.jobs"]
 
@@ -1075,7 +1073,33 @@ def test_overview_null_stored_config_is_invalid(
     (row,) = job_service.overview()
 
     assert row.config is None
-    assert row.config_errors
+
+
+def test_names_skips_validation(
+    job_service: JobService, job_data: dict[str, Any], store: Callable[[], Any]
+) -> None:
+    job_service.create("b", job_data)
+    job_service.create("a", job_data)
+    _corrupt_timezone(store, "b")
+
+    assert job_service.names() == ["a", "b"]
+
+
+def test_is_enabled_tolerates_invalid_config(
+    job_service: JobService, job_data: dict[str, Any], store: Callable[[], Any]
+) -> None:
+    job_service.create("a", job_data)
+    _corrupt_timezone(store, "a")
+
+    assert job_service.is_enabled("a") is True
+    with suppress(StoredJobConfigError):
+        job_service.set_enabled("a", False)
+    assert job_service.is_enabled("a") is False
+
+
+def test_is_enabled_unknown_job(job_service: JobService) -> None:
+    with pytest.raises(JobNotFoundError):
+        job_service.is_enabled("missing")
 
 
 def test_overview_last_run_status_is_newest_run(

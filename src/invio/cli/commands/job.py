@@ -12,7 +12,7 @@ import sys
 from collections.abc import Iterator
 from datetime import datetime
 from pathlib import Path
-from typing import Annotated, NoReturn
+from typing import Annotated
 from zoneinfo import ZoneInfo
 
 import typer
@@ -22,9 +22,10 @@ from rich.table import Table
 from sqlalchemy.exc import SQLAlchemyError
 
 from invio.cli import editor
+from invio.cli.errors import fail
 from invio.cli.prompts import Prompter, QuestionaryPrompter, WizardAborted
-from invio.cli.source_check import SourceChecker
-from invio.cli.wizard import run_wizard
+from invio.cli.source_check import HttpSourceChecker, SourceChecker
+from invio.cli.wizard import WARNING_NO_REGISTRY, run_wizard
 from invio.config.job import (
     Frequency,
     JobConfigError,
@@ -49,7 +50,6 @@ from invio.services.jobs import (
 app = typer.Typer(help="Manage research jobs.", no_args_is_help=True)
 
 _DASH = "—"
-_WARNING_NO_REGISTRY = "warning: model registry unavailable ({}); model names are not checked"
 
 
 # --- test seams ------------------------------------------------------------------------------
@@ -64,8 +64,6 @@ def _make_prompter() -> Prompter:
 
 
 def _make_checker() -> SourceChecker:
-    from invio.cli.source_check import HttpSourceChecker
-
     return HttpSourceChecker()
 
 
@@ -82,7 +80,7 @@ def _make_registry() -> ModelRegistry | None:
     try:
         return default_registry()
     except ModelRegistryError as exc:
-        typer.echo(_WARNING_NO_REGISTRY.format(exc), err=True)
+        typer.echo(WARNING_NO_REGISTRY.format(exc), err=True)
         return None
 
 
@@ -103,35 +101,28 @@ def _default_timezone() -> str:
 # --- helpers ---------------------------------------------------------------------------------
 
 
-def _fail(message: str, code: int) -> NoReturn:
-    typer.echo(message, err=True)
-    raise typer.Exit(code=code)
-
-
 @contextlib.contextmanager
 def _errors() -> Iterator[None]:
     """Map the expected exceptions to a message on stderr and an exit code (no traceback)."""
     try:
         yield
     except (JobNotFoundError, JobExistsError) as exc:
-        _fail(f"Error: {exc}", 1)
+        raise fail(f"Error: {exc}", 1) from exc
     except JobNameError as exc:
-        _fail(f"Error: invalid job name '{exc.name}': {exc.rule}", 1)
-    except StoredJobConfigError as exc:  # before JobConfigError, its base class
-        _fail(str(exc), 2)
-    except JobConfigError as exc:
-        _fail(str(exc), 2)
+        raise fail(f"Error: invalid job name '{exc.name}': {exc.rule}", 1) from exc
+    except JobConfigError as exc:  # includes StoredJobConfigError
+        raise fail(str(exc), 2) from exc
     except MissingSettingError as exc:
-        _fail(f"Configuration error: {exc}", 2)
-    except (WizardAborted, KeyboardInterrupt, EOFError):
-        _fail("aborted; nothing saved", 1)
+        raise fail(f"Configuration error: {exc}", 2) from exc
+    except (WizardAborted, KeyboardInterrupt, EOFError) as exc:
+        raise fail("aborted; nothing saved", 1) from exc
     except SQLAlchemyError as exc:
         # Deliberately only the type name: the message may embed the database URL or SQL.
-        _fail(
+        raise fail(
             f"Error: database error ({type(exc).__name__}); "
             "is the schema current? run 'invio db upgrade'",
             1,
-        )
+        ) from exc
 
 
 def _fmt_next_run(next_run_at: datetime | None, tz: str) -> str:
@@ -196,7 +187,7 @@ def show(name: Annotated[str, typer.Argument(help="Job name.")]) -> None:
             record = service.get_by_name(name)
         except StoredJobConfigError as exc:
             typer.echo(_stored_yaml(service, name), nl=False)
-            _fail(str(exc), 2)
+            raise fail(str(exc), 2) from exc
         tz = record.config.schedule.timezone
         typer.echo(f"name: {record.name}")
         typer.echo(f"enabled: {_yes_no(record.enabled)}")
@@ -209,24 +200,20 @@ def _stored_yaml(service: JobService, name: str) -> str:
     return yaml.safe_dump(service.stored_config(name), sort_keys=False, allow_unicode=True)
 
 
-def _created_line(verb: str, name: str, record: JobRecord) -> str:
+def _status_line(verb: str, name: str, record: JobRecord) -> str:
     next_run = _fmt_next_run(record.next_run_at, record.config.schedule.timezone)
     return f"{verb} job '{name}' (next run: {next_run})"
 
 
-def _job_names(service: JobService) -> set[str]:
-    return {summary.name for summary in service.overview()}
-
-
 def _create_interactive(name: str | None) -> None:
     if not _is_interactive():
-        _fail(
+        raise fail(
             "Error: interactive creation needs a terminal; "
             "use 'invio job create --from-file <job.yaml>'",
             2,
         )
     service = _make_service()
-    existing = _job_names(service)
+    existing = set(service.names())
     if name is not None:
         check_job_name(name)  # before the first question
         if name in existing:
@@ -240,10 +227,10 @@ def _create_interactive(name: str | None) -> None:
         default_timezone=_default_timezone(),
     )
     if result is None:
-        _fail("job not created", 1)
+        raise fail("job not created", 1)
     job_name, config = result
     record = service.create(job_name, config)
-    typer.echo(_created_line("created", job_name, record))
+    typer.echo(_status_line("created", job_name, record))
 
 
 @app.command()
@@ -259,7 +246,7 @@ def create(
             _create_interactive(name)
             return
         record = _make_service().import_yaml(from_file, name, replace=False)
-        typer.echo(_created_line("created", record.name, record))
+        typer.echo(_status_line("created", record.name, record))
 
 
 @app.command()
@@ -278,37 +265,41 @@ def edit(name: Annotated[str, typer.Argument(help="Job name.")]) -> None:
                 edited = _edit_text(text)
             except editor.EditorError as exc:
                 typer.echo(f"Error: {exc}", err=True)
-                _fail("edit aborted; job unchanged", 1)
-            if edited is None and not first_round:
+                raise fail("edit aborted; job unchanged", 1) from exc
+            if edited is None:
+                if first_round:
+                    typer.echo("no changes")
+                    return
                 edited = text  # closed without saving: re-validate the (still invalid) text
-            if edited is None or (first_round and edited == text):
-                typer.echo("no changes")
-                return
             first_round = False
             try:
                 config = loads_yaml(edited)
             except JobConfigError as exc:
                 typer.echo(str(exc), err=True)
                 if not typer.confirm("Re-open the editor?", default=True):
-                    _fail("edit aborted; job unchanged", 1)
+                    raise fail("edit aborted; job unchanged", 1) from exc
                 text = edited
                 continue
             break
         record = service.update(name, config)
-        typer.echo(_created_line("updated", name, record))
+        typer.echo(_status_line("updated", name, record))
 
 
 def _set_enabled(name: str, enabled: bool) -> None:
     with _errors():
         service = _make_service()
-        summary = next((row for row in service.overview() if row.name == name), None)
-        if summary is None:
-            raise JobNotFoundError(name)
-        if summary.enabled == enabled:
-            typer.echo(f"job '{name}' is already {'enabled' if enabled else 'disabled'}")
-            return
+        was_enabled = service.is_enabled(name)
         if enabled:
-            typer.echo(_created_line("enabled", name, service.set_enabled(name, True)))
+            # Always through the service: it refuses an invalid stored config (exit 2), even
+            # when the job is already enabled.
+            record = service.set_enabled(name, True)
+            if was_enabled:
+                typer.echo(f"job '{name}' is already enabled")
+            else:
+                typer.echo(_status_line("enabled", name, record))
+            return
+        if not was_enabled:
+            typer.echo(f"job '{name}' is already disabled")
             return
         try:
             service.set_enabled(name, False)
@@ -344,13 +335,13 @@ def delete(
     """Delete a job and its run history."""
     with _errors():
         service = _make_service()
-        if name not in _job_names(service):
+        if name not in service.names():
             raise JobNotFoundError(name)
         if not yes:
             if not _is_interactive():
-                _fail("Error: refusing to delete without confirmation; pass --yes", 2)
+                raise fail("Error: refusing to delete without confirmation; pass --yes", 2)
             if not typer.confirm(f"Delete job '{name}' and its run history?", default=False):
-                _fail("job not deleted", 1)
+                raise fail("job not deleted", 1)
         service.delete(name)
         typer.echo(f"deleted job '{name}'")
 
@@ -368,7 +359,7 @@ def export(
         try:
             text = service.export_yaml(name, output)
         except OSError as exc:
-            _fail(f"Error: cannot write {output}: {exc}", 1)
+            raise fail(f"Error: cannot write {output}: {exc}", 1) from exc
         if output is None:
             typer.echo(text, nl=False)
         else:
@@ -389,7 +380,7 @@ def import_job(
     with _errors():
         service = _make_service()
         target = name if name is not None else file.stem
-        existed = target in _job_names(service)
+        existed = target in service.names()
         record = service.import_yaml(file, name, replace=replace)
         verb = "replaced" if existed and replace else "imported"
         typer.echo(f"{verb} job '{record.name}'")

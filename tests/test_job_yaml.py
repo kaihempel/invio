@@ -818,7 +818,7 @@ def test_write_yaml_keeps_existing_file_mode(tmp_path: Path) -> None:
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX file modes")
-def test_write_yaml_new_file_honours_umask(tmp_path: Path) -> None:
+def test_write_yaml_new_file_is_private(tmp_path: Path) -> None:
     target = tmp_path / "job.yaml"
     umask = os.umask(0o022)
     try:
@@ -826,7 +826,7 @@ def test_write_yaml_new_file_honours_umask(tmp_path: Path) -> None:
     finally:
         os.umask(umask)
 
-    assert stat.S_IMODE(target.stat().st_mode) == 0o644
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX file modes")

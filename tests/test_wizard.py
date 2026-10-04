@@ -488,3 +488,52 @@ def test_validate_job_result_is_what_the_preview_shows() -> None:
 def test_no_owning_step_for_empty_error_list() -> None:
     assert wizard._owning_step([]) is None
     assert wizard._owning_step(["mystery: x"]) is None
+
+
+@pytest.mark.parametrize(
+    ("first", "again", "question", "default", "expected"),
+    [
+        (WEEKLY, ["weekly", "", "", ""], Q_WEEKDAY, "monday", "monday"),
+        (["monthly", "15", "06:00", "UTC"], ["monthly", "", "", ""], Q_DAY, "15", 15),
+    ],
+    ids=["weekday", "day-of-month"],
+)
+def test_reask_keeps_weekday_and_day_as_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+    first: list[str | bool],
+    again: list[str | bool],
+    question: str,
+    default: str,
+    expected: object,
+) -> None:
+    real = wizard.validate_job
+    calls = 0
+
+    def flaky(data: Any) -> JobConfig:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise JobConfigError(None, ["schedule.timezone: unknown timezone 'X'"])
+        return real(data)
+
+    monkeypatch.setattr(wizard, "validate_job", flaky)
+    answers = script(schedule=first)
+    answers[-1:-1] = again
+
+    result, prompter, _ = run(answers)
+
+    assert result is not None
+    assert prompter.asked.count(question) == 2
+    assert prompter.defaults[question] == default
+    schedule = result[1].schedule
+    assert expected in (schedule.weekday, schedule.day_of_month)
+
+
+def test_url_credentials_are_not_echoed() -> None:
+    bad, good = "https://bob:p@ss@down.example.com/f", "https://ok.example.com/f"
+    checker = FakeChecker({bad: CheckResult(False, None, "timeout after 10s", None)})
+
+    _, _, out = run(script(sources=["rss", bad, False, good, False]), checker=checker)
+
+    assert "down.example.com" in out.out
+    assert "p@ss" not in out.out + out.err and "bob" not in out.out + out.err

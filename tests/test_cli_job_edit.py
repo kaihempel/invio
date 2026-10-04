@@ -41,10 +41,10 @@ def test_valid_change(job_cli: JobCli, stored: str) -> None:
     assert record.next_run_at is not None
 
 
-@pytest.mark.parametrize("returned", [None, "same"])
-def test_no_changes(job_cli: JobCli, stored: str, returned: str | None) -> None:
+def test_no_changes(job_cli: JobCli, stored: str) -> None:
+    # editor.edit_text returns None when the text is unchanged.
     before = job_cli.service.get_by_name("a-job").updated_at
-    job_cli.use_editor(fake_editor(stored if returned == "same" else None))
+    job_cli.use_editor(fake_editor(None))
 
     result = job_cli.invoke(["edit", "a-job"])
 

@@ -6,6 +6,7 @@ type or exception crosses this boundary. Configuration contents are never logged
 """
 
 import builtins
+import contextlib
 import logging
 import os
 from collections.abc import Callable, Mapping
@@ -71,14 +72,13 @@ class JobRecord:
 class JobSummary:
     """One row of the job overview; unlike ``JobRecord`` it can describe an invalid job.
 
-    ``config`` is ``None`` exactly when ``config_errors`` is non-empty.
+    ``config`` is ``None`` exactly when the stored configuration does not validate.
     """
 
     name: str
     enabled: bool
     next_run_at: datetime | None
     config: JobConfig | None
-    config_errors: list[str]
     last_run_status: RunStatus | None
 
 
@@ -264,22 +264,28 @@ class JobService:
             summaries: builtins.list[JobSummary] = []
             for job in JobRepository(session).list():
                 config: JobConfig | None = None
-                errors: builtins.list[str] = []
-                try:
+                with contextlib.suppress(JobConfigError):
                     config = validate_job(job.config or {})
-                except JobConfigError as exc:
-                    errors = exc.errors
                 summaries.append(
                     JobSummary(
                         name=job.name,
                         enabled=job.enabled,
                         next_run_at=job.next_run_at,
                         config=config,
-                        config_errors=errors,
                         last_run_status=statuses.get(job.id),
                     )
                 )
         return summaries
+
+    def names(self) -> builtins.list[str]:
+        """Return all job names ordered by name, without validating any configuration."""
+        with session_scope(self._session_factory) as session:
+            return [job.name for job in JobRepository(session).list()]
+
+    def is_enabled(self, name: str) -> bool:
+        """Return whether the job is enabled (even if its stored config is invalid)."""
+        with session_scope(self._session_factory) as session:
+            return _require(JobRepository(session), name).enabled
 
     def stored_config(self, name: str) -> dict[str, Any]:
         """Return the raw stored config (possibly invalid); ``JobNotFoundError`` if absent."""

@@ -13,7 +13,7 @@ from xml.etree.ElementTree import Element, ParseError, XMLPullParser
 
 import invio
 
-__all__ = ["CheckResult", "HttpSourceChecker", "SourceChecker", "is_feed_document"]
+__all__ = ["CheckResult", "HttpSourceChecker", "SourceChecker", "is_feed_document", "redact"]
 
 _FEED_ROOTS: Final = frozenset(
     {
@@ -23,7 +23,8 @@ _FEED_ROOTS: Final = frozenset(
     }
 )
 _CHUNK: Final = 8192
-_USERINFO: Final = re.compile(r"(?<=//)[^/@\s]*@")
+# Greedy up to the last "@" before the path, so a password containing "@" is removed too.
+_USERINFO: Final = re.compile(r"(?<=//)[^/\s]*@")
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,7 +57,7 @@ def is_feed_document(head: bytes) -> bool:
     return False
 
 
-def _redact(text: str) -> str:
+def redact(text: str) -> str:
     """Remove ``user:password@`` from any URL in ``text``."""
     return _USERINFO.sub("", text)
 
@@ -80,7 +81,8 @@ def _opener() -> urllib.request.OpenerDirector:
 class HttpSourceChecker:
     """Check sources over HTTP(S) with the standard library.
 
-    Sends HEAD first, or GET when a feed check is wanted (or HEAD is not allowed), follows
+    Sends HEAD first, or GET when a feed check is wanted (or HEAD fails with any HTTP error,
+    since many servers reject HEAD although GET works), follows
     redirects and reads at most ``max_bytes`` of the body within ``timeout`` seconds in total.
     The socket timeout is per operation, so the body loop also enforces a total deadline.
 
@@ -103,13 +105,13 @@ class HttpSourceChecker:
         except TimeoutError:
             return CheckResult(False, None, self._timeout_reason(), None)
         except ssl.SSLError as exc:
-            return CheckResult(False, None, _redact(f"TLS error: {exc}"), None)
+            return CheckResult(False, None, redact(f"TLS error: {exc}"), None)
         except http.client.HTTPException:
             return CheckResult(False, None, "invalid HTTP response", None)
         except OSError as exc:
-            return CheckResult(False, None, _redact(f"connection failed: {exc}"), None)
+            return CheckResult(False, None, redact(f"connection failed: {exc}"), None)
         except ValueError as exc:
-            return CheckResult(False, None, _redact(f"invalid URL: {exc}"), None)
+            return CheckResult(False, None, redact(f"invalid URL: {exc}"), None)
 
     def _timeout_reason(self) -> str:
         return f"timeout after {self.timeout:g}s"
@@ -121,16 +123,15 @@ class HttpSourceChecker:
         if isinstance(reason, socket.gaierror):
             return "DNS lookup failed"
         if isinstance(reason, ssl.SSLError):
-            return _redact(f"TLS error: {reason}")
-        return _redact(f"connection failed: {reason}")
+            return redact(f"TLS error: {reason}")
+        return redact(f"connection failed: {reason}")
 
     def _check(self, url: str, expect_feed: bool) -> CheckResult:
         if not expect_feed:
             try:
                 return self._request(url, "HEAD", expect_feed=False)
             except urllib.error.HTTPError as exc:
-                if exc.code not in (405, 501):
-                    raise
+                exc.close()  # fall back to GET and report its result
         return self._request(url, "GET", expect_feed=expect_feed)
 
     def _request(self, url: str, method: str, *, expect_feed: bool) -> CheckResult:

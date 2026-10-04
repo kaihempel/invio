@@ -466,14 +466,15 @@ def dump_yaml(config: JobConfig) -> str:
 
 
 def _create_temp(target: Path) -> tuple[int, Path]:
-    """Create an exclusive temp file next to ``target`` with mode ``0o666`` minus umask.
+    """Create an exclusive temp file next to ``target`` with mode ``0o600``.
 
-    The kernel applies the umask on creation, so the process-wide umask is never touched.
+    Job files hold recipient addresses (and maybe URL credentials), so a new file is private.
+    The mode is passed to ``os.open``, so the process-wide umask is never touched.
     """
     while True:
         tmp = target.with_name(f".{target.name}.{secrets.token_hex(8)}.tmp")
         try:
-            return os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666), tmp
+            return os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), tmp
         except FileExistsError:
             continue
 
@@ -495,7 +496,7 @@ def write_yaml(config: JobConfig, path: str | os.PathLike[str]) -> str:
     Raises ``OSError``.
 
     A symlinked ``path`` is followed, so the link stays and its target is updated. An existing
-    file keeps its mode; a new file gets ``0o666`` minus umask.
+    file keeps its mode; a new file is private (``0o600``).
     """
     target = Path(os.path.realpath(path))
     text = dump_yaml(config)
@@ -505,7 +506,7 @@ def write_yaml(config: JobConfig, path: str | os.PathLike[str]) -> str:
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
-        with contextlib.suppress(FileNotFoundError):  # new file: keep the umask-based mode
+        with contextlib.suppress(FileNotFoundError):  # new file: keep the private mode
             os.chmod(tmp, stat.S_IMODE(target.stat().st_mode))
         os.replace(tmp, target)
     except BaseException:

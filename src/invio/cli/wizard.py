@@ -9,13 +9,13 @@ touches storage or the terminal directly (output goes through the injected ``ech
 import re
 from collections.abc import Callable, Collection
 from dataclasses import dataclass, field
-from typing import Any, Final
+from typing import Annotated, Any, Final, get_args
 
 import typer
-from pydantic import EmailStr, HttpUrl, TypeAdapter, ValidationError
+from pydantic import BaseModel, StrictInt, TypeAdapter, ValidationError
 
 from invio.cli.prompts import Prompter, Validator
-from invio.cli.source_check import SourceChecker
+from invio.cli.source_check import SourceChecker, redact
 from invio.config.job import (
     TIME_PATTERN,
     Frequency,
@@ -23,6 +23,9 @@ from invio.config.job import (
     JobConfigError,
     LimitsConfig,
     LLMProvider,
+    NotificationConfig,
+    RssSource,
+    ScheduleConfig,
     Weekday,
     dump_yaml,
     known_timezones,
@@ -34,12 +37,13 @@ from invio.services.jobs import JobNameError, check_job_name
 
 __all__ = [
     "OTHER",
+    "WARNING_NO_REGISTRY",
     "run_wizard",
     "validate_day_of_month",
     "validate_email",
+    "validate_limit",
     "validate_name",
     "validate_nonempty",
-    "validate_positive_int",
     "validate_time",
     "validate_timezone",
     "validate_url",
@@ -48,6 +52,7 @@ __all__ = [
 Echo = Callable[..., None]
 
 OTHER: Final = "Other…"
+WARNING_NO_REGISTRY: Final = "warning: model registry unavailable ({}); model names are not checked"
 
 Q_NAME: Final = "Job name"
 Q_FREQUENCY: Final = "How often should it run?"
@@ -91,8 +96,20 @@ _LIMIT_QUESTIONS: Final = (
     ("max_llm_tokens_per_run", "Max LLM tokens per run"),
 )
 
-_EMAIL: Final = TypeAdapter(EmailStr)
-_HTTP_URL: Final = TypeAdapter(HttpUrl)
+
+def _int_field_adapter(model: type[BaseModel], name: str) -> TypeAdapter[Any]:
+    """A ``TypeAdapter`` with the constraints of an (optional) integer model field.
+
+    Built from the model so the wizard's bounds cannot drift from ``JobConfig``.
+    """
+    return TypeAdapter(Annotated[StrictInt, *model.model_fields[name].metadata])
+
+
+# Element and field types taken from the models (``to`` is ``list[EmailStr]``).
+_EMAIL: Final = TypeAdapter(get_args(NotificationConfig.model_fields["to"].annotation)[0])
+_HTTP_URL: Final[TypeAdapter[Any]] = TypeAdapter(RssSource.model_fields["url"].annotation)
+_DAY_OF_MONTH: Final = _int_field_adapter(ScheduleConfig, "day_of_month")
+_LIMITS: Final = {key: _int_field_adapter(LimitsConfig, key) for key in LimitsConfig.model_fields}
 
 
 # --- validators (True = ok, str = inline error) ----------------------------------------------
@@ -145,16 +162,29 @@ def validate_nonempty(value: str) -> bool | str:
     return True if value.strip() else "must not be empty"
 
 
-def validate_positive_int(value: str) -> bool | str:
+def _valid_int(adapter: TypeAdapter[Any], value: str) -> bool:
     text = value.strip()
-    if text.isascii() and text.isdigit() and int(text) >= 1:
-        return True
-    return "must be a whole number ≥ 1"
+    if not (text.isascii() and text.isdigit()):
+        return False
+    try:
+        adapter.validate_python(int(text))
+    except ValidationError:
+        return False
+    return True
+
+
+def validate_limit(key: str) -> Validator:
+    """Return a validator for the ``limits.<key>`` field (constraints from ``LimitsConfig``)."""
+    adapter = _LIMITS[key]
+
+    def validator(value: str) -> bool | str:
+        return True if _valid_int(adapter, value) else "must be a whole number ≥ 1"
+
+    return validator
 
 
 def validate_day_of_month(value: str) -> bool | str:
-    text = value.strip()
-    if text.isascii() and text.isdigit() and 1 <= int(text) <= 31:
+    if _valid_int(_DAY_OF_MONTH, value):
         return True
     return "day of month must be a whole number from 1 to 31"
 
@@ -227,11 +257,14 @@ def _step_schedule(s: _Session) -> None:
     s.frequency = p.select(
         Q_FREQUENCY, [f.value for f in Frequency], default=s.frequency or Frequency.DAILY.value
     )
+    # Earlier answers are the defaults on a re-ask (FR-005).
+    weekday, day_of_month = s.weekday, s.day_of_month
     s.weekday, s.day_of_month = None, None
     if s.frequency == Frequency.WEEKLY:
-        s.weekday = p.select(Q_WEEKDAY, [d.value for d in Weekday], default=None)
+        s.weekday = p.select(Q_WEEKDAY, [d.value for d in Weekday], default=weekday)
     elif s.frequency == Frequency.MONTHLY:
-        day = int(p.text(Q_DAY, validate=validate_day_of_month).strip())
+        default_day = "" if day_of_month is None else str(day_of_month)
+        day = int(p.text(Q_DAY, default=default_day, validate=validate_day_of_month).strip())
         s.day_of_month = day
         if day >= 29:
             s.echo(f"note: months shorter than {day} days run on their last day")
@@ -262,10 +295,11 @@ def _step_notification(s: _Session) -> None:
 
 def _check_source(s: _Session, source_type: str, url: str) -> bool:
     """Check a URL source; return False if the operator wants to enter another URL."""
-    s.echo(f"checking {url} …")
+    shown = redact(url)  # never echo a password embedded in the URL
+    s.echo(f"checking {shown} …")
     result = s.checker.check(url, expect_feed=source_type == "rss")
     if not result.reachable:
-        s.warn(f"! could not reach {url}: {result.reason or 'unknown problem'}")
+        s.warn(f"! could not reach {shown}: {result.reason or 'unknown problem'}")
     elif source_type == "rss" and result.is_feed is False:
         s.warn("! reachable, but no RSS/Atom feed detected")
     else:
@@ -333,7 +367,7 @@ def _known_models(s: _Session) -> list[str] | None:
         return s.registry.models_for(s.provider)
     except ModelRegistryError as exc:
         s.registry_broken = True
-        s.warn(f"warning: model registry unavailable ({exc}); model names are not checked")
+        s.warn(WARNING_NO_REGISTRY.format(exc))
         return None
 
 
@@ -375,7 +409,7 @@ def _step_limits(s: _Session) -> None:
             s.prompter.text(
                 question,
                 default=str(previous.get(key, defaults[key])),
-                validate=validate_positive_int,
+                validate=validate_limit(key),
             ).strip()
         )
         for key, question in _LIMIT_QUESTIONS

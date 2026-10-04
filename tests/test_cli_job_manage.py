@@ -345,6 +345,30 @@ def test_expected_failures_never_print_a_traceback(
     assert "Traceback" not in result.output
 
 
+def test_enable_already_enabled_invalid_job_exits_2(
+    job_cli: JobCli, job_data: dict[str, Any]
+) -> None:
+    _create(job_cli, "broken", job_data)
+    job_cli.corrupt_timezone("broken")
+
+    result = job_cli.invoke(["enable", "broken"])
+
+    assert result.exit_code == 2, result.output
+    assert "invalid stored job 'broken':" in result.stderr
+    assert "already enabled" not in result.output
+
+
+def test_enable_already_enabled_valid_job_is_a_no_op(
+    job_cli: JobCli, job_data: dict[str, Any]
+) -> None:
+    _create(job_cli, "ai", job_data)
+
+    result = job_cli.invoke(["enable", "ai"])
+
+    assert result.exit_code == 0
+    assert "job 'ai' is already enabled" in result.stdout
+
+
 def test_database_error_hides_details(job_cli: JobCli, monkeypatch: pytest.MonkeyPatch) -> None:
     def boom() -> None:
         raise OperationalError("SELECT secret-sql", {}, Exception("password=hunter2"))

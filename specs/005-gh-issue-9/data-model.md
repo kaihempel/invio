@@ -22,8 +22,7 @@ longer validates.
 | `name` | `str` | Unique job name |
 | `enabled` | `bool` | |
 | `next_run_at` | `datetime \| None` | UTC; `None` when disabled |
-| `config` | `JobConfig \| None` | `None` exactly when `config_errors` is non-empty |
-| `config_errors` | `list[str]` | `<dotted.loc>: <message>` lines; empty for valid jobs |
+| `config` | `JobConfig \| None` | `None` exactly when the stored config does not validate |
 | `last_run_status` | `RunStatus \| None` | Status of the newest run (by `started_at`, then `id`); `None` = never run |
 
 Derived display status (CLI only, highest precedence first):

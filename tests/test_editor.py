@@ -139,3 +139,28 @@ def test_non_utf8_result_is_error(tmp_path: Path) -> None:
 
     with pytest.raises(EditorError, match="not valid UTF-8"):
         edit_text("a: 1\n", env={"EDITOR": cmd})
+
+
+def test_editor_that_removes_the_file_is_error(tmp_path: Path) -> None:
+    cmd = _script(
+        tmp_path,
+        """
+        import os, sys
+        os.rename(sys.argv[1], sys.argv[1] + ".bak")
+        """,
+    )
+
+    with pytest.raises(EditorError, match="cannot read edited file"):
+        edit_text("a: 1\n", env={"EDITOR": cmd})
+
+
+@pytest.mark.parametrize(
+    ("command", "name", "expected"),
+    [
+        ('"C:\\Program Files\\ed.exe" -w', "nt", ["C:\\Program Files\\ed.exe", "-w"]),
+        ("notepad", "nt", ["notepad"]),
+        ("'my editor' --wait", "posix", ["my editor", "--wait"]),
+    ],
+)
+def test_split_command(command: str, name: str, expected: list[str]) -> None:
+    assert editor._split_command(command, name=name) == expected

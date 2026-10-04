@@ -94,8 +94,7 @@ Feature: [spec.md](spec.md) · Plan: [plan.md](plan.md)
 - **Decision**: Leave `JobService.list()` unchanged, because the scheduler relies on it skipping
   invalid jobs. Add:
   - `JobService.overview() -> list[JobSummary]`: every job, including invalid ones, with
-    `config: JobConfig | None`, `config_errors: list[str]` and `last_run_status: RunStatus |
-    None`, loaded in one session.
+    `config: JobConfig | None` and `last_run_status: RunStatus | None`, loaded in one session.
   - `JobService.stored_config(name) -> dict[str, Any]`: the raw stored mapping, so `show` and
     `edit` can display and repair a broken job.
   - `RunRepository.latest_status_by_job() -> dict[int, RunStatus]`: one grouped query, so the

@@ -10,7 +10,7 @@ from typing import Any, Protocol
 
 import questionary
 
-__all__ = ["Prompter", "QuestionaryPrompter", "Validator", "WizardAborted"]
+__all__ = ["Prompter", "QuestionaryPrompter", "Validator", "WizardAborted", "adapt_validator"]
 
 Validator = Callable[[str], bool | str]
 """``True`` accepts the answer; a ``str`` rejects it and is shown as the error."""
