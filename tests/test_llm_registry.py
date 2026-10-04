@@ -388,8 +388,7 @@ def test_require_returns_the_entry_of_that_provider(tmp_path: Path) -> None:
 def test_models_for_returns_sorted_ids_of_one_provider() -> None:
     registry = load_registry([FIXTURE_REGISTRY_DIR])
 
-    assert registry.models_for("fakeco") == sorted([PRICED, FREE])
-    assert "other-model" not in registry.models_for("fakeco")
+    assert [info.model_id for info in registry.models_for("fakeco")] == sorted([PRICED, FREE])
 
 
 def test_models_for_unknown_provider_is_empty() -> None:
