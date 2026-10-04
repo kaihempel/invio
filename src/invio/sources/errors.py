@@ -6,7 +6,7 @@ can raise them without an import cycle; ``invio.sources.http`` re-exports all of
 
 from enum import StrEnum
 
-from invio.sources.urls import redact
+from invio.sources.urls import redact_url
 
 __all__ = ["BlockReason", "BlockedError", "FetchError", "TooLargeError"]
 
@@ -27,7 +27,7 @@ class FetchError(Exception):
     """
 
     def __init__(self, reason: str, *, url: str, status: int | None = None) -> None:
-        self.url = redact(url)
+        self.url = redact_url(url)
         self.status = status
         self.reason = reason
         message = f"{reason}: {self.url}"

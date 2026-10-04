@@ -27,6 +27,13 @@ __all__ = [
     "origin_of",
 ]
 
+# Ranges ``is_global`` may call global, depending on the Python version, that must not be
+# contacted: deprecated site-local, SRv6 SIDs and the deprecated 6to4 relay anycast.
+_DENIED: Final[tuple[IPv4Network | IPv6Network, ...]] = (
+    IPv6Network("fec0::/10"),
+    IPv6Network("5f00::/16"),
+    IPv4Network("192.88.99.0/24"),
+)
 _NAT64: Final = IPv6Network("64:ff9b::/96")
 _DEFAULT_PORTS: Final = {"http": 80, "https": 443}
 
@@ -69,7 +76,13 @@ def is_public_address(addr: IPv4Address | IPv6Address) -> bool:
     IPv6 forms that embed an IPv4 address (IPv4-mapped and 6to4) are judged by the embedded
     address, so ``::ffff:127.0.0.1`` and ``2002:7f00:1::1`` are not a way around the check.
     """
+    if any(addr in net for net in _DENIED if net.version == addr.version):
+        return False
     if isinstance(addr, IPv6Address):
+        if int(addr) >> 32 == 0:
+            # ::/96 (IPv4-compatible, plus :: and ::1) is never a real destination, and some
+            # stacks still map it to the embedded IPv4 address.
+            return False
         if addr.ipv4_mapped is not None:
             # Judge by the embedded address only: ``is_global`` differs between Python versions.
             return is_public_address(addr.ipv4_mapped)
@@ -109,6 +122,8 @@ async def guard_url(
     check_scheme(url)
     origin = origin_of(url)
     literal = _parse_literal(origin.host)
+    if isinstance(literal, IPv6Address) and literal.scope_id is not None:
+        raise BlockedError(BlockReason.NON_PUBLIC_ADDRESS, url=str(url))  # link-local zone
     if literal is not None:
         addresses = [literal]
     else:

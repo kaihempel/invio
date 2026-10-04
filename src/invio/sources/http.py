@@ -19,6 +19,7 @@ import asyncio
 import codecs
 import logging
 import re
+import zlib
 from collections.abc import AsyncIterator, Iterable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -42,7 +43,7 @@ from invio.sources.netguard import (
 )
 from invio.sources.ratelimit import HostRateLimiter, effective_interval
 from invio.sources.robots import ROBOTS_MAX_BYTES, RobotsCache
-from invio.sources.urls import redact
+from invio.sources.urls import redact, redact_url
 
 __all__ = [
     "BlockReason",
@@ -62,8 +63,12 @@ _REPOSITORY_URL: Final = "https://github.com/kaihempel/invio"
 _REDIRECT_STATUSES: Final = frozenset({301, 302, 303, 307, 308})
 # Headers the client controls itself; a caller-supplied value is ignored.
 _CLIENT_HEADERS: Final = frozenset({"user-agent", "host", "accept-encoding"})
-# Never forwarded to another origin after a redirect.
-_CREDENTIAL_HEADERS: Final = frozenset({"authorization", "cookie", "proxy-authorization"})
+# Caller headers that may follow a redirect to another origin; everything else (credentials,
+# cookies, API keys, ...) is dropped.
+_CROSS_ORIGIN_HEADERS: Final = re.compile(
+    r"accept.*|if-none-match|if-modified-since", re.IGNORECASE
+)
+_ENCODINGS: Final = {"gzip": "gzip", "x-gzip": "gzip", "deflate": "deflate"}
 _CHARSET: Final = re.compile(r"charset\s*=\s*[\"']?([^\s;\"']+)", re.IGNORECASE)
 
 
@@ -164,6 +169,68 @@ class _Hop:
     body: bytes
 
 
+class _Decoder:
+    """Incremental body decoder whose output per call is bounded (identity, gzip, deflate)."""
+
+    def __init__(self, encoding: str | None, url: httpx.URL) -> None:
+        self._encoding = encoding
+        self._url = url
+        self._inflater: zlib._Decompress | None = None
+        self.finished = encoding is None  # True once the compressed stream ended cleanly
+
+    def feed(self, data: bytes, max_length: int) -> bytes:
+        """Decode ``data``, returning at most ``max_length`` bytes (callers pass limit + 1)."""
+        if self._encoding is None:
+            return data
+        if self._inflater is None:
+            self._inflater = zlib.decompressobj(self._wbits(data))
+        out = bytearray()
+        try:
+            while data and not self._inflater.eof and len(out) < max_length:
+                out += self._inflater.decompress(data, max_length - len(out))
+                data = self._inflater.unconsumed_tail
+        except zlib.error:
+            raise FetchError("invalid_response", url=str(self._url)) from None
+        self.finished = self._inflater.eof
+        return bytes(out)
+
+    def _wbits(self, first: bytes) -> int:
+        if self._encoding == "gzip":
+            return 16 + zlib.MAX_WBITS
+        # "deflate" should be zlib-wrapped, but some servers send a raw deflate stream.
+        looks_zlib = (
+            len(first) >= 2 and first[0] & 0x0F == 8 and (first[0] * 256 + first[1]) % 31 == 0
+        )
+        return zlib.MAX_WBITS if looks_zlib else -zlib.MAX_WBITS
+
+
+def _decoder_for(headers: httpx.Headers, url: httpx.URL) -> _Decoder:
+    """Pick the decoder for ``Content-Encoding``; stacked or unknown encodings are refused.
+
+    Only one layer of gzip or deflate is accepted (the client asks for nothing else), which
+    keeps the expansion bounded by a single, size-limited decoder.
+    """
+    raw = ",".join(headers.get_list("content-encoding"))
+    encodings = [item.strip().lower() for item in raw.split(",") if item.strip()]
+    encodings = [item for item in encodings if item != "identity"]
+    if not encodings:
+        return _Decoder(None, url)
+    if len(encodings) > 1 or encodings[0] not in _ENCODINGS:
+        raise FetchError("invalid_response", url=str(url))
+    return _Decoder(_ENCODINGS[encodings[0]], url)
+
+
+@dataclass
+class _Budget:
+    """The deadline of one fetch, shared by all its hops.
+
+    Set when the first request is about to be sent (after the first rate-limit slot), so the
+    wait for a slot is not charged to the first hop; later hops spend what is left.
+    """
+
+    deadline: float | None = None
+
+
 @dataclass(frozen=True, slots=True)
 class _Validators:
     etag: str | None
@@ -228,7 +295,7 @@ class SafeHttpClient:
         This is the only place that classifies the outcome and logs failures, so each failed
         fetch is logged exactly once.
         """
-        requested_url = redact(url)
+        requested_url = redact_url(url)
         sent = self._with_validators(requested_url, headers or {})
         try:
             hop = await self._fetch(
@@ -259,10 +326,12 @@ class SafeHttpClient:
         """
         current = self._parse(url)
         first_origin = origin_of(current)
+        budget = _Budget()
         for hop_number in range(self._config.max_redirects + 1):
             hop = await self._hop(
                 current,
                 self._headers_for(headers, same_origin=origin_of(current) == first_origin),
+                budget,
                 check_robots=check_robots,
                 max_bytes=max_bytes,
                 truncate=truncate,
@@ -279,10 +348,10 @@ class SafeHttpClient:
 
     @staticmethod
     def _headers_for(headers: Mapping[str, str], *, same_origin: bool) -> Mapping[str, str]:
-        """Caller headers for a hop; credentials are not forwarded to another origin."""
+        """Caller headers for a hop; only harmless ones are forwarded to another origin."""
         if same_origin:
             return headers
-        return {k: v for k, v in headers.items() if k.lower() not in _CREDENTIAL_HEADERS}
+        return {k: v for k, v in headers.items() if _CROSS_ORIGIN_HEADERS.fullmatch(k)}
 
     @staticmethod
     def _log_failure(error: FetchError) -> None:
@@ -326,6 +395,7 @@ class SafeHttpClient:
         self,
         url: httpx.URL,
         extra_headers: Mapping[str, str],
+        budget: _Budget,
         *,
         check_robots: bool,
         max_bytes: int,
@@ -337,8 +407,10 @@ class SafeHttpClient:
             await self._check_robots(target)  # before the slot: slots are not re-entrant
         async with self._slot(target):
             request = self._build_request(target, extra_headers)
+            if budget.deadline is None:
+                budget.deadline = asyncio.get_running_loop().time() + self._config.total_timeout
             try:
-                async with asyncio.timeout(self._config.total_timeout):
+                async with asyncio.timeout_at(budget.deadline):
                     response = await self._send(request)
                     try:
                         body = b""
@@ -351,7 +423,8 @@ class SafeHttpClient:
                         await response.aclose()
             except (TimeoutError, httpx.TimeoutException):
                 raise FetchError("timeout", url=str(url)) from None
-            except httpx.DecodingError:
+            except (httpx.DecodingError, httpx.InvalidURL):
+                # httpx also parses the Location of a redirect it was told not to follow.
                 raise FetchError("invalid_response", url=str(url)) from None
             except httpx.RequestError:
                 raise FetchError("connection_failed", url=str(url)) from None
@@ -429,14 +502,34 @@ class SafeHttpClient:
         announced = response.headers.get("content-length", "")
         if not truncate and announced.isdigit() and int(announced) > max_bytes:
             raise TooLargeError(url=str(url), limit=max_bytes)
+        # The raw stream is decoded here, never by httpx: a single network chunk can inflate to
+        # hundreds of MiB, so decoding must stop at the size limit.
+        # A response that was read already (``MockTransport``) is decoded by httpx.
+        decoder = (
+            _Decoder(None, url)
+            if response.is_stream_consumed
+            else _decoder_for(response.headers, url)
+        )
         body = bytearray()
-        async for chunk in response.aiter_bytes():
-            body += chunk
+        async for chunk in self._raw_chunks(response):
+            body += decoder.feed(chunk, max_bytes - len(body) + 1)
             if len(body) > max_bytes:
                 if truncate:
                     return bytes(body[:max_bytes])
                 raise TooLargeError(url=str(url), limit=max_bytes)
+        if not decoder.finished:
+            raise FetchError("invalid_response", url=str(url))  # truncated compressed stream
         return bytes(body)
+
+    @staticmethod
+    async def _raw_chunks(response: httpx.Response) -> AsyncIterator[bytes]:
+        """The undecoded body; a response that was already read (``MockTransport``) is
+        yielded as a whole instead, and httpx has decoded it by then."""
+        if response.is_stream_consumed:
+            yield response.content
+            return
+        async for chunk in response.aiter_raw():
+            yield chunk
 
     def _with_validators(self, requested_url: str, headers: Mapping[str, str]) -> Mapping[str, str]:
         """Add cached validators as conditional headers unless the caller set them."""

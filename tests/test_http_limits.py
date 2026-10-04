@@ -137,15 +137,17 @@ async def test_stalled_response_times_out_within_the_total_deadline(
 
 
 async def test_dripping_response_hits_the_total_deadline(server: LoopbackServer) -> None:
-    server.routes["/drip"] = Route(body=b"x" * 100, drip=0.1)  # each read succeeds in time
+    # One byte every 20 ms against a 300 ms read timeout: only the total deadline can fire.
+    server.routes["/drip"] = Route(body=b"x" * 200, drip=0.02)
 
     started = time.monotonic()
     async with make_client(read_timeout=0.3, total_timeout=0.5) as client:
         with pytest.raises(FetchError) as info:
             await client.get(f"{server.base_url}/drip")
 
+    elapsed = time.monotonic() - started
     assert info.value.reason == "timeout"
-    assert time.monotonic() - started < 1.5
+    assert 0.5 - 0.05 <= elapsed < 2.0
 
 
 # --- identity --------------------------------------------------------------------------------
@@ -165,3 +167,75 @@ async def test_user_agent_matches_the_documented_format(server: LoopbackServer) 
         sent["user-agent"],
     )
     assert sent["accept-encoding"] == "gzip, deflate"
+
+
+# --- decompression bombs ---------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("encoding", ["gzip, gzip", "gzip,deflate", "br", "compress", "zstd"])
+async def test_stacked_or_unknown_content_encoding_is_rejected(
+    server: LoopbackServer,
+    encoding: str,
+) -> None:
+    body = gzip.compress(gzip.compress(b"a" * 100_000))
+    server.routes["/s"] = Route(headers={"Content-Encoding": encoding}, body=body)
+
+    async with make_client(max_response_bytes=10 * LIMIT) as client:
+        with pytest.raises(FetchError) as info:
+            await client.get(f"{server.base_url}/s")
+
+    assert info.value.reason == "invalid_response"
+
+
+async def test_identity_and_deflate_encodings_are_accepted(
+    server: LoopbackServer,
+) -> None:
+    import zlib
+
+    server.routes["/id"] = Route(headers={"Content-Encoding": "identity"}, body=b"plain")
+    server.routes["/zlib"] = Route(
+        headers={"Content-Encoding": "deflate"}, body=zlib.compress(b"zz")
+    )
+    raw = zlib.compressobj(wbits=-15)
+    server.routes["/raw"] = Route(
+        headers={"Content-Encoding": "deflate"}, body=raw.compress(b"rr") + raw.flush()
+    )
+
+    async with make_client() as client:
+        results = [await client.get(f"{server.base_url}{p}") for p in ("/id", "/zlib", "/raw")]
+
+    assert [r.content for r in results if isinstance(r, FetchResult)] == [b"plain", b"zz", b"rr"]
+
+
+async def test_high_ratio_payload_is_stopped_without_decoding_it_all(
+    server: LoopbackServer,
+) -> None:
+    import tracemalloc
+
+    bomb = gzip.compress(b"\0" * 50_000_000, compresslevel=9)
+    server.routes["/bomb"] = Route(headers={"Content-Encoding": "gzip"}, body=bomb)
+
+    tracemalloc.start()
+    try:
+        async with make_client(max_response_bytes=1_048_576) as client:
+            with pytest.raises(TooLargeError):
+                await client.get(f"{server.base_url}/bomb")
+        _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert peak < 20_000_000  # nowhere near the 50 MB the payload expands to
+
+
+async def test_truncated_gzip_stream_is_invalid_response(
+    server: LoopbackServer,
+) -> None:
+    server.routes["/t"] = Route(
+        headers={"Content-Encoding": "gzip"}, body=gzip.compress(b"hello" * 100)[:-10]
+    )
+
+    async with make_client() as client:
+        with pytest.raises(FetchError) as info:
+            await client.get(f"{server.base_url}/t")
+
+    assert info.value.reason == "invalid_response"

@@ -285,7 +285,7 @@ async def test_credentials_are_not_forwarded_to_another_origin() -> None:
 
     transport = RecordingTransport(handler)
     resolver = FakeResolver({"a.example": [PUBLIC], "b.example": [PUBLIC]})
-    sent = {"Authorization": "Bearer t", "Cookie": "s=1", "X-Keep": "1"}
+    sent = {"Authorization": "Bearer t", "Cookie": "s=1", "X-Keep": "1", "Accept": "text/xml"}
 
     async with SafeHttpClient(config(), resolver=resolver, transport=transport) as client:
         await client.get("http://a.example/", headers=sent)
@@ -294,7 +294,8 @@ async def test_credentials_are_not_forwarded_to_another_origin() -> None:
     assert first.headers["Authorization"] == "Bearer t"
     assert "authorization" not in second.headers
     assert "cookie" not in second.headers
-    assert second.headers["X-Keep"] == "1"
+    assert "x-keep" not in second.headers  # not on the allow-list
+    assert second.headers["Accept"] == "text/xml"
 
 
 async def test_large_redirect_body_is_not_read() -> None:
@@ -359,3 +360,80 @@ async def test_failure_is_logged_exactly_once(caplog: pytest.LogCaptureFixture) 
             await client.get("http://10.0.0.1/")
 
     assert len([r for r in caplog.records if r.name == "invio.sources.http"]) == 1
+
+
+@pytest.mark.parametrize("url", ["http://[::7f00:1]/", "http://[::127.0.0.1]/"])
+async def test_ipv4_compatible_ipv6_literal_is_blocked_at_client_level(url: str) -> None:
+    transport = RecordingTransport(ok_handler)
+
+    async with SafeHttpClient(config(), transport=transport) as client:
+        with pytest.raises(BlockedError) as info:
+            await client.get(url)
+
+    assert info.value.reason is BlockReason.NON_PUBLIC_ADDRESS
+    assert transport.requests == []
+
+
+@pytest.mark.parametrize(
+    "url", ["user:secret@example.com/feed", "foo:bar@host", "http://u:secret@/x", "u:secret@"]
+)
+async def test_userinfo_without_slashes_never_leaks(
+    url: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG, logger="invio.sources.http")
+
+    async with SafeHttpClient(config()) as client:
+        with pytest.raises(FetchError) as info:
+            await client.get(url)
+
+    assert "secret" not in str(info.value)
+    assert "secret" not in info.value.url
+    assert "bar@" not in str(info.value)
+    assert "secret" not in caplog.text
+
+
+async def test_userinfo_in_redirect_location_never_leaks() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(302, headers={"Location": "foo:secret@host"})
+
+    resolver = FakeResolver({"example.org": [PUBLIC]})
+
+    async with SafeHttpClient(
+        config(), resolver=resolver, transport=RecordingTransport(handler)
+    ) as client:
+        with pytest.raises(FetchError) as info:
+            await client.get("http://example.org/")
+
+    assert "secret" not in str(info.value)
+
+
+async def test_real_connection_goes_to_the_pinned_address_with_the_original_host(
+    server: LoopbackServer,
+) -> None:
+    server.routes["/"] = Route(body=b"ok")
+    resolver = FakeResolver({"pinned.test": ["127.0.0.1"]})
+
+    async with SafeHttpClient(config(), resolver=resolver, allow_networks=LOOPBACK) as client:
+        result = await client.get(f"http://pinned.test:{server.origin_port}/")
+
+    assert isinstance(result, FetchResult)
+    assert server.requests[0].headers["host"] == f"pinned.test:{server.origin_port}"
+    assert result.url == f"http://pinned.test:{server.origin_port}/"
+
+
+async def test_total_timeout_covers_the_whole_redirect_chain(
+    server: LoopbackServer,
+) -> None:
+    for number in range(3):
+        server.routes[f"/r{number}"] = Route(
+            status=302, headers={"Location": f"/r{number + 1}"}, delay=0.3
+        )
+    server.routes["/r3"] = Route(body=b"end")
+
+    async with SafeHttpClient(
+        config(read_timeout=0.4, total_timeout=0.5), allow_networks=LOOPBACK
+    ) as client:
+        with pytest.raises(FetchError) as info:
+            await client.get(f"{server.base_url}/r0")
+
+    assert info.value.reason == "timeout"

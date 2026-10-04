@@ -42,6 +42,14 @@ from tests.http_helpers import LOOPBACK, FakeResolver
         "2002:7f00:0001::1",  # 6to4 of 127.0.0.1
         "64:ff9b::7f00:1",  # NAT64 of 127.0.0.1
         "64:ff9b::a00:1",  # NAT64 of 10.0.0.1
+        "::127.0.0.1",  # IPv4-compatible
+        "::7f00:1",
+        "::a00:5",
+        "::1.2.3.4",  # ::/96 is never a public destination
+        "fec0::1",  # deprecated site-local
+        "5f00::1",  # SRv6 SIDs
+        "192.88.99.1",  # deprecated 6to4 relay anycast
+        "2002:c058:6301::1",  # 6to4 of 192.88.99.1
     ],
 )
 def test_non_public_addresses(address: str) -> None:
@@ -172,3 +180,20 @@ async def test_system_resolver_resolves_numeric_host() -> None:
 async def test_system_resolver_propagates_gaierror() -> None:
     with pytest.raises(socket.gaierror):
         await SystemResolver().resolve("no-such-host.invalid", 80)
+
+
+@pytest.mark.parametrize(
+    "url", ["http://[::7f00:1]/", "http://[::127.0.0.1]/", "http://[fec0::1]/"]
+)
+async def test_embedded_and_deprecated_ipv6_literals_are_blocked(url: str) -> None:
+    with pytest.raises(BlockedError):
+        await guard_url(httpx.URL(url), FakeResolver({}), ())
+
+
+async def test_scoped_ipv6_literal_is_blocked() -> None:
+    resolver = FakeResolver({})
+
+    with pytest.raises(BlockedError):
+        await guard_url(httpx.URL("http://[2606:4700::1111%25eth0]/"), resolver, ())
+
+    assert resolver.calls == []
