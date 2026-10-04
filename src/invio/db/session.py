@@ -13,6 +13,8 @@ from sqlalchemy.exc import ArgumentError
 from sqlalchemy.orm import Session, sessionmaker
 
 _MYSQL_BACKENDS = ("mysql", "mariadb")
+# time_zone only affects NOW()/TIMESTAMP (UTCDateTime binds naive UTC itself); it keeps raw SQL
+# and any future TIMESTAMP column consistent with the stored UTC values.
 _INIT_COMMAND = (
     "SET SESSION sql_mode='STRICT_ALL_TABLES,NO_ENGINE_SUBSTITUTION', time_zone='+00:00'"
 )
@@ -76,6 +78,8 @@ def redact(text: str, url: str | URL) -> str:
     """Replace the URL's password and the URL's string forms in ``text`` with ``***``.
 
     Accepts unparsable URLs (the raw string is replaced) and URLs without a password.
+    Every occurrence of the password is replaced, even inside other words: with a very short
+    password the message gets harder to read, which is preferred over risking a leak.
     """
     needles: set[str] = set()
     raw = url if isinstance(url, str) else None

@@ -138,7 +138,7 @@ may need manual cleanup before retrying. Job names are unique case-insensitively
 (`utf8mb4_unicode_ci`), so `Digest` and `digest` collide; SQLite compares them case-sensitively.
 
 Exit codes: `0` success (also when already up to date), `2` `INVIO_DATABASE_URL` missing or not a
-valid URL, `1` any other failure (unreachable server, migration error, unknown revision). The
+valid URL, or its driver is not installed, `1` any other failure (unreachable server, migration error, unknown revision). The
 password never appears in output.
 
 Developers can use Alembic directly (reads `INVIO_DATABASE_URL`):

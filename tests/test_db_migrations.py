@@ -1,8 +1,10 @@
 """Migration tests: upgrade/downgrade, idempotence, foreign tables and model drift."""
 
 import io
+import re
 from collections.abc import Iterator
 from pathlib import Path
+from typing import get_args
 
 import pytest
 from alembic import command
@@ -10,13 +12,14 @@ from alembic.autogenerate import compare_metadata
 from alembic.config import Config
 from alembic.runtime.migration import MigrationContext
 from alembic.util import CommandError
-from sqlalchemy import JSON, Boolean, Engine, inspect, text
+from sqlalchemy import JSON, Boolean, Engine, Enum, inspect, text
 from sqlalchemy.engine import Connection
 
 from invio.config.settings import get_settings
 from invio.db.migrate import alembic_config, current_revision, downgrade, upgrade
 from invio.db.models import Base
 from invio.db.session import create_db_engine
+from invio.domain import ItemStatus, ItemType, NotificationStatus, RunStatus
 from tests.db_helpers import uses_sqlite
 
 pytestmark = pytest.mark.db
@@ -154,6 +157,41 @@ def test_migration_has_the_same_checks_and_foreign_key_rules_as_models(
     else:
         # Native ENUMs emit no CHECK and MariaDB adds auto-named json_valid() checks.
         assert explicit <= db_checks
+
+
+def _db_enum_values(engine: Engine, table: str, column: str) -> set[str]:
+    """Return the values the migrated database accepts for an enum column."""
+    insp = inspect(engine)
+    if uses_sqlite():
+        enum_type = Base.metadata.tables[table].c[column].type
+        assert isinstance(enum_type, Enum)
+        (check,) = (
+            c
+            for c in insp.get_check_constraints(table)
+            if c["name"] == f"ck_{table}_{enum_type.name}"
+        )
+        return set(re.findall(r"'([^']*)'", check["sqltext"]))
+    (col,) = (c for c in insp.get_columns(table) if c["name"] == column)
+    assert isinstance(col["type"], Enum)
+    return set(col["type"].enums)
+
+
+@pytest.mark.parametrize(
+    ("table", "column", "values"),
+    [
+        ("items", "type", set(get_args(ItemType))),
+        ("items", "status", {s.value for s in ItemStatus}),
+        ("runs", "status", {s.value for s in RunStatus}),
+        ("notifications", "status", {s.value for s in NotificationStatus}),
+    ],
+)
+def test_migration_enum_values_match_domain(
+    migration_engine: Engine, table: str, column: str, values: set[str]
+) -> None:
+    """compare_metadata ignores enum value lists; check them against the domain types."""
+    _upgrade(migration_engine)
+
+    assert _db_enum_values(migration_engine, table, column) == values
 
 
 def test_upgrade_to_unknown_revision_fails(migration_engine: Engine) -> None:

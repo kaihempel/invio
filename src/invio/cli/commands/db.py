@@ -4,9 +4,8 @@ import logging
 from typing import Annotated
 
 import typer
-from alembic.util import CommandError
 from sqlalchemy.engine import URL
-from sqlalchemy.exc import ArgumentError, SQLAlchemyError
+from sqlalchemy.exc import ArgumentError
 
 from invio.config.settings import MissingSettingError, get_settings
 from invio.db import migrate
@@ -36,12 +35,17 @@ def upgrade(
     try:
         raw = get_settings().require_secret("database_url")
         url = normalize_url(raw)
-        url.get_dialect()  # unknown dialect/driver -> ArgumentError (NoSuchModuleError)
+        # Unknown dialect/driver -> ArgumentError (NoSuchModuleError); uninstalled DBAPI module
+        # -> ImportError. Both are configuration errors, so check them before connecting.
+        url.get_dialect().import_dbapi()
     except MissingSettingError as exc:
         raise _fail(f"Configuration error: {exc}", 2) from exc
     except ArgumentError as exc:
         message = redact(str(exc), raw or "")
         raise _fail(f"Configuration error: invalid database URL: {message}", 2) from exc
+    except ImportError as exc:
+        message = redact(str(exc), raw or "")
+        raise _fail(f"Configuration error: database driver not installed: {message}", 2) from exc
 
     def scrub(text: str) -> str:
         return redact(redact(text, raw), url)
@@ -49,10 +53,9 @@ def upgrade(
     try:
         logger.info("migration started", extra={"revision": revision})
         reached = migrate.upgrade(migrate.alembic_config(url=url), revision)
-    except (SQLAlchemyError, CommandError, OSError) as exc:
+    except Exception as exc:  # never show a traceback (it may embed the URL)
+        # SQLAlchemy wraps the driver error in ``orig``; its message is the useful part.
         detail = getattr(exc, "orig", None) or exc
         raise _fail(f"Error: {type(exc).__name__}: {scrub(str(detail))}", 1) from exc
-    except Exception as exc:  # last resort: never show a traceback (it may embed the URL)
-        raise _fail(f"Error: {type(exc).__name__}: {scrub(str(exc))}", 1) from exc
     logger.info("migration finished", extra={"revision": reached})
     typer.echo(f"database at revision {reached}")

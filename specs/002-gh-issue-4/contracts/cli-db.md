@@ -32,7 +32,8 @@ No output on any stream contains the database password or the unredacted URL.
 |---|---|---|
 | 0 | Upgrade applied or already up to date | — |
 | 2 | `INVIO_DATABASE_URL` not set or empty | `Configuration error: INVIO_DATABASE_URL is not set` |
-| 2 | URL cannot be parsed / unknown dialect | `Configuration error: invalid database URL: …` |
+| 2 | URL cannot be parsed / unknown dialect or driver | `Configuration error: invalid database URL: …` |
+| 2 | Driver package (DBAPI) not installed | `Configuration error: database driver not installed: …` |
 | 1 | Database unreachable, auth failure, migration error, unknown revision | `Error: OperationalError: (2003, "Can't connect to MySQL server on 'db' …")` |
 
 ## Developer access (not part of the CLI)

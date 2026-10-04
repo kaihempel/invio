@@ -3,7 +3,10 @@
 **Feature**: [spec.md](./spec.md) · **Research**: [research.md](./research.md)
 
 All tables: InnoDB, `utf8mb4` / `utf8mb4_unicode_ci` on MariaDB/MySQL (R3). Timestamps are
-`UTCDateTime` (aware UTC in Python, naive UTC in the DB; naive input rejected — R6). Primary
+`UTCDateTime` (aware UTC in Python, naive UTC in the DB; naive input rejected — R6). A default of "now" is applied by
+the application (`utcnow`), not by the database: a server-side `CURRENT_TIMESTAMP` would follow
+the session time zone and, on SQLite, store a different text format. Writers outside the ORM/Core
+must set these columns explicitly. Primary
 keys `id` are BigInteger (Integer on SQLite) autoincrement (R4). Constraint names follow the
 naming convention in R8 (`ix_<table>_<col1>_<col2>`, `uq_<table>_<cols>`, `ck_<table>_<name>`).
 

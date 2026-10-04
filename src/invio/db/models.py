@@ -2,6 +2,9 @@
 
 No ``relationship()`` is declared on purpose: deletes are enforced by the database through
 foreign keys (``CASCADE`` for ``job_id``, ``SET NULL`` for ``run_id`` / ``digest_id``).
+
+Timestamp defaults (``utcnow``) are applied by SQLAlchemy, not by the database; writers that
+bypass SQLAlchemy must set ``created_at`` / ``updated_at`` / ``started_at`` themselves.
 """
 
 from datetime import datetime
@@ -80,9 +83,7 @@ class Job(Base):
 
     id: Mapped[int] = mapped_column(PK, primary_key=True, autoincrement=True)
     name: Mapped[str] = mapped_column(String(200), unique=True)
-    enabled: Mapped[bool] = mapped_column(
-        Boolean(create_constraint=False), default=True, server_default=text("1")
-    )
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default=text("1"))
     config: Mapped[dict[str, Any] | None] = mapped_column(JSON(none_as_null=True), default=None)
     next_run_at: Mapped[datetime | None] = mapped_column(UTCDateTime, default=None)
     locked_until: Mapped[datetime | None] = mapped_column(UTCDateTime, default=None)
