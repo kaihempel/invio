@@ -31,6 +31,7 @@ from invio.db.models import Job
 from invio.db.repositories import JobRepository
 from invio.db.session import create_db_engine, session_factory, session_scope
 from invio.db.types import utcnow
+from invio.scheduling.next_run import compute_next_run
 
 __all__ = [
     "MAX_NAME_LENGTH",
@@ -49,12 +50,6 @@ NextRun = Callable[[ScheduleConfig, datetime], datetime]
 """``(schedule, after) -> next UTC run time``."""
 
 MAX_NAME_LENGTH: Final = 200
-
-
-def _next_run_stub(schedule: ScheduleConfig, after: datetime) -> datetime:
-    # TODO(#6): replace with ``invio.scheduling.next_run.compute_next_run``. Until then every
-    # created or re-enabled job is due immediately; the scheduler (#23) must not ship first.
-    return after
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -165,7 +160,7 @@ class JobService:
         self,
         session_factory: sessionmaker[Session],
         *,
-        next_run: NextRun = _next_run_stub,
+        next_run: NextRun = compute_next_run,
         clock: Callable[[], datetime] = utcnow,
     ) -> None:
         self._session_factory = session_factory
