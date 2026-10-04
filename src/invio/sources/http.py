@@ -40,6 +40,7 @@ from invio.sources.netguard import (
     guard_url,
     origin_of,
 )
+from invio.sources.robots import ROBOTS_MAX_BYTES, RobotsCache
 from invio.sources.urls import redact
 
 __all__ = [
@@ -183,6 +184,7 @@ class SafeHttpClient:
         self._config = config if config is not None else HttpClientConfig.from_settings()
         self._allow_networks = tuple(allow_networks)
         self._resolver: Resolver = resolver if resolver is not None else SystemResolver()
+        self._robots = RobotsCache(self._fetch_robots)
         # Redirects are followed by ``_fetch`` so each hop is checked; no proxies from the
         # environment; no idle connections, so a pinned connection is never reused for another
         # host name.
@@ -352,7 +354,22 @@ class SafeHttpClient:
             raise FetchError("timeout", url=str(url)) from None
 
     async def _check_robots(self, target: GuardedTarget) -> None:
-        """Raise :class:`BlockedError` if robots.txt disallows ``target`` (added with robots)."""
+        """Raise :class:`BlockedError` if robots.txt disallows ``target``."""
+        if not self._config.respect_robots:
+            return
+        policy = await self._robots.policy(target.origin)
+        if not policy.allows(str(target.url)):
+            raise BlockedError(BlockReason.BLOCKED_BY_ROBOTS, url=str(target.url))
+
+    async def _fetch_robots(self, url: httpx.URL) -> tuple[int, bytes]:
+        """Fetch robots.txt through the normal pipeline, minus the robots check itself.
+
+        Returns the raw status (a 4xx is a policy, not an error) and at most 500 KB of body.
+        """
+        hop = await self._fetch(
+            str(url), {}, check_robots=False, max_bytes=ROBOTS_MAX_BYTES, truncate=True
+        )
+        return hop.status, hop.body
 
     @asynccontextmanager
     async def _slot(self, target: GuardedTarget) -> AsyncIterator[None]:

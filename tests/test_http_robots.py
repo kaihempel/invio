@@ -1,0 +1,267 @@
+"""robots.txt handling of ``SafeHttpClient`` against loopback origins."""
+
+import asyncio
+
+import pytest
+
+from invio.sources.http import (
+    BlockedError,
+    BlockReason,
+    FetchError,
+    FetchResult,
+    HttpClientConfig,
+    SafeHttpClient,
+)
+from tests.http_helpers import LOOPBACK, LoopbackServer, Route, second_server, server  # noqa: F401
+
+
+def make_client(**overrides: object) -> SafeHttpClient:
+    fields: dict[str, object] = {"respect_robots": True, "host_interval": 0.01} | overrides
+    return SafeHttpClient(HttpClientConfig.model_validate(fields), allow_networks=LOOPBACK)
+
+
+def robots(server: LoopbackServer, text: str) -> None:
+    server.routes["/robots.txt"] = Route(headers={"Content-Type": "text/plain"}, body=text.encode())
+
+
+def pages(server: LoopbackServer, *paths: str) -> None:
+    for path in paths:
+        server.routes[path] = Route(body=b"page")
+
+
+async def test_disallowed_page_and_feed_are_blocked_and_never_requested(
+    server: LoopbackServer,
+) -> None:
+    robots(server, "User-agent: *\nDisallow: /private/\nDisallow: /feed.xml\n")
+    pages(server, "/private/page", "/feed.xml", "/public/page")
+
+    async with make_client() as client:
+        for path in ("/private/page", "/feed.xml"):
+            with pytest.raises(BlockedError) as info:
+                await client.get(f"{server.base_url}{path}")
+            assert info.value.reason is BlockReason.BLOCKED_BY_ROBOTS
+        result = await client.get(f"{server.base_url}/public/page")
+
+    assert isinstance(result, FetchResult)
+    assert server.paths() == ["/robots.txt", "/public/page"]
+
+
+async def test_robots_is_fetched_once_for_sequential_and_concurrent_calls(
+    server: LoopbackServer,
+) -> None:
+    robots(server, "User-agent: *\nDisallow: /private/\n")
+    pages(server, "/a", "/b", "/c", "/d", "/e", "/f", "/g", "/h")
+
+    async with make_client() as client:
+        for path in ("/a", "/b", "/c"):
+            await client.get(f"{server.base_url}{path}")
+        await asyncio.gather(*(client.get(f"{server.base_url}/{p}") for p in "defgh"))
+
+    assert server.paths().count("/robots.txt") == 1
+
+
+@pytest.mark.parametrize("status", [404, 403, 410])
+async def test_client_error_on_robots_allows_everything(
+    server: LoopbackServer,
+    status: int,
+) -> None:
+    server.routes["/robots.txt"] = Route(status=status)
+    pages(server, "/private/page")
+
+    async with make_client() as client:
+        result = await client.get(f"{server.base_url}/private/page")
+
+    assert isinstance(result, FetchResult)
+
+
+async def test_server_error_on_robots_blocks_the_run_without_retry(
+    server: LoopbackServer,
+) -> None:
+    server.routes["/robots.txt"] = Route(status=503)
+    pages(server, "/a", "/b")
+
+    async with make_client() as client:
+        for path in ("/a", "/b"):
+            with pytest.raises(BlockedError) as info:
+                await client.get(f"{server.base_url}{path}")
+            assert info.value.reason is BlockReason.BLOCKED_BY_ROBOTS
+
+    assert server.paths() == ["/robots.txt"]
+
+
+async def test_stalled_robots_blocks(server: LoopbackServer) -> None:
+    server.routes["/robots.txt"] = Route(headers={"Content-Length": "10"}, stall=True)
+    pages(server, "/a")
+
+    async with make_client(read_timeout=0.2, total_timeout=0.5) as client:
+        with pytest.raises(BlockedError) as info:
+            await client.get(f"{server.base_url}/a")
+
+    assert info.value.reason is BlockReason.BLOCKED_BY_ROBOTS
+
+
+async def test_robots_redirect_to_private_address_blocks(
+    server: LoopbackServer,
+) -> None:
+    server.routes["/robots.txt"] = Route(
+        status=302, headers={"Location": "http://10.0.0.5/robots.txt"}
+    )
+    pages(server, "/a")
+
+    async with make_client() as client:
+        with pytest.raises(BlockedError) as info:
+            await client.get(f"{server.base_url}/a")
+
+    assert info.value.reason is BlockReason.BLOCKED_BY_ROBOTS
+    assert server.paths() == ["/robots.txt"]
+
+
+async def test_only_the_first_500_kb_of_robots_are_parsed(
+    server: LoopbackServer,
+) -> None:
+    head = "User-agent: *\nDisallow: /private/\n"
+    robots(server, head + "# filler\n" * 70_000)  # about 630 KB
+    assert len(server.routes["/robots.txt"].body) > 600_000
+    pages(server, "/private/page", "/ok")
+
+    async with make_client() as client:
+        with pytest.raises(BlockedError):
+            await client.get(f"{server.base_url}/private/page")
+        result = await client.get(f"{server.base_url}/ok")
+
+    assert isinstance(result, FetchResult)
+
+
+async def test_robots_larger_than_the_response_limit_is_truncated_not_an_error(
+    server: LoopbackServer,
+) -> None:
+    robots(server, "User-agent: *\nDisallow: /x\n" + "#" * 5000)
+    pages(server, "/ok")
+
+    async with make_client(max_response_bytes=1024) as client:
+        result = await client.get(f"{server.base_url}/ok")
+
+    assert isinstance(result, FetchResult)
+
+
+async def test_invio_group_overrides_wildcard_group(server: LoopbackServer) -> None:
+    robots(server, "User-agent: *\nDisallow: /\n\nUser-agent: invio\nDisallow: /x/\n")
+    pages(server, "/x/a", "/y")
+
+    async with make_client() as client:
+        with pytest.raises(BlockedError):
+            await client.get(f"{server.base_url}/x/a")
+        result = await client.get(f"{server.base_url}/y")
+
+    assert isinstance(result, FetchResult)
+
+
+async def test_robots_request_has_no_recursion_and_carries_the_user_agent(
+    server: LoopbackServer,
+) -> None:
+    robots(server, "User-agent: *\nAllow: /\n")
+    pages(server, "/a")
+
+    async with make_client() as client:
+        await client.get(f"{server.base_url}/a")
+
+    first = server.requests[0]
+    assert first.path == "/robots.txt"
+    assert first.headers["user-agent"] == HttpClientConfig().user_agent
+    assert server.paths() == ["/robots.txt", "/a"]
+
+
+async def test_respect_robots_false_makes_no_robots_request(
+    server: LoopbackServer,
+) -> None:
+    robots(server, "User-agent: *\nDisallow: /\n")
+    pages(server, "/a")
+
+    async with make_client(respect_robots=False) as client:
+        await client.get(f"{server.base_url}/a")
+
+    assert server.paths() == ["/a"]
+
+
+async def test_redirect_target_on_another_origin_is_checked_against_its_robots(
+    server: LoopbackServer,
+    second_server: LoopbackServer,
+) -> None:
+    robots(second_server, "User-agent: *\nDisallow: /secret\n")
+    pages(second_server, "/secret")
+    pages(server, "/go")
+    server.routes["/go"] = Route(
+        status=302, headers={"Location": f"{second_server.base_url}/secret"}
+    )
+
+    async with make_client() as client:
+        with pytest.raises(BlockedError) as info:
+            await client.get(f"{server.base_url}/go")
+
+    assert info.value.reason is BlockReason.BLOCKED_BY_ROBOTS
+    assert "/secret" not in second_server.paths()
+    assert "/robots.txt" in second_server.paths()
+
+
+async def test_blocked_by_robots_is_logged(
+    server: LoopbackServer,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import logging
+
+    caplog.set_level(logging.DEBUG, logger="invio.sources.http")
+    robots(server, "User-agent: *\nDisallow: /\n")
+
+    async with make_client() as client:
+        with pytest.raises(FetchError):
+            await client.get(f"{server.base_url}/a")
+
+    records = [r for r in caplog.records if r.name == "invio.sources.http"]
+    assert [r.getMessage() for r in records] == ["http_blocked"]
+    assert records[0].__dict__["reason"] == "blocked_by_robots"
+
+
+# --- RobotsCache unit tests ------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        ("User-agent: *\nCrawl-delay: 5\n", 5.0),
+        ("User-agent: invio\nCrawl-delay: 2\n\nUser-agent: *\nCrawl-delay: 9\n", 2.0),
+        ("User-agent: *\nCrawl-delay: abc\n", None),
+        ("User-agent: *\nDisallow: /x\n", None),
+    ],
+)
+async def test_crawl_delay_is_parsed(body: str, expected: float | None) -> None:
+    from invio.sources.netguard import Origin
+    from invio.sources.robots import RobotsCache
+
+    async def fetch(url: object) -> tuple[int, bytes]:
+        return 200, body.encode()
+
+    policy = await RobotsCache(fetch).policy(Origin("http", "h", 80))  # type: ignore[arg-type]
+
+    assert policy.crawl_delay == expected
+
+
+async def test_policy_modes_and_robots_url() -> None:
+    from invio.sources.netguard import Origin
+    from invio.sources.robots import RobotsCache
+
+    seen: list[str] = []
+
+    async def fetch(url: object) -> tuple[int, bytes]:
+        seen.append(str(url))
+        return 500, b""
+
+    cache = RobotsCache(fetch)  # type: ignore[arg-type]
+    origin = Origin("https", "example.org", 8443)
+
+    assert cache.known(origin) is None
+    policy = await cache.policy(origin)
+
+    assert policy.mode == "disallow_all"
+    assert policy.allows("https://example.org:8443/") is False
+    assert cache.known(origin) is policy
+    assert seen == ["https://example.org:8443/robots.txt"]
