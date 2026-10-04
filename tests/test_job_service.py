@@ -10,7 +10,7 @@ import json
 import logging
 import pickle
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -28,12 +28,14 @@ from invio.config.job import (
     JobYamlLoader,
     ScheduleConfig,
     load_yaml,
+    validate_job,
     write_yaml,
 )
 from invio.config.settings import MissingSettingError
 from invio.db.models import Digest, Item, Job, LlmUsage, Notification, Run
-from invio.db.repositories import JobRepository
+from invio.db.repositories import JobRepository, RunRepository
 from invio.db.session import session_factory, session_scope
+from invio.domain import RunStatus
 from invio.log import configure_logging
 from invio.scheduling.next_run import compute_next_run
 from invio.services.jobs import (
@@ -42,7 +44,9 @@ from invio.services.jobs import (
     JobNotFoundError,
     JobRecord,
     JobService,
+    JobSummary,
     StoredJobConfigError,
+    check_job_name,
 )
 from tests.conftest import FakeClock
 from tests.db_helpers import (
@@ -1008,3 +1012,156 @@ def test_error_args_and_hierarchy() -> None:
     assert stored.args == (None, ["a: bad"])
     assert not issubclass(JobExistsError, (LookupError, ValueError, JobConfigError))
     assert not issubclass(JobNotFoundError, (ValueError, JobConfigError))
+
+
+# --- overview() / stored_config() ------------------------------------------------------------
+
+
+def _corrupt_timezone(store: Callable[[], Any], name: str) -> None:
+    with store() as s:
+        job = JobRepository(s).get_by_name(name)
+        assert job is not None
+        job.config = {
+            **job.config,
+            "schedule": {**job.config["schedule"], "timezone": "Europe/Atlantis"},
+        }
+
+
+def test_overview_orders_by_name_and_passes_through_fields(
+    job_service: JobService, job_data: dict[str, Any], fake_clock: FakeClock
+) -> None:
+    job_service.create("b", job_data)
+    job_service.create("a", job_data)
+    job_service.set_enabled("b", False)
+
+    rows = job_service.overview()
+
+    assert [r.name for r in rows] == ["a", "b"]
+    assert all(isinstance(r, JobSummary) for r in rows)
+    assert rows[0].enabled is True
+    assert rows[0].next_run_at == fake_clock.now + timedelta(hours=1)
+    assert rows[0].config == validate_job(job_data)
+    assert rows[0].last_run_status is None
+    assert rows[1].enabled is False
+    assert rows[1].next_run_at is None
+
+
+def test_overview_includes_invalid_config(
+    job_service: JobService,
+    job_data: dict[str, Any],
+    store: Callable[[], Any],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    job_service.create("ok", job_data)
+    job_service.create("broken", job_data)
+    _corrupt_timezone(store, "broken")
+
+    with caplog.at_level(logging.WARNING, logger="invio.services.jobs"):
+        rows = {r.name: r for r in job_service.overview()}
+
+    assert rows["broken"].config is None
+    assert rows["ok"].config is not None
+    assert not [r for r in caplog.records if r.name == "invio.services.jobs"]
+
+
+def test_overview_null_stored_config_is_invalid(
+    job_service: JobService, store: Callable[[], Any]
+) -> None:
+    with store() as s:
+        s.add(Job(name="empty"))
+
+    (row,) = job_service.overview()
+
+    assert row.config is None
+
+
+def test_names_skips_validation(
+    job_service: JobService, job_data: dict[str, Any], store: Callable[[], Any]
+) -> None:
+    job_service.create("b", job_data)
+    job_service.create("a", job_data)
+    _corrupt_timezone(store, "b")
+
+    assert job_service.names() == ["a", "b"]
+
+
+def test_is_enabled_tolerates_invalid_config(
+    job_service: JobService, job_data: dict[str, Any], store: Callable[[], Any]
+) -> None:
+    job_service.create("a", job_data)
+    _corrupt_timezone(store, "a")
+
+    assert job_service.is_enabled("a") is True
+    with suppress(StoredJobConfigError):
+        job_service.set_enabled("a", False)
+    assert job_service.is_enabled("a") is False
+
+
+def test_is_enabled_unknown_job(job_service: JobService) -> None:
+    with pytest.raises(JobNotFoundError):
+        job_service.is_enabled("missing")
+
+
+def test_overview_last_run_status_is_newest_run(
+    job_service: JobService, job_data: dict[str, Any], store: Callable[[], Any]
+) -> None:
+    job_service.create("ran", job_data)
+    job_service.create("idle", job_data)
+    t = datetime(2026, 1, 1, tzinfo=UTC)
+    with store() as s:
+        job = JobRepository(s).get_by_name("ran")
+        assert job is not None
+        runs = RunRepository(s)
+        runs.finish(runs.start(job.id, started_at=t), RunStatus.SUCCEEDED)
+        runs.finish(runs.start(job.id, started_at=t + timedelta(days=1)), RunStatus.FAILED)
+
+    rows = {r.name: r for r in job_service.overview()}
+
+    assert rows["ran"].last_run_status is RunStatus.FAILED
+    assert rows["idle"].last_run_status is None
+
+
+def test_overview_empty(job_service: JobService) -> None:
+    assert job_service.overview() == []
+
+
+def test_list_still_skips_invalid_jobs(
+    job_service: JobService, job_data: dict[str, Any], store: Callable[[], Any]
+) -> None:
+    job_service.create("ok", job_data)
+    job_service.create("broken", job_data)
+    _corrupt_timezone(store, "broken")
+
+    assert [r.name for r in job_service.list()] == ["ok"]
+
+
+def test_stored_config_returns_raw_mapping_even_if_invalid(
+    job_service: JobService, job_data: dict[str, Any], store: Callable[[], Any]
+) -> None:
+    job_service.create("broken", job_data)
+    _corrupt_timezone(store, "broken")
+
+    raw = job_service.stored_config("broken")
+
+    assert raw["schedule"]["timezone"] == "Europe/Atlantis"
+
+
+def test_stored_config_of_null_config_is_empty(
+    job_service: JobService, store: Callable[[], Any]
+) -> None:
+    with store() as s:
+        s.add(Job(name="empty"))
+
+    assert job_service.stored_config("empty") == {}
+
+
+def test_stored_config_missing(job_service: JobService) -> None:
+    with pytest.raises(JobNotFoundError):
+        job_service.stored_config("missing")
+
+
+def test_check_job_name_is_public() -> None:
+    check_job_name("fine")
+    with pytest.raises(JobNameError) as info:
+        check_job_name(" x")
+    assert info.value.rule == "must not have leading or trailing whitespace"

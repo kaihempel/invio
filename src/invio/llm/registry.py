@@ -92,6 +92,9 @@ class ModelRegistry:
                 f"model '{model_id}' is not registered for LLM provider '{provider}'"
             )
         return info
+    def models_for(self, provider: str) -> list[str]:
+        """Return the sorted ids registered for ``provider`` (empty if it has none)."""
+        return sorted(m.model_id for m in self._models.values() if m.provider == provider)
 
     def cost(self, model_id: str, usage: Usage) -> Decimal | None:
         """Return the USD cost of ``usage`` (6 decimals) or ``None`` for an unknown model."""
