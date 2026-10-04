@@ -1,4 +1,4 @@
-"""Optional live check against the real Mistral API (opt-in: ``pytest -m live``)."""
+"""Optional live checks against the real Mistral API (opt-in: ``pytest -m live``)."""
 
 import os
 
@@ -6,34 +6,58 @@ import pytest
 
 from invio.llm.mistral import MistralProvider
 from invio.llm.registry import default_registry
-from tests.llm_helpers import make_settings
+from tests.llm_helpers import Score, make_settings
 
 # Captured at import: the autouse ``isolated_settings`` fixture removes INVIO_* per test.
 API_KEY = os.environ.get("INVIO_MISTRAL_API_KEY")
 
 
-@pytest.mark.live
-async def test_live_connectivity_check() -> None:
+def _cheapest_model() -> str:
+    cheapest = default_registry().cheapest("mistral")
+    assert cheapest is not None
+    return cheapest.model_id
+
+
+def _provider() -> MistralProvider:
     if not API_KEY:
         pytest.skip("INVIO_MISTRAL_API_KEY not set")
-    registry = default_registry()
-    models = [
-        info
-        for model_id in registry.model_ids()
-        if (info := registry.get(model_id)) is not None and info.provider == "mistral"
-    ]
-    cheapest = min(
-        models, key=lambda m: (m.input_price_per_mtok + m.output_price_per_mtok, m.model_id)
-    )
-    provider = MistralProvider.from_settings(make_settings(mistral_api_key=API_KEY))
+    return MistralProvider.from_settings(make_settings(mistral_api_key=API_KEY))
 
-    text, usage = await provider.complete(
-        "Connectivity check.",
-        "Reply with OK.",
-        model=cheapest.model_id,
-        temperature=0,
-        max_tokens=5,
-    )
+
+@pytest.mark.live
+async def test_live_connectivity_check() -> None:
+    provider = _provider()
+
+    try:
+        text, usage = await provider.complete(
+            "Connectivity check.",
+            "Reply with OK.",
+            model=_cheapest_model(),
+            temperature=0,
+            max_tokens=5,
+        )
+    finally:
+        await provider.aclose()
 
     assert text.strip()
+    assert usage.input_tokens > 0
+
+
+@pytest.mark.live
+async def test_live_structured_output() -> None:
+    # Checks that Mistral's strict mode accepts the schema the provider sends.
+    provider = _provider()
+
+    try:
+        value, usage = await provider.complete_structured(
+            "You rate how well a sentence describes a sunny day.",
+            "The sun is shining and there is not a cloud in the sky.",
+            Score,
+            model=_cheapest_model(),
+            temperature=0,
+        )
+    finally:
+        await provider.aclose()
+
+    assert 0 <= value.score <= 1
     assert usage.input_tokens > 0

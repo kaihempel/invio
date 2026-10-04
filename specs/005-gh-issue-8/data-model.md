@@ -57,7 +57,7 @@ Registered as `mistral` via `@register_provider("mistral")`.
 | `retry` | `RetryPolicy()` unless given |
 | `sleep`, `uniform`, `now` | injectable (defaults `asyncio.sleep`, `random.uniform`, `datetime.now(UTC)`) |
 | `client_factory` | `Callable[[], httpx2.AsyncClient]`, called once per event loop (default `httpx2.AsyncClient(follow_redirects=True)`; tests return a `MockTransport` client) (FR-027, R15) |
-| cached client + loop (private) | the `Mistral` client and the event loop it was built for; rebuilt when used from another loop |
+| clients per loop (private) | `{loop: (Mistral, httpx2.AsyncClient)}` guarded by a `threading.Lock`; one client per live loop, entries of closed loops dropped on the next build; `aclose()` closes and removes the running loop's entry |
 | `server_url` | optional override (default: SDK default) |
 
 ## Usage mapping

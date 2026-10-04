@@ -9,8 +9,8 @@ from pathlib import Path
 import pytest
 
 import invio.llm
-from invio.llm.base import ModelRegistryError, Usage
-from invio.llm.registry import ModelInfo, default_registry, load_registry
+from invio.llm.base import LLMConfigError, ModelRegistryError, Usage
+from invio.llm.registry import ModelInfo, ModelRegistry, default_registry, load_registry
 from tests.llm_helpers import FIXTURE_REGISTRY_DIR, write_registry
 
 PRICED = "fakeco-priced"
@@ -339,3 +339,47 @@ def test_no_well_known_model_id_literals_in_source() -> None:
         if pattern.search(path.read_text(encoding="utf-8"))
     }
     assert not offenders
+
+
+def _three_models(tmp_path: Path) -> ModelRegistry:
+    write_registry(
+        tmp_path,
+        "acme",
+        {
+            "acme-b": {**ENTRY, "input_price_per_mtok": 1, "output_price_per_mtok": 1},
+            "acme-a": {**ENTRY, "input_price_per_mtok": 0, "output_price_per_mtok": 2},
+            "acme-c": {**ENTRY, "input_price_per_mtok": 5, "output_price_per_mtok": 5},
+        },
+    )
+    models_dir = write_registry(tmp_path, "zeta", {"zeta-1": {**ENTRY, "input_price_per_mtok": 0}})
+    return load_registry([models_dir])
+
+
+def test_models_for_returns_only_that_provider_sorted_by_id(tmp_path: Path) -> None:
+    registry = _three_models(tmp_path)
+
+    acme = [info.model_id for info in registry.models_for("acme")]
+
+    assert acme == ["acme-a", "acme-b", "acme-c"]
+    assert [info.model_id for info in registry.models_for("zeta")] == ["zeta-1"]
+    assert registry.models_for("nobody") == []
+
+
+def test_cheapest_sums_both_prices_and_breaks_ties_by_id(tmp_path: Path) -> None:
+    registry = _three_models(tmp_path)
+
+    cheapest = registry.cheapest("acme")
+
+    assert cheapest is not None
+    assert cheapest.model_id == "acme-a"  # 0 + 2 ties with 1 + 1; "acme-a" sorts first
+    assert registry.cheapest("nobody") is None
+
+
+def test_require_returns_the_entry_of_that_provider(tmp_path: Path) -> None:
+    registry = _three_models(tmp_path)
+
+    assert registry.require("acme-b", "acme").model_id == "acme-b"
+    with pytest.raises(LLMConfigError, match="'acme-b' is not registered for LLM provider 'zeta'"):
+        registry.require("acme-b", "zeta")
+    with pytest.raises(LLMConfigError, match="'nope' is not registered for LLM provider 'acme'"):
+        registry.require("nope", "acme")

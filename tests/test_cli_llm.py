@@ -5,6 +5,7 @@ from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any, ClassVar, Self
 
+import httpx2
 import pytest
 from typer.testing import CliRunner, Result
 
@@ -19,13 +20,14 @@ from invio.llm.base import (
     LLMInvalidRequestError,
     LLMRateLimitError,
     LLMUnavailableError,
+    ModelRegistryError,
     Usage,
     require_api_key,
 )
 from invio.llm.fake import FakeProvider, FakeReply
 from invio.llm.mistral import MistralProvider
 from tests.llm_helpers import write_registry
-from tests.mistral_helpers import API_KEY, Recorder, Reply
+from tests.mistral_helpers import API_KEY, Recorder, Reply, recording_options
 
 runner = CliRunner()
 Register = Callable[[str, Any], None]
@@ -160,6 +162,21 @@ def test_llm_errors_exit_1_without_traceback(patched_providers: Register, error:
     assert result.stdout == ""
 
 
+def test_broken_registry_is_a_configuration_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    def broken() -> llm_registry.ModelRegistry:
+        raise ModelRegistryError("models.d/mistral.yaml: invalid registry file: models: required")
+
+    monkeypatch.setattr(llm_registry, "default_registry", broken)
+
+    result = _invoke("mistral")
+
+    assert result.exit_code == 2
+    assert _last_message(result) == (
+        "Configuration error: models.d/mistral.yaml: invalid registry file: models: required"
+    )
+    assert "Traceback" not in result.stderr + result.stdout
+
+
 def test_provider_without_registry_models_is_a_configuration_error(
     patched_providers: Register,
 ) -> None:
@@ -222,10 +239,7 @@ def _recorded_mistral(*replies: Reply) -> tuple[Recorder, list[float]]:
     production; only the HTTP transport and the retry sleep are replaced.
     """
     recorder = Recorder(replies)
-    waits: list[float] = []
-
-    async def record_sleep(seconds: float) -> None:
-        waits.append(seconds)
+    options, waits = recording_options(recorder)
 
     class _Recorded(MistralProvider):
         @classmethod
@@ -233,9 +247,7 @@ def _recorded_mistral(*replies: Reply) -> tuple[Recorder, list[float]]:
             return cls(
                 require_api_key(settings, "mistral"),
                 timeout_seconds=settings.llm_timeout_seconds,
-                client_factory=recorder.client_factory,
-                sleep=record_sleep,
-                uniform=lambda a, b: 0.0,
+                **options,
             )
 
     factory.register_provider("mistral")(_Recorded)
@@ -258,6 +270,7 @@ def test_recorded_mistral_success(
         result.stdout,
     )
     (request,) = recorder.requests
+    assert [client.is_closed for client in recorder.clients] == [True]
     assert request.has_authorization
     assert (request.body["model"], request.body["temperature"]) == (CHEAP, 0)
     assert request.body["max_tokens"] == 5
@@ -275,13 +288,15 @@ def test_recorded_mistral_success(
         (("error_503",) * 4, "LLMUnavailableError", 4, [1.0, 2.0, 4.0]),
         (("error_404_model",), "LLMInvalidRequestError", 1, []),
         (("malformed_200",), "LLMUnavailableError", 1, []),
+        ((httpx2.DecodingError("bad gzip"),), "LLMUnavailableError", 1, []),
+        ((httpx2.TooManyRedirects("loop"),), "LLMUnavailableError", 1, []),
     ],
-    ids=["401", "403", "429", "429-long", "503", "404", "malformed"],
+    ids=["401", "403", "429", "429-long", "503", "404", "malformed", "decoding", "redirects"],
 )
 def test_recorded_mistral_failures_exit_1(
     patched_providers: Register,
     monkeypatch: pytest.MonkeyPatch,
-    replies: tuple[str, ...],
+    replies: tuple[Reply, ...],
     error: str,
     requests: int,
     waits_expected: list[float],
@@ -302,6 +317,7 @@ def test_recorded_mistral_failures_exit_1(
     assert "Reply with OK." not in result.stderr
     assert len(recorder.requests) == requests
     assert waits == waits_expected
+    assert [client.is_closed for client in recorder.clients] == [True]
 
 
 def test_recorded_mistral_auth_failure_names_the_setting(

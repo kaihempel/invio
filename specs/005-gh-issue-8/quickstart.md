@@ -11,7 +11,7 @@
 uv run pytest tests/test_llm_mistral.py tests/test_cli_llm.py tests/test_llm_base.py -q
 ```
 
-Expected: all pass in < 10 s; the live test is deselected. Covers spec US1–US5 and the
+Expected: all pass in < 10 s; the live tests are skipped. Covers spec US1–US5 and the
 behaviour table in [contracts/python-api.md](./contracts/python-api.md).
 
 Prove "tests run offline" even with a key set (SC-005):

@@ -49,7 +49,7 @@ class Recorder:
     def __init__(self, replies: tuple[Reply, ...]) -> None:
         self._queue = list(replies)
         self.requests: list[RecordedRequest] = []
-        self.clients_created = 0
+        self.clients: list[httpx2.AsyncClient] = []
 
     async def __call__(self, request: httpx2.Request) -> httpx2.Response:
         self.requests.append(
@@ -73,9 +73,33 @@ class Recorder:
         assert isinstance(reply, httpx2.Response)
         return reply
 
+    @property
+    def clients_created(self) -> int:
+        return len(self.clients)
+
     def client_factory(self) -> httpx2.AsyncClient:
-        self.clients_created += 1
-        return httpx2.AsyncClient(transport=httpx2.MockTransport(self))
+        client = httpx2.AsyncClient(transport=httpx2.MockTransport(self))
+        self.clients.append(client)
+        return client
+
+
+def recording_options(recorder: Recorder) -> tuple[dict[str, Any], list[float]]:
+    """``MistralProvider`` keyword arguments for offline tests and the list of requested waits.
+
+    The HTTP transport is the recorder, the retry sleep only records its argument and the
+    jitter is zero.
+    """
+    waits: list[float] = []
+
+    async def record_sleep(seconds: float) -> None:
+        waits.append(seconds)
+
+    options: dict[str, Any] = {
+        "client_factory": recorder.client_factory,
+        "sleep": record_sleep,
+        "uniform": lambda a, b: 0.0,
+    }
+    return options, waits
 
 
 def make_provider(
@@ -88,21 +112,10 @@ def make_provider(
 ) -> tuple[MistralProvider, Recorder, list[float]]:
     """Build a provider on a :class:`Recorder`; the list receives the requested waits."""
     recorder = Recorder(replies)
-    waits: list[float] = []
-
-    async def record_sleep(seconds: float) -> None:
-        waits.append(seconds)
-
-    kwargs: dict[str, Any] = {}
-    if now is not None:
-        kwargs["now"] = now
+    options, waits = recording_options(recorder)
+    overrides = {"uniform": uniform, "sleep": sleep, "now": now}
+    options.update({name: value for name, value in overrides.items() if value is not None})
     provider = MistralProvider(
-        API_KEY,
-        timeout_seconds=timeout_seconds,
-        retry=retry if retry is not None else RetryPolicy(),
-        client_factory=recorder.client_factory,
-        sleep=sleep if sleep is not None else record_sleep,
-        uniform=uniform if uniform is not None else (lambda a, b: 0.0),
-        **kwargs,
+        API_KEY, timeout_seconds=timeout_seconds, retry=retry or RetryPolicy(), **options
     )
     return provider, recorder, waits

@@ -73,6 +73,10 @@ class LLMProvider(Protocol):
         """Return an answer validated against ``schema`` and the (summed) token usage."""
         ...
 
+    async def aclose(self) -> None:
+        """Release the connections opened from the running event loop (safe to call twice)."""
+        ...
+
 
 class LLMError(Exception):
     """Base class of LLM call failures."""
@@ -216,12 +220,19 @@ def _validate[T: BaseModel](schema: type[T], text: str) -> T | str:
 
 
 async def structured_with_repair[T: BaseModel](
-    request: RawRequest, system: str, user: str, schema: type[T]
+    request: RawRequest,
+    system: str,
+    user: str,
+    schema: type[T],
+    *,
+    provider: str | None = None,
+    model: str | None = None,
 ) -> tuple[T, Usage]:
     """Run ``request`` and validate the answer against ``schema``; repair at most once.
 
-    A second invalid answer raises :class:`LLMInvalidOutputError` carrying the final problems
-    and the usage of both requests. Errors raised by ``request`` propagate unchanged.
+    A second invalid answer raises :class:`LLMInvalidOutputError` carrying the final problems,
+    the usage of both requests, ``provider`` and ``model``. Errors raised by ``request``
+    propagate unchanged.
     """
     instruction = (
         f"{system}\n\nAnswer with a single JSON document that matches this JSON Schema and "
@@ -242,8 +253,12 @@ async def structured_with_repair[T: BaseModel](
     result = _validate(schema, text)
     if not isinstance(result, str):
         return result, usage
+    where = f" (model {model})" if model is not None else ""
     raise LLMInvalidOutputError(
-        f"structured output for {schema.__name__} is invalid after one repair attempt: {result}",
+        f"structured output for {schema.__name__} is invalid after one repair attempt{where}: "
+        f"{result}",
         errors=result,
         usage=usage,
+        provider=provider,
+        model=model,
     )

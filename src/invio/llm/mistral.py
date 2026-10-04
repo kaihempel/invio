@@ -4,14 +4,19 @@ The SDK talks HTTP through ``httpx2``, so this module imports its exception type
 retrying is done here (the SDK's own retry configuration is never set): rate limits (429),
 server errors (5xx) and connection failures are retried with exponential backoff and jitter
 (:class:`RetryPolicy`), a ``Retry-After`` header is honoured up to ``max_retry_after`` seconds,
-and timeouts, authentication failures and rejected requests are never retried.
+and timeouts, authentication failures, rejected requests and requests that cannot be sent are
+never retried. Every ``httpx2`` error is mapped to a typed :class:`~invio.llm.base.LLMError`.
 
 Errors raised here carry ``provider="mistral"`` and the model. Their messages are built from
 the status and a sanitized provider message only; the API key, the prompt, the answer and the
-raw response body never appear in them, and the SDK exception is not chained.
+raw response body never appear in them, and the SDK exception is neither their ``__cause__``
+nor their ``__context__``.
 
-The SDK client (and so its HTTP connection pool) is bound to the event loop that first used it,
-so it is created lazily and replaced (the old one dropped) when another loop uses the provider.
+The SDK client (and so its HTTP connection pool) is bound to the event loop that uses it, so
+there is one client per running loop, created lazily. :meth:`MistralProvider.aclose` closes the
+client of the running loop; clients of loops that were closed meanwhile cannot be closed any
+more and are dropped on the next use (their sockets are released on garbage collection). The
+client table is guarded by a lock, so threads running their own loops may share one provider.
 """
 
 import asyncio
@@ -20,7 +25,7 @@ import logging
 import math
 import random
 import re
-import weakref
+import threading
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -36,7 +41,6 @@ from invio.config.settings import Settings
 from invio.llm.base import (
     LLMAuthError,
     LLMError,
-    LLMInvalidOutputError,
     LLMInvalidRequestError,
     LLMProvider,
     LLMRateLimitError,
@@ -56,9 +60,12 @@ _MAX_DETAIL_CHARS = 300
 _SDK_TIMEOUT_MARGIN_S = 5
 _AUTH_STATUSES = frozenset({401, 403})
 _RATE_LIMIT_STATUS = 429
-_SERVER_ERROR_STATUS = 500
-_CLIENT_ERROR_MIN = 400
+_CLIENT_ERRORS = range(400, 500)
+_SERVER_ERRORS = range(500, 600)
 _SCHEMA_NAME_LIMIT = 64
+_DELTA_SECONDS = re.compile(r"[0-9]+(?:\.[0-9]+)?")
+# Errors raised before anything was sent: retrying cannot help.
+_UNSENDABLE = (httpx2.InvalidURL, httpx2.UnsupportedProtocol, httpx2.LocalProtocolError)
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,18 +111,15 @@ def _utc_now() -> datetime:
 def _retry_after(headers: Mapping[str, str], now: Callable[[], datetime]) -> float | None:
     """Return the seconds requested by a ``Retry-After`` header, or ``None``.
 
-    Accepts non-negative integer or decimal seconds or an HTTP date (relative to ``now()``,
-    floored at 0). Anything else is ignored.
+    Accepts ASCII integer or decimal seconds or an HTTP date (relative to ``now()``, floored at
+    0). Seconds too large for a float give ``math.inf`` (above any cap). Anything else is
+    ignored.
     """
     raw = headers.get("retry-after")
     if raw is None:
         return None
-    try:
-        seconds = float(raw)
-    except ValueError:
-        pass
-    else:
-        return seconds if math.isfinite(seconds) and seconds >= 0 else None
+    if _DELTA_SECONDS.fullmatch(raw.strip()):
+        return float(raw)
     try:
         when = parsedate_to_datetime(raw)
     except (TypeError, ValueError):
@@ -145,7 +149,7 @@ def _safe_detail(exc: errors.MistralError) -> str:
         elif isinstance(detail, str):
             text = detail
         elif isinstance(detail, list):
-            text = "; ".join(_detail_item(item) for item in detail if _detail_item(item))
+            text = "; ".join(item for item in map(_detail_item, detail) if item)
     printable = "".join(ch if ch.isprintable() else " " for ch in text)
     return " ".join(printable.split())[:_MAX_DETAIL_CHARS]
 
@@ -169,15 +173,19 @@ def _unavailable(message: str, model: str) -> LLMUnavailableError:
 
 def _classify(exc: Exception, model: str, now: Callable[[], datetime]) -> _Failure | None:
     """Map an SDK or transport exception to a :class:`_Failure`; ``None`` if not recognized."""
+    name = type(exc).__name__
     if isinstance(exc, httpx2.TimeoutException):
         message = _describe("Mistral request timed out", model, None)
         return _Failure("timeout", False, _unavailable(message, model))
+    if isinstance(exc, _UNSENDABLE):
+        message = _describe(f"Mistral request could not be sent ({name})", model, None)
+        return _Failure("unsendable", False, _unavailable(message, model))
     if isinstance(exc, httpx2.TransportError | errors.NoResponseError):
-        name = type(exc).__name__
         message = _describe(f"Mistral connection failed ({name})", model, None)
         return _Failure("connection", True, _unavailable(message, model))
-    if isinstance(exc, errors.ResponseValidationError):
-        message = _describe("Mistral returned an unexpected response", model, None)
+    if isinstance(exc, httpx2.HTTPError | httpx2.StreamError | errors.ResponseValidationError):
+        # Undecodable body, redirect loop, stream misuse or a body the SDK cannot parse.
+        message = _describe(f"Mistral returned an unexpected response ({name})", model, None)
         return _Failure("bad_response", False, _unavailable(message, model))
     if not isinstance(exc, errors.MistralError):
         return None
@@ -191,17 +199,35 @@ def _classify(exc: Exception, model: str, now: Callable[[], datetime]) -> _Failu
     if status == _RATE_LIMIT_STATUS:
         wait = _retry_after(exc.headers, now)
         message = _describe("Mistral rate limit exceeded", model, status, detail)
-        error = LLMRateLimitError(message, provider=PROVIDER, model=model, retry_after=wait)
-        return _Failure("rate_limit", True, error, status, wait)
-    if _SERVER_ERROR_STATUS <= status < _SERVER_ERROR_STATUS + 100:
+        finite_wait = wait if wait is not None and math.isfinite(wait) else None
+        limited = LLMRateLimitError(
+            message, provider=PROVIDER, model=model, retry_after=finite_wait
+        )
+        return _Failure("rate_limit", True, limited, status, wait)
+    if status in _SERVER_ERRORS:
         message = _describe("Mistral server error", model, status, detail)
         return _Failure("server", True, _unavailable(message, model), status)
-    if not _CLIENT_ERROR_MIN <= status < _SERVER_ERROR_STATUS:
+    if status not in _CLIENT_ERRORS:
         message = _describe("Mistral returned an unexpected response", model, status)
         return _Failure("bad_response", False, _unavailable(message, model), status)
     message = _describe("Mistral rejected the request", model, status, detail)
-    error_ = LLMInvalidRequestError(message, provider=PROVIDER, model=model, status=status)
-    return _Failure("invalid_request", False, error_, status)
+    invalid = LLMInvalidRequestError(message, provider=PROVIDER, model=model, status=status)
+    return _Failure("invalid_request", False, invalid, status)
+
+
+def _strict_schema(node: object) -> object:
+    """Return a copy of a JSON Schema with ``additionalProperties: false`` on every object.
+
+    Mistral's strict mode expects closed objects (the SDK's own pydantic helper does the same).
+    """
+    if isinstance(node, dict):
+        closed = {key: _strict_schema(value) for key, value in node.items()}
+        if closed.get("type") == "object":
+            closed["additionalProperties"] = False
+        return closed
+    if isinstance(node, list):
+        return [_strict_schema(value) for value in node]
+    return node
 
 
 def _answer_text(response: models.ChatCompletionResponse) -> str:
@@ -241,10 +267,8 @@ class MistralProvider:
         self._sleep = sleep
         self._uniform = uniform
         self._now = now
-        # At most one entry: clients of other loops are dropped, never closed from this loop.
-        self._clients: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, Mistral] = (
-            weakref.WeakKeyDictionary()
-        )
+        self._clients: dict[asyncio.AbstractEventLoop, tuple[Mistral, httpx2.AsyncClient]] = {}
+        self._clients_lock = threading.Lock()
 
     @classmethod
     def from_settings(cls, settings: Settings) -> Self:
@@ -257,21 +281,33 @@ class MistralProvider:
         return f"MistralProvider(timeout_seconds={self.timeout_seconds!r}, retry={self.retry!r})"
 
     def _client_for_loop(self) -> Mistral:
-        """Return the SDK client of the running loop, building it on first use or loop change."""
+        """Return the SDK client of the running loop, building it on its first use."""
         loop = asyncio.get_running_loop()
-        client = self._clients.get(loop)
-        if client is None:
-            # Pools of other loops are dropped (sockets are released on garbage collection);
-            # closing them from this loop is not safe.
-            self._clients.clear()
-            client = Mistral(
-                api_key=self._api_key,
-                async_client=self._client_factory(),
-                server_url=self._server_url,
-                timeout_ms=int((self.timeout_seconds + _SDK_TIMEOUT_MARGIN_S) * 1000),
-            )
-            self._clients[loop] = client
-        return client
+        with self._clients_lock:
+            entry = self._clients.get(loop)
+            if entry is None:
+                # A closed loop's pool cannot be closed any more: drop it (sockets are released
+                # on garbage collection). Clients of other live loops stay untouched.
+                for closed in [other for other in self._clients if other.is_closed()]:
+                    del self._clients[closed]
+                http_client = self._client_factory()
+                sdk_client = Mistral(
+                    api_key=self._api_key,
+                    async_client=http_client,
+                    server_url=self._server_url,
+                    timeout_ms=int((self.timeout_seconds + _SDK_TIMEOUT_MARGIN_S) * 1000),
+                )
+                entry = (sdk_client, http_client)
+                self._clients[loop] = entry
+        return entry[0]
+
+    async def aclose(self) -> None:
+        """Close the HTTP client of the running loop; the next call builds a new one."""
+        loop = asyncio.get_running_loop()
+        with self._clients_lock:
+            entry = self._clients.pop(loop, None)
+        if entry is not None:
+            await entry[1].aclose()
 
     async def _attempt(
         self,
@@ -301,10 +337,17 @@ class MistralProvider:
         usage = response.usage
         return text, Usage(usage.prompt_tokens or 0, usage.completion_tokens or 0)
 
-    def _backoff(self, retry_number: int) -> float:
+    def _wait_before_retry(self, failure: _Failure, attempt: int) -> float | None:
+        """Return the seconds to wait before the next attempt, or ``None`` to give up."""
         policy = self.retry
-        jitter = self._uniform(-policy.jitter, policy.jitter)
-        return float(policy.base_delay * 2 ** (retry_number - 1) * (1 + jitter))
+        if not failure.retryable or attempt > policy.max_retries:
+            return None
+        if failure.retry_after is None:
+            jitter = self._uniform(-policy.jitter, policy.jitter)
+            return float(policy.base_delay * 2 ** (attempt - 1) * (1 + jitter))
+        if failure.retry_after > policy.max_retry_after:
+            return None
+        return failure.retry_after
 
     async def _request(
         self,
@@ -338,13 +381,10 @@ class MistralProvider:
                 failure = _classify(exc, model, self._now)
                 if failure is None:
                     raise
-                if not failure.retryable or attempt > self.retry.max_retries:
-                    raise failure.error from None
-                wait = failure.retry_after
-                if wait is None:
-                    wait = self._backoff(attempt)
-                elif wait > self.retry.max_retry_after:
-                    raise failure.error from None
+            # Raised outside the handler, so the SDK exception is not kept as __context__.
+            wait = self._wait_before_retry(failure, attempt)
+            if wait is None:
+                raise failure.error
             logger.warning(
                 "llm.retry",
                 extra={
@@ -377,7 +417,7 @@ class MistralProvider:
             type="json_schema",
             json_schema=models.JSONSchema(
                 name=re.sub(r"[^a-zA-Z0-9_-]", "_", schema.__name__)[:_SCHEMA_NAME_LIMIT],
-                schema_definition=schema.model_json_schema(),
+                schema_definition=_strict_schema(schema.model_json_schema()),
                 strict=True,
             ),
         )
@@ -392,17 +432,9 @@ class MistralProvider:
                 response_format=response_format,
             )
 
-        try:
-            return await structured_with_repair(request, system, user, schema)
-        except LLMInvalidOutputError as exc:
-            raise LLMInvalidOutputError(
-                f"Mistral structured output for {schema.__name__} is invalid after one repair "
-                f"attempt (model {model}): {exc.errors}",
-                errors=exc.errors,
-                usage=exc.usage,
-                provider=PROVIDER,
-                model=model,
-            ) from None
+        return await structured_with_repair(
+            request, system, user, schema, provider=PROVIDER, model=model
+        )
 
 
 if TYPE_CHECKING:

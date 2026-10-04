@@ -250,3 +250,17 @@ async def test_plain_error_log_has_no_usage_fields(
 
     (record,) = _records(caplog, "llm.error")
     assert "input_tokens" not in record.__dict__
+
+
+async def test_aclose_is_forwarded_to_the_provider(patched_providers: Any) -> None:
+    closed: list[bool] = []
+
+    class _Closable(FakeProvider):
+        async def aclose(self) -> None:
+            closed.append(True)
+
+    provider = _provider(patched_providers, _Closable([]))
+
+    await provider.aclose()
+
+    assert closed == [True]

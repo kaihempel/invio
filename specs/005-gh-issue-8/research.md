@@ -130,8 +130,8 @@ inspected) and the merged #7 code in `src/invio/llm/`. No NEEDS CLARIFICATION re
 
   | Model id | Role fit | Input $/1M | Output $/1M | Context |
   |---|---|---|---|---|
-  | `mistral-small-2506` | fast | 0.10 | 0.30 | 131072 |
-  | `mistral-medium-2508` | smart | 0.40 | 2.00 | 131072 |
+  | `mistral-small-2603` | fast | 0.15 | 0.60 | 262144 |
+  | `mistral-medium-2604` | smart | 1.50 | 7.50 | 262144 |
 
 - **Test**: a registry test asserts that no Mistral id ends with `-latest` and that at least
   two models exist.
@@ -154,9 +154,12 @@ inspected) and the merged #7 code in `src/invio/llm/`. No NEEDS CLARIFICATION re
 
 ## R13 — Live test opt-in
 
-- **Decision**: Register marker `live` in `pyproject.toml` and add `-m "not live"` to
-  `addopts`; `pytest -m live` overrides it (the last `-m` wins). The live test skips with a
-  reason when `INVIO_MISTRAL_API_KEY` is unset. CI runs the default selection only.
+- **Decision**: Register marker `live` in `pyproject.toml`; a
+  `pytest_collection_modifyitems` hook in `tests/conftest.py` skips `live` tests unless the
+  `-m` expression names `live` (`pytest -m live`). An `addopts = -m "not live"` default was
+  dropped in review: any other `-m` expression (e.g. `-m db`) replaced it and ran the live
+  tests. The live tests skip with a reason when `INVIO_MISTRAL_API_KEY` is unset. CI runs the
+  default selection only.
 - **Note**: The autouse `isolated_settings` fixture in `tests/conftest.py` isolates env/`.env`;
   the live test reads the key from the real environment explicitly before isolation applies
   (e.g. capture `os.environ` at module import) — implementer verifies against the fixture.

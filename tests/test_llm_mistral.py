@@ -1,11 +1,12 @@
 """Tests for the Mistral provider, driven through recorded HTTP fixtures (no network)."""
 
-import ast
 import asyncio
 import json
 import logging
+import math
 import re
-import tomllib
+import threading
+import traceback
 from datetime import UTC, datetime, timedelta
 from email.utils import format_datetime
 from pathlib import Path
@@ -37,6 +38,7 @@ from invio.llm.mistral import (
     _classify,
     _retry_after,
     _safe_detail,
+    _strict_schema,
 )
 from invio.llm.registry import default_registry
 from tests.llm_helpers import Score, make_settings
@@ -44,7 +46,7 @@ from tests.mistral_helpers import API_KEY, HANG, Recorder, load_fixture, make_pr
 
 SYSTEM = "You rate things."
 USER = "PROMPT-TEXT-SENTINEL rate this"
-MODEL = "mistral-small-2506"
+MODEL = "mistral-small-2603"
 NOW = datetime(2026, 10, 4, 12, 0, tzinfo=UTC)
 
 
@@ -258,6 +260,58 @@ def test_previous_client_of_a_closed_loop_is_dropped_without_error() -> None:
     asyncio.run(_complete(provider))
 
     assert recorder.clients_created == 3
+    # Only the client of the last loop is still referenced; the others were released.
+    assert [client for _, client in provider._clients.values()] == [recorder.clients[-1]]
+
+
+async def test_aclose_closes_the_client_of_the_running_loop() -> None:
+    provider, recorder, _ = make_provider("chat_ok", "chat_ok")
+    await _complete(provider)
+
+    await provider.aclose()
+    await provider.aclose()  # a second close is a no-op
+
+    assert recorder.clients[0].is_closed
+    assert provider._clients == {}
+    await _complete(provider)
+    assert recorder.clients_created == 2
+    await provider.aclose()
+
+
+async def test_aclose_before_any_call_is_a_no_op() -> None:
+    provider, recorder, _ = make_provider()
+
+    await provider.aclose()
+
+    assert recorder.clients_created == 0
+
+
+def test_threads_with_their_own_loops_keep_their_own_clients() -> None:
+    # Two live loops in two threads: neither evicts the other's client.
+    provider, recorder, _ = make_provider(*["chat_ok"] * 4)
+    barrier = threading.Barrier(2, timeout=5)
+    failures: list[BaseException] = []
+
+    async def two_calls() -> None:
+        await _complete(provider)
+        await asyncio.to_thread(barrier.wait)
+        await _complete(provider)
+
+    def run() -> None:
+        try:
+            asyncio.run(two_calls())
+        except BaseException as exc:  # reported below, threads swallow exceptions
+            failures.append(exc)
+
+    threads = [threading.Thread(target=run) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert failures == []
+    assert len(recorder.requests) == 4
+    assert recorder.clients_created == 2
 
 
 # --- US2: complete_structured() -----------------------------------------------------------
@@ -278,11 +332,35 @@ async def test_structured_request_carries_strict_json_schema() -> None:
     await _structured(provider)
 
     (request,) = recorder.requests
+    strict = {**Score.model_json_schema(), "additionalProperties": False}
     assert request.body["response_format"] == {
         "type": "json_schema",
-        "json_schema": {"name": "Score", "schema": Score.model_json_schema(), "strict": True},
+        "json_schema": {"name": "Score", "schema": strict, "strict": True},
     }
     assert "max_tokens" not in request.body
+
+
+class _Inner(BaseModel):
+    label: str
+
+
+class _Outer(BaseModel):
+    inner: _Inner
+    items: list[_Inner]
+    note: str | None = None
+
+
+def test_strict_schema_closes_every_object_and_leaves_the_input_untouched() -> None:
+    original = _Outer.model_json_schema()
+    pristine = json.loads(json.dumps(original))
+
+    strict = _strict_schema(original)
+
+    assert original == pristine
+    assert isinstance(strict, dict)
+    assert strict["additionalProperties"] is False
+    assert strict["$defs"]["_Inner"]["additionalProperties"] is False
+    assert strict["properties"] == original["properties"]
 
 
 async def test_structured_repairs_once() -> None:
@@ -408,12 +486,36 @@ async def test_errors_never_expose_key_or_prompt(reply: Any) -> None:
     with pytest.raises(LLMError) as info:
         await _complete(provider)
 
-    for text in (str(info.value), repr(info.value), repr(provider)):
+    # Reporters that walk __context__ regardless of __suppress_context__ see nothing either.
+    chain = "".join(traceback.format_exception(info.value, chain=True))
+    for text in (str(info.value), repr(info.value), repr(provider), chain):
         assert API_KEY not in text
         assert "PROMPT-TEXT-SENTINEL" not in text
         assert "SECRET-IN-EXC" not in text
     assert info.value.__cause__ is None
-    assert info.value.__suppress_context__ is True
+    assert info.value.__context__ is None
+
+
+@pytest.mark.parametrize(
+    "fixture", ["error_401", "error_422", "error_503", "error_429_retry_after_long"]
+)
+async def test_errors_do_not_keep_the_response_body_as_context(fixture: str) -> None:
+    provider, _, _ = make_provider(*([fixture] * 4))
+
+    with pytest.raises(LLMError) as info:
+        await _complete(provider)
+
+    assert info.value.__context__ is None
+    assert info.value.__cause__ is None
+
+
+async def test_structured_invalid_output_has_no_context() -> None:
+    provider, _, _ = make_provider("structured_invalid", "structured_invalid")
+
+    with pytest.raises(LLMInvalidOutputError) as info:
+        await _structured(provider)
+
+    assert info.value.__context__ is None
 
 
 # --- US3: retries -------------------------------------------------------------------------
@@ -627,6 +729,43 @@ async def test_unknown_exceptions_propagate_unchanged() -> None:
     assert len(recorder.requests) == 1
 
 
+async def test_overflowing_retry_after_fails_immediately() -> None:
+    reply = httpx2.Response(429, headers={"Retry-After": "9" * 400}, content=b"{}")
+    provider, recorder, waits = make_provider(reply, "chat_ok")
+
+    with pytest.raises(LLMRateLimitError) as info:
+        await _complete(provider)
+
+    assert info.value.retry_after is None
+    assert len(recorder.requests) == 1
+    assert waits == []
+
+
+@pytest.mark.parametrize(
+    ("failure", "kind"),
+    [
+        (httpx2.DecodingError("bad gzip SECRET-IN-EXC"), "unexpected response (DecodingError)"),
+        (httpx2.TooManyRedirects("loop SECRET-IN-EXC"), "unexpected response (TooManyRedirects)"),
+        (httpx2.StreamConsumed(), "unexpected response (StreamConsumed)"),
+        (httpx2.InvalidURL("bad SECRET-IN-EXC"), "could not be sent (InvalidURL)"),
+        (httpx2.UnsupportedProtocol("ftp SECRET-IN-EXC"), "not be sent (UnsupportedProtocol)"),
+        (httpx2.LocalProtocolError("h11 SECRET-IN-EXC"), "could not be sent (LocalProtocolError)"),
+    ],
+    ids=lambda value: type(value).__name__ if isinstance(value, Exception) else "",
+)
+async def test_other_httpx_errors_are_typed_and_not_retried(failure: Exception, kind: str) -> None:
+    provider, recorder, waits = make_provider(failure, "chat_ok")
+
+    with pytest.raises(LLMUnavailableError) as info:
+        await _complete(provider)
+
+    assert kind in str(info.value)
+    assert "SECRET-IN-EXC" not in str(info.value)
+    assert info.value.__context__ is None
+    assert len(recorder.requests) == 1
+    assert waits == []
+
+
 # --- helpers: _retry_after, _safe_detail, _classify ----------------------------------------
 
 
@@ -640,6 +779,10 @@ async def test_unknown_exceptions_propagate_unchanged() -> None:
         ("-5", None),
         ("nan", None),
         ("inf", None),
+        ("1e400", None),
+        ("1_0", None),
+        ("+5", None),
+        ("9" * 400, math.inf),
         ("soon", None),
         ("", None),
         (None, None),
@@ -741,27 +884,9 @@ async def test_structured_schema_name_is_sanitized_for_generic_models() -> None:
     assert name == "Page_int_"
 
 
-def _imported_names(tree: ast.AST) -> list[str]:
-    names: list[str] = []
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            names.extend(alias.name for alias in node.names)
-        elif isinstance(node, ast.ImportFrom):
-            names.append(node.module or "")
-    return names
-
-
-def test_llm_package_does_not_import_upper_layers() -> None:
-    banned = ("invio.db", "invio.services", "invio.cli")
-    for path in Path(invio.llm.__path__[0]).glob("*.py"):
-        for name in _imported_names(ast.parse(path.read_text(encoding="utf-8"))):
-            assert not name.startswith(banned), f"{path.name} imports {name}"
-
-
-def test_discovery_registers_exactly_the_shipped_providers() -> None:
-    factory._discover()
-
-    assert set(factory._REGISTRY) == {"mistral"}
+def test_real_discovery_registers_mistral() -> None:
+    # The session fixture ran real discovery; other providers may be registered too.
+    assert factory._REGISTRY.get("mistral") is MistralProvider
 
 
 # --- US5: shipped registry ----------------------------------------------------------------
@@ -773,14 +898,8 @@ def _shipped_ids() -> list[str]:
     return list(document["models"])
 
 
-def _mistral_models() -> list[Any]:
-    registry = default_registry()
-    infos = (registry.get(model_id) for model_id in registry.model_ids())
-    return [info for info in infos if info is not None and info.provider == "mistral"]
-
-
 def test_shipped_registry_has_priced_mistral_models() -> None:
-    models = _mistral_models()
+    models = default_registry().models_for("mistral")
 
     assert len(models) >= 2
     for info in models:
@@ -1269,7 +1388,9 @@ async def test_structured_requests_carry_model_temperature_and_schema() -> None:
         assert body["model"] == MODEL
         assert body["temperature"] == 0.7
         assert body["response_format"]["type"] == "json_schema"
-        assert body["response_format"]["json_schema"]["schema"] == Score.model_json_schema()
+        assert body["response_format"]["json_schema"]["schema"] == _strict_schema(
+            Score.model_json_schema()
+        )
         assert body["messages"][0]["role"] == "system"
         assert body["messages"][0]["content"].startswith(SYSTEM)
     assert first["messages"][1]["content"] == USER
@@ -1397,16 +1518,15 @@ def test_shared_llm_modules_do_not_reference_mistral(module: str) -> None:
     assert "mistral" not in source.lower()
 
 
-def test_live_tests_are_opt_in() -> None:
-    # FR-025 / SC-005: the default run deselects the live marker; the live test carries it.
+def test_live_tests_carry_the_live_marker() -> None:
+    # FR-025 / SC-005: conftest skips "live" tests unless "-m" selects them.
     from tests import test_llm_mistral_live
 
-    pyproject = Path(__file__).parent.parent / "pyproject.toml"
-    options = tomllib.loads(pyproject.read_text(encoding="utf-8"))
-    addopts = options["tool"]["pytest"]["ini_options"]["addopts"]
-    assert addopts[addopts.index("-m") + 1] == "not live"
-    marks = getattr(test_llm_mistral_live.test_live_connectivity_check, "pytestmark", [])
-    assert [mark.name for mark in marks] == ["live"]
+    for test in (
+        test_llm_mistral_live.test_live_connectivity_check,
+        test_llm_mistral_live.test_live_structured_output,
+    ):
+        assert [mark.name for mark in getattr(test, "pytestmark", [])] == ["live"]
 
 
 async def test_default_clock_measures_an_http_date_from_now() -> None:

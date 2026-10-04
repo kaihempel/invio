@@ -23,6 +23,20 @@ if TYPE_CHECKING:
     from invio.services.jobs import JobService
 
 
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    """Skip ``live`` tests unless the ``-m`` expression names them (e.g. ``-m live``).
+
+    Unlike ``addopts = -m "not live"``, this keeps them skipped when another ``-m`` expression
+    such as ``-m db`` replaces the default one.
+    """
+    if "live" in config.getoption("markexpr"):
+        return
+    skip = pytest.mark.skip(reason="live test: opt in with -m live")
+    for item in items:
+        if item.get_closest_marker("live") is not None:
+            item.add_marker(skip)
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _discovered_providers() -> None:
     """Run real provider discovery once, so provider modules register in the real registry.

@@ -258,7 +258,7 @@ on the Foundational phase (Phase 2).
 
 ### Implementation for User Story 5
 
-- [X] T022 [US5] Create src/invio/llm/models.d/mistral.yaml in the #7 format (`schema_version: 1`, `provider: mistral`, `models:`) with pinned ids only (R11). First **verify the current ids and prices** on Mistral's public pricing page and models docs. The proposed starting point is `mistral-small-2506` (fast; 0.10 / 0.30 USD per 1M; context 131072) and `mistral-medium-2508` (smart; 0.40 / 2.00; 131072). Use the newest pinned versions and prices if they differ, and add a short comment line with the verification date. Make T021 pass and run the full suite, because existing tests that use the default registry or real discovery must still pass.
+- [X] T022 [US5] Create src/invio/llm/models.d/mistral.yaml in the #7 format (`schema_version: 1`, `provider: mistral`, `models:`) with pinned ids only (R11). First **verify the current ids and prices** on Mistral's public pricing page and models docs. The proposed starting point is `mistral-small-2603` (fast; 0.15 / 0.60 USD per 1M; context 262144) and `mistral-medium-2604` (smart; 1.50 / 7.50; 262144). Use the newest pinned versions and prices if they differ, and add a short comment line with the verification date. Make T021 pass and run the full suite, because existing tests that use the default registry or real discovery must still pass.
 
 **Checkpoint**: All user stories are complete.
 

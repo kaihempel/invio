@@ -238,14 +238,29 @@ def test_unknown_provider_with_nothing_registered(patched_providers: Register) -
 
 
 def test_real_discovery_imports_package_modules() -> None:
+    expected = {
+        f"invio.llm.{module.name}"
+        for module in pkgutil.iter_modules(invio.llm.__path__)
+        if not module.name.startswith("_")
+    }
+    imported: list[str] = []
+    real_import = factory.importlib.import_module
+
+    def spy(name: str, package: str | None = None) -> Any:
+        imported.append(name)
+        return real_import(name, package)
+
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(factory, "_REGISTRY", {})
         mp.setattr(factory, "_discovered", False)
+        mp.setattr(factory.importlib, "import_module", spy)
 
         with pytest.raises(LLMConfigError, match="unknown LLM provider 'nope'"):
             get_provider("nope", make_settings())
 
         assert factory._discovered is True
+    assert set(imported) == expected
+    assert "invio.llm.mistral" in expected
 
 
 @pytest.fixture

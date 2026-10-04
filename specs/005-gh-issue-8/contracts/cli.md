@@ -26,7 +26,7 @@ invio llm test PROVIDER [--model MODEL]
 Success (stdout, exit 0), one line:
 
 ```text
-ok provider=mistral model=mistral-small-2506 input_tokens=12 output_tokens=2 duration_ms=431.7
+ok provider=mistral model=mistral-small-2603 input_tokens=12 output_tokens=2 duration_ms=431.7
 ```
 
 Failure (no traceback; the last stderr line is the message, because the root callback's JSON

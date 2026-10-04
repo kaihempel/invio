@@ -154,6 +154,9 @@ class _LoggedProvider:
         self._log_success(model, usage, started)
         return value, usage
 
+    async def aclose(self) -> None:
+        await self._provider.aclose()
+
 
 def _elapsed_ms(started: float) -> float:
     return round((time.perf_counter() - started) * 1000, 1)
@@ -192,9 +195,5 @@ def resolve(
     model: str = getattr(llm_config.models, role)
     provider_name = llm_config.provider.value
     registry = registry if registry is not None else default_registry()
-    info = registry.get(model)
-    if info is None or info.provider != provider_name:
-        raise LLMConfigError(
-            f"model '{model}' is not registered for LLM provider '{provider_name}'"
-        )
+    registry.require(model, provider_name)
     return get_provider(provider_name, settings, registry=registry), model
