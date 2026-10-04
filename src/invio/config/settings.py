@@ -115,8 +115,8 @@ class Settings(BaseSettings):
     def _validate_http_contact(cls, value: str) -> str:
         # The contact ends up in the User-Agent header; control characters (CR/LF in
         # particular) would allow header injection.
-        if any(ord(char) < 32 or ord(char) == 127 for char in value):
-            raise ValueError("must not contain control characters")
+        if not value.isascii() or any(ord(char) < 32 or ord(char) == 127 for char in value):
+            raise ValueError("must be ASCII without control characters")
         return value
 
     @model_validator(mode="after")

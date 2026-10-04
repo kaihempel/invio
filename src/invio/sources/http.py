@@ -17,6 +17,7 @@ Each step is its own private method so a policy is added by filling in one metho
 
 import asyncio
 import codecs
+import logging
 import re
 from collections.abc import AsyncIterator, Iterable, Mapping
 from contextlib import asynccontextmanager
@@ -31,7 +32,14 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 import invio
 from invio.config.settings import Settings, get_settings
 from invio.sources.errors import BlockedError, BlockReason, FetchError, TooLargeError
-from invio.sources.netguard import Resolver
+from invio.sources.netguard import (
+    GuardedTarget,
+    Resolver,
+    SystemResolver,
+    check_scheme,
+    guard_url,
+    origin_of,
+)
 from invio.sources.urls import redact
 
 __all__ = [
@@ -46,10 +54,14 @@ __all__ = [
     "redact",
 ]
 
+_log = logging.getLogger("invio.sources.http")
+
 _REPOSITORY_URL: Final = "https://github.com/kaihempel/invio"
 _REDIRECT_STATUSES: Final = frozenset({301, 302, 303, 307, 308})
 # Headers the client controls itself; a caller-supplied value is ignored.
 _CLIENT_HEADERS: Final = frozenset({"user-agent", "host", "accept-encoding"})
+# Never forwarded to another origin after a redirect.
+_CREDENTIAL_HEADERS: Final = frozenset({"authorization", "cookie", "proxy-authorization"})
 _CHARSET: Final = re.compile(r"charset\s*=\s*[\"']?([^\s;\"']+)", re.IGNORECASE)
 
 
@@ -71,8 +83,8 @@ class HttpClientConfig(BaseModel):
     @classmethod
     def _validate_contact(cls, value: str) -> str:
         # The contact ends up in the User-Agent header; a line break would allow header injection.
-        if "\r" in value or "\n" in value:
-            raise ValueError("must not contain line breaks")
+        if not value.isascii() or any(ord(char) < 32 or ord(char) == 127 for char in value):
+            raise ValueError("must be ASCII without control characters")
         return value
 
     @model_validator(mode="after")
@@ -137,11 +149,27 @@ class NotModified:
     last_modified: str | None
 
 
+@dataclass(frozen=True, slots=True)
+class _Hop:
+    """The raw outcome of one request: status, headers, the logical URL and the body.
+
+    ``body`` is only read for 2xx answers; redirects, 304 and error statuses carry ``b""``.
+    """
+
+    status: int
+    headers: httpx.Headers
+    url: httpx.URL  # logical URL (original host name), never the pinned address
+    body: bytes
+
+
 class SafeHttpClient:
     """HTTP GET client for fetching untrusted URLs; one instance per run.
 
     Always use it as ``async with``, or call :meth:`aclose`. ``allow_networks``, ``resolver``
     and ``transport`` exist for tests only.
+
+    ``total_timeout`` is a deadline per request (hop), not for a whole redirect chain. URL
+    userinfo (``user:password@``) is never sent and never appears in results, errors or logs.
     """
 
     def __init__(
@@ -154,8 +182,8 @@ class SafeHttpClient:
     ) -> None:
         self._config = config if config is not None else HttpClientConfig.from_settings()
         self._allow_networks = tuple(allow_networks)
-        self._resolver = resolver
-        # Redirects are followed by ``get`` so each hop is checked; no proxies from the
+        self._resolver: Resolver = resolver if resolver is not None else SystemResolver()
+        # Redirects are followed by ``_fetch`` so each hop is checked; no proxies from the
         # environment; no idle connections, so a pinned connection is never reused for another
         # host name.
         self._client = httpx.AsyncClient(
@@ -184,31 +212,93 @@ class SafeHttpClient:
     async def get(
         self, url: str, *, headers: Mapping[str, str] | None = None
     ) -> FetchResult | NotModified:
-        """GET ``url``, following redirects; raises :class:`FetchError` on any failure."""
+        """GET ``url``, following redirects; raises :class:`FetchError` on any failure.
+
+        This is the only place that classifies the outcome and logs failures, so each failed
+        fetch is logged exactly once.
+        """
+        try:
+            hop = await self._fetch(
+                url,
+                headers or {},
+                check_robots=True,
+                max_bytes=self._config.max_response_bytes,
+                truncate=False,
+            )
+            return self._classify(hop, requested_url=redact(url))
+        except FetchError as error:
+            self._log_failure(error)
+            raise
+
+    async def _fetch(
+        self,
+        url: str,
+        headers: Mapping[str, str],
+        *,
+        check_robots: bool,
+        max_bytes: int,
+        truncate: bool,
+    ) -> _Hop:
+        """Follow redirects and return the final raw hop without judging its status.
+
+        Shared by :meth:`get` and the robots.txt fetch, which needs the raw status (a 4xx
+        means "allow all", not an error). ``current`` is always the logical URL.
+        """
         current = self._parse(url)
-        for hop in range(self._config.max_redirects + 1):
-            response = await self._hop(current, headers or {}, check_robots=True)
-            if response.status_code not in _REDIRECT_STATUSES:
-                return self._classify(response, requested_url=url)
-            location = response.headers.get("location")
+        first_origin = origin_of(current)
+        for hop_number in range(self._config.max_redirects + 1):
+            hop = await self._hop(
+                current,
+                self._headers_for(headers, same_origin=origin_of(current) == first_origin),
+                check_robots=check_robots,
+                max_bytes=max_bytes,
+                truncate=truncate,
+            )
+            if hop.status not in _REDIRECT_STATUSES:
+                return hop
+            location = hop.headers.get("location")
             if not location:
-                raise FetchError("missing_location", url=str(current), status=response.status_code)
-            if hop == self._config.max_redirects:
+                raise FetchError("missing_location", url=str(current), status=hop.status)
+            if hop_number == self._config.max_redirects:
                 raise FetchError("too_many_redirects", url=str(current))
             current = self._join(current, location)
         raise AssertionError("unreachable: the loop always returns or raises")  # pragma: no cover
+
+    @staticmethod
+    def _headers_for(headers: Mapping[str, str], *, same_origin: bool) -> Mapping[str, str]:
+        """Caller headers for a hop; credentials are not forwarded to another origin."""
+        if same_origin:
+            return headers
+        return {k: v for k, v in headers.items() if k.lower() not in _CREDENTIAL_HEADERS}
+
+    @staticmethod
+    def _log_failure(error: FetchError) -> None:
+        """Log a refused or failed fetch, with the URL stripped of credentials."""
+        try:
+            host = httpx.URL(error.url).host
+        except (httpx.InvalidURL, ValueError):  # error.url is the unparsable input
+            host = ""
+        extra = {"url": error.url, "host": host, "reason": str(error.reason)}
+        if isinstance(error, BlockedError):
+            _log.warning("http_blocked", extra=extra)
+        else:
+            _log.warning("http_failed", extra=extra | {"status": error.status})
 
     # --- URL handling ------------------------------------------------------------------------
 
     @staticmethod
     def _parse(url: str) -> httpx.URL:
+        """Parse, then check the scheme, then require a host; userinfo is dropped."""
         try:
             parsed = httpx.URL(url)
         except (httpx.InvalidURL, ValueError):
             raise FetchError("invalid_url", url=url) from None
+        if not parsed.scheme:
+            raise FetchError("invalid_url", url=url)
+        check_scheme(parsed)
         if not parsed.host:
             raise FetchError("invalid_url", url=url)
-        return parsed
+        return parsed.copy_with(userinfo=b"")
 
     @classmethod
     def _join(cls, base: httpx.URL, location: str) -> httpx.URL:
@@ -220,41 +310,63 @@ class SafeHttpClient:
     # --- the pipeline of one hop -------------------------------------------------------------
 
     async def _hop(
-        self, url: httpx.URL, extra_headers: Mapping[str, str], *, check_robots: bool
-    ) -> httpx.Response:
-        """Run one request through the pipeline; the returned response has its body read."""
+        self,
+        url: httpx.URL,
+        extra_headers: Mapping[str, str],
+        *,
+        check_robots: bool,
+        max_bytes: int,
+        truncate: bool,
+    ) -> _Hop:
+        """Run one request through the pipeline."""
         target = await self._guard(url)
         if check_robots:
-            await self._check_robots(target)
+            await self._check_robots(target)  # before the slot: slots are not re-entrant
         async with self._slot(target):
             request = self._build_request(target, extra_headers)
             try:
                 async with asyncio.timeout(self._config.total_timeout):
                     response = await self._send(request)
                     try:
-                        await self._read_body(response, url)
+                        body = b""
+                        if 200 <= response.status_code < 300:
+                            body = await self._read_body(
+                                response, target.url, max_bytes=max_bytes, truncate=truncate
+                            )
+                        return _Hop(response.status_code, response.headers, target.url, body)
                     finally:
                         await response.aclose()
             except (TimeoutError, httpx.TimeoutException):
                 raise FetchError("timeout", url=str(url)) from None
+            except httpx.DecodingError:
+                raise FetchError("invalid_response", url=str(url)) from None
             except httpx.RequestError:
                 raise FetchError("connection_failed", url=str(url)) from None
-        return response
 
-    async def _guard(self, url: httpx.URL) -> httpx.URL:
-        """Validate the scheme and target address of ``url`` (added with the SSRF guard)."""
-        return url
+    async def _guard(self, url: httpx.URL) -> GuardedTarget:
+        """Check scheme and resolved addresses; nothing is sent to a refused target."""
+        try:
+            async with asyncio.timeout(self._config.connect_timeout):
+                return await guard_url(url, self._resolver, self._allow_networks)
+        except TimeoutError:
+            raise FetchError("timeout", url=str(url)) from None
 
-    async def _check_robots(self, target: httpx.URL) -> None:
+    async def _check_robots(self, target: GuardedTarget) -> None:
         """Raise :class:`BlockedError` if robots.txt disallows ``target`` (added with robots)."""
 
     @asynccontextmanager
-    async def _slot(self, target: httpx.URL) -> AsyncIterator[None]:
+    async def _slot(self, target: GuardedTarget) -> AsyncIterator[None]:
         """Hold the per-origin rate-limit slot for one request (added with the rate limiter)."""
         yield
 
-    def _build_request(self, target: httpx.URL, extra_headers: Mapping[str, str]) -> httpx.Request:
-        """Build the GET request; the client owns User-Agent, Host and Accept-Encoding."""
+    def _build_request(
+        self, target: GuardedTarget, extra_headers: Mapping[str, str]
+    ) -> httpx.Request:
+        """Build the GET request pinned to the validated address.
+
+        The client owns User-Agent, Host and Accept-Encoding. The URL carries the IP; ``Host``
+        and, for https, the TLS server name stay the original host name.
+        """
         headers = {
             name: value
             for name, value in extra_headers.items()
@@ -262,28 +374,43 @@ class SafeHttpClient:
         }
         headers["User-Agent"] = self._config.user_agent
         headers["Accept-Encoding"] = "gzip, deflate"
-        return self._client.build_request("GET", target, headers=headers)
+        headers["Host"] = target.url.netloc.decode("ascii")
+        extensions: dict[str, str] = {}
+        if target.origin.scheme == "https":
+            extensions["sni_hostname"] = target.origin.host
+        pinned = target.url.copy_with(host=str(target.address))
+        return self._client.build_request("GET", pinned, headers=headers, extensions=extensions)
 
     async def _send(self, request: httpx.Request) -> httpx.Response:
         """Send ``request`` and return as soon as the headers have arrived."""
         return await self._client.send(request, stream=True)
 
-    async def _read_body(self, response: httpx.Response, url: httpx.URL) -> None:
-        """Read the (decoded) body into ``response`` (size limit added with the limits)."""
-        await response.aread()
+    async def _read_body(
+        self, response: httpx.Response, url: httpx.URL, *, max_bytes: int, truncate: bool
+    ) -> bytes:
+        """Read the decoded body; more than ``max_bytes`` raises, or is cut off if ``truncate``."""
+        announced = response.headers.get("content-length", "")
+        if not truncate and announced.isdigit() and int(announced) > max_bytes:
+            raise TooLargeError(url=str(url), limit=max_bytes)
+        body = bytearray()
+        async for chunk in response.aiter_bytes():
+            body += chunk
+            if len(body) > max_bytes:
+                if truncate:
+                    return bytes(body[:max_bytes])
+                raise TooLargeError(url=str(url), limit=max_bytes)
+        return bytes(body)
 
-    def _classify(self, response: httpx.Response, *, requested_url: str) -> FetchResult:
-        """Map a final (non-redirect) response to a result or an ``http_status`` error."""
-        status = response.status_code
-        final_url = str(response.url)
-        if not 200 <= status < 300:
-            raise FetchError("http_status", url=final_url, status=status)
+    def _classify(self, hop: _Hop, *, requested_url: str) -> FetchResult:
+        """Map a final (non-redirect) hop to a result or an ``http_status`` error."""
+        if not 200 <= hop.status < 300:
+            raise FetchError("http_status", url=str(hop.url), status=hop.status)
         return FetchResult(
-            url=final_url,
+            url=str(hop.url),
             requested_url=requested_url,
-            status=status,
-            headers=MappingProxyType(httpx.Headers(response.headers)),
-            content=response.content,
-            etag=response.headers.get("etag"),
-            last_modified=response.headers.get("last-modified"),
+            status=hop.status,
+            headers=MappingProxyType(httpx.Headers(hop.headers)),
+            content=hop.body,
+            etag=hop.headers.get("etag"),
+            last_modified=hop.headers.get("last-modified"),
         )

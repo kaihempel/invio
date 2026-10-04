@@ -294,3 +294,8 @@ async def test_default_config_comes_from_settings(
         await client.get(f"{server.base_url}/")
 
     assert "me@example.org" in server.requests[0].headers["user-agent"]
+
+
+def test_config_rejects_non_ascii_contact() -> None:
+    with pytest.raises(ValidationError, match="contact"):
+        HttpClientConfig(contact="café@example.org")
