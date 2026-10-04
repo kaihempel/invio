@@ -40,6 +40,7 @@ from invio.sources.netguard import (
     guard_url,
     origin_of,
 )
+from invio.sources.ratelimit import HostRateLimiter, effective_interval
 from invio.sources.robots import ROBOTS_MAX_BYTES, RobotsCache
 from invio.sources.urls import redact
 
@@ -185,6 +186,7 @@ class SafeHttpClient:
         self._allow_networks = tuple(allow_networks)
         self._resolver: Resolver = resolver if resolver is not None else SystemResolver()
         self._robots = RobotsCache(self._fetch_robots)
+        self._limiter = HostRateLimiter()
         # Redirects are followed by ``_fetch`` so each hop is checked; no proxies from the
         # environment; no idle connections, so a pinned connection is never reused for another
         # host name.
@@ -373,8 +375,17 @@ class SafeHttpClient:
 
     @asynccontextmanager
     async def _slot(self, target: GuardedTarget) -> AsyncIterator[None]:
-        """Hold the per-origin rate-limit slot for one request (added with the rate limiter)."""
-        yield
+        """Hold the per-origin rate-limit slot for one request.
+
+        The interval is raised by the origin's ``Crawl-delay`` once its robots.txt is known; the
+        robots.txt request itself (and any hop before that) uses the configured interval.
+        """
+        policy = self._robots.known(target.origin)
+        interval = effective_interval(
+            self._config.host_interval, policy.crawl_delay if policy is not None else None
+        )
+        async with self._limiter.slot(target.origin, interval):
+            yield
 
     def _build_request(
         self, target: GuardedTarget, extra_headers: Mapping[str, str]
