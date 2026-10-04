@@ -185,8 +185,8 @@ warning). Disabling a job with a broken stored config still pauses it, then rais
 
 - the configured local time in the job's time zone, stored as UTC and always strictly in the future
 - monthly day 29-31 falls back to the last day of shorter months
-- a time skipped by a DST jump runs shifted by the gap (02:30 becomes 03:30); a repeated time
-  runs at its first occurrence
+- a time skipped by a DST jump runs shifted by the gap (02:30 becomes 03:30, or the next local
+  day if the gap ends at midnight); a repeated time runs at its first occurrence
 - missed runs are not replayed
 
 Record repositories for runs, items, digests, notifications and LLM usage live in

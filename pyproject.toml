@@ -42,7 +42,15 @@ src = ["src", "tests"]
 extend-exclude = [".claude", ".specify"]
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF", "TID251"]
+
+# Layering: the schedule calculation is a leaf and must not depend on services or storage.
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"invio.services".msg = "invio.scheduling must not import invio.services"
+"invio.db".msg = "invio.scheduling must not import invio.db"
+
+[tool.ruff.lint.per-file-ignores]
+"!src/invio/scheduling/**" = ["TID251"]
 
 [tool.ruff.format]
 quote-style = "double"

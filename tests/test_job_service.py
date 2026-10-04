@@ -668,6 +668,8 @@ def test_default_clock_and_next_run(
     before = datetime.now(UTC)
     record = service.create("j", job_data)
     assert record.next_run_at is not None
+    # A weekly job runs within the next 7 days (+1 day of slack for zone offset and DST).
+    assert job_data["schedule"]["frequency"] == "weekly"
     assert before < record.next_run_at <= before + timedelta(days=8)
 
 

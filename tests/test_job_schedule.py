@@ -1,5 +1,6 @@
 """Tests for ScheduleConfig validation."""
 
+from datetime import date, time
 from typing import Any
 
 import pytest
@@ -117,3 +118,17 @@ def test_bad_timezone_names_rejected(tz: str) -> None:
 def test_timezone_case_must_match_iana_name(tz: str) -> None:
     with pytest.raises(ValidationError, match="unknown timezone"):
         ScheduleConfig.model_validate({**BASE_DAILY, "timezone": tz})
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"), [("00:00", time(0, 0)), ("07:05", time(7, 5)), ("23:59", time(23, 59))]
+)
+def test_local_time_parses_time(raw: str, expected: time) -> None:
+    assert ScheduleConfig.model_validate({**BASE_DAILY, "time": raw}).local_time == expected
+
+
+def test_weekday_number_matches_date_weekday() -> None:
+    week = [date(2026, 10, 5 + offset) for offset in range(7)]  # Monday .. Sunday
+    assert [Weekday(day.strftime("%A").lower()).number for day in week] == [
+        day.weekday() for day in week
+    ]

@@ -1,14 +1,12 @@
 """Tests for ``compute_next_run`` (schedule calculation: local time, clamping, DST, no catch-up)."""
 
-import subprocess
-import sys
 from datetime import UTC, date, datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
 import pytest
 
-from invio.config.job import ScheduleConfig
+from invio.config.job import Frequency, ScheduleConfig
 from invio.scheduling.next_run import compute_next_run
 
 BERLIN = ZoneInfo("Europe/Berlin")
@@ -29,6 +27,25 @@ def _utc(*args: int) -> datetime:
 def test_naive_after_is_rejected() -> None:
     with pytest.raises(ValueError, match="after must be timezone-aware"):
         compute_next_run(_schedule(), datetime(2026, 1, 10, 6, 0))
+
+
+@pytest.mark.parametrize(
+    ("frequency", "message"),
+    [
+        (Frequency.WEEKLY, "weekly schedule without weekday"),
+        (Frequency.MONTHLY, "monthly schedule without day_of_month"),
+    ],
+)
+def test_unvalidated_schedule_is_rejected(frequency: Frequency, message: str) -> None:
+    schedule = _schedule().model_copy(update={"frequency": frequency})
+    with pytest.raises(ValueError, match=message):
+        compute_next_run(schedule, _utc(2026, 1, 10, 6))
+
+
+def test_unknown_frequency_is_rejected() -> None:
+    schedule = _schedule().model_copy(update={"frequency": "hourly"})
+    with pytest.raises(AssertionError, match="hourly"):
+        compute_next_run(schedule, _utc(2026, 1, 10, 6))
 
 
 def test_non_utc_offset_is_treated_as_the_same_instant() -> None:
@@ -308,14 +325,3 @@ def test_after_downtime_one_run_then_regular_cadence() -> None:
     for _ in range(3):
         runs.append(compute_next_run(BERLIN_8, runs[-1]))
     assert runs == [_utc(2026, 1, day, 7) for day in range(11, 15)]
-
-
-# --- layering -----------------------------------------------------------------------------
-
-
-def test_next_run_module_does_not_import_services() -> None:
-    code = (
-        "import sys, invio.scheduling.next_run; "
-        "assert 'invio.services' not in sys.modules and 'invio.db' not in sys.modules"
-    )
-    subprocess.run([sys.executable, "-c", code], check=True)
