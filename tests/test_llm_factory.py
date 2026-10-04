@@ -237,12 +237,12 @@ def test_unknown_provider_with_nothing_registered(patched_providers: Register) -
         get_provider("nope", make_settings())
 
 
-def test_real_discovery_imports_package_modules_without_registering() -> None:
+def test_real_discovery_imports_package_modules() -> None:
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(factory, "_REGISTRY", {})
         mp.setattr(factory, "_discovered", False)
 
-        with pytest.raises(LLMConfigError, match="registered: none"):
+        with pytest.raises(LLMConfigError, match="unknown LLM provider 'nope'"):
             get_provider("nope", make_settings())
 
         assert factory._discovered is True

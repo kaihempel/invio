@@ -1,0 +1,9 @@
+{
+  "status": 429,
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": {
+    "message": "Rate limit exceeded"
+  }
+}

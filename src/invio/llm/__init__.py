@@ -7,6 +7,7 @@ Modules:
 * ``registry``: model registry (prices, context windows) merged from ``models.d/*.yaml``.
 * ``factory``: ``@register_provider``, provider discovery, ``get_provider`` and ``resolve``.
 * ``fake``: scripted ``FakeProvider`` for tests.
+* ``mistral``: the Mistral provider (official SDK, retries with backoff).
 * ``models.d/``: one registry file per provider.
 
 This module deliberately imports nothing: provider discovery imports every module of the

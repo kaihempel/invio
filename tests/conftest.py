@@ -23,6 +23,18 @@ if TYPE_CHECKING:
     from invio.services.jobs import JobService
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _discovered_providers() -> None:
+    """Run real provider discovery once, so provider modules register in the real registry.
+
+    Tests that empty the registry and re-run discovery cannot re-register a module that is
+    already imported; this keeps the order of the tests irrelevant.
+    """
+    from invio.llm import factory
+
+    factory._discover()
+
+
 @pytest.fixture(autouse=True)
 def isolated_settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """Keep the developer's real ``.env`` and ``INVIO_*`` variables out of every test."""

@@ -5,6 +5,10 @@ across providers: :func:`structured_with_repair` (one repair request for malform
 answers), :func:`with_timeout` (per-request bound) and :func:`require_api_key` (clear message
 for a missing credential).
 
+Typed errors: :class:`LLMRateLimitError` (with the provider's ``retry_after``),
+:class:`LLMAuthError`, :class:`LLMUnavailableError`, :class:`LLMInvalidRequestError` (the
+provider rejected the request itself), :class:`LLMInvalidOutputError`.
+
 No exception message, attribute or log line produced here contains a credential or a prompt,
 and the answer text is never included verbatim. Caveat: validation problems are reported as
 ``<loc>: <message>``, and ``loc`` can contain keys taken from the answer (for example an
@@ -14,6 +18,7 @@ unexpected extra field name); no redaction is applied.
 import asyncio
 import json
 import logging
+import math
 import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -81,7 +86,20 @@ class LLMError(Exception):
 
 
 class LLMRateLimitError(LLMError):
-    """The provider reported rate limiting."""
+    """The provider reported rate limiting; ``retry_after`` is the wait it asked for, if any."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        provider: str | None = None,
+        model: str | None = None,
+        retry_after: float | None = None,
+    ) -> None:
+        if retry_after is not None and not (math.isfinite(retry_after) and retry_after >= 0):
+            raise ValueError(f"retry_after must be finite and >= 0, got {retry_after}")
+        super().__init__(message, provider=provider, model=model)
+        self.retry_after = retry_after
 
 
 class LLMAuthError(LLMError):
@@ -90,6 +108,21 @@ class LLMAuthError(LLMError):
 
 class LLMUnavailableError(LLMError):
     """The provider is unreachable, failed with a server error or did not answer in time."""
+
+
+class LLMInvalidRequestError(LLMError):
+    """The provider rejected the request itself (malformed input, unknown model, bad schema)."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        provider: str | None = None,
+        model: str | None = None,
+        status: int | None = None,
+    ) -> None:
+        super().__init__(message, provider=provider, model=model)
+        self.status = status
 
 
 class LLMInvalidOutputError(LLMError):

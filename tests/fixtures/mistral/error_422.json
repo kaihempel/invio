@@ -1,0 +1,19 @@
+{
+  "status": 422,
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": {
+    "detail": [
+      {
+        "loc": [
+          "body",
+          "messages"
+        ],
+        "msg": "field required",
+        "type": "missing",
+        "input": "PROMPT-ECHO-SENTINEL"
+      }
+    ]
+  }
+}

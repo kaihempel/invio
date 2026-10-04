@@ -1,0 +1,15 @@
+# Pinned Mistral model versions only (no "-latest" aliases), USD per 1,000,000 tokens.
+# Order matters to the tests: first = fast role, second = smart role.
+# Ids and prices were taken from the feature spec on 2026-10-04 and still need to be verified
+# against Mistral's public pricing page and /v1/models.
+schema_version: 1
+provider: mistral
+models:
+  mistral-small-2506:
+    input_price_per_mtok: 0.10
+    output_price_per_mtok: 0.30
+    context_window: 131072
+  mistral-medium-2508:
+    input_price_per_mtok: 0.40
+    output_price_per_mtok: 2.00
+    context_window: 131072

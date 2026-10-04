@@ -9,6 +9,7 @@ from invio.llm.base import (
     LLMConfigError,
     LLMError,
     LLMInvalidOutputError,
+    LLMInvalidRequestError,
     LLMRateLimitError,
     LLMUnavailableError,
     ModelRegistryError,
@@ -50,6 +51,37 @@ def test_provider_errors_are_llm_errors(cls: type[LLMError]) -> None:
     assert isinstance(err, LLMError)
     assert (err.provider, err.model) == ("p", "m")
     assert str(err) == "boom"
+
+
+def test_rate_limit_error_carries_retry_after() -> None:
+    err = LLMRateLimitError("m", provider="p", model="x", retry_after=2.5)
+
+    assert err.retry_after == 2.5
+    assert (err.provider, err.model) == ("p", "x")
+
+
+def test_rate_limit_error_retry_after_defaults_to_none() -> None:
+    assert LLMRateLimitError("m").retry_after is None
+    assert LLMRateLimitError("m", provider="p", model="x").retry_after is None
+
+
+@pytest.mark.parametrize("bad", [-1.0, float("nan"), float("inf")])
+def test_rate_limit_error_rejects_invalid_retry_after(bad: float) -> None:
+    with pytest.raises(ValueError, match="retry_after"):
+        LLMRateLimitError("m", retry_after=bad)
+
+
+def test_invalid_request_error_is_an_llm_error_but_not_unavailable() -> None:
+    err = LLMInvalidRequestError("m", provider="p", model="x", status=422)
+
+    assert isinstance(err, LLMError)
+    assert not isinstance(err, LLMUnavailableError)
+    assert err.status == 422
+    assert (err.provider, err.model) == ("p", "x")
+
+
+def test_invalid_request_error_status_defaults_to_none() -> None:
+    assert LLMInvalidRequestError("m").status is None
 
 
 def test_llm_error_attributes_default_to_none() -> None:
