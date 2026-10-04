@@ -383,6 +383,8 @@ def test_require_returns_the_entry_of_that_provider(tmp_path: Path) -> None:
         registry.require("acme-b", "zeta")
     with pytest.raises(LLMConfigError, match="'nope' is not registered for LLM provider 'acme'"):
         registry.require("nope", "acme")
+
+
 def test_models_for_returns_sorted_ids_of_one_provider() -> None:
     registry = load_registry([FIXTURE_REGISTRY_DIR])
 
