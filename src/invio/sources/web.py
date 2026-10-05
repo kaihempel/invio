@@ -48,7 +48,8 @@ _WEB_ENCODINGS: Final = re.compile(
     r"utf-8|utf-16(-le|-be)?|cp125[0-8]|cp866|cp874|iso8859-([2-9]|1[0-6])|koi8-[ru]"
     r"|mac-roman|mac-cyrillic|cp932|euc_jp|iso2022_jp|cp949|gbk|gb18030|big5hkscs|cp950"
 )
-# WHATWG labels that Python does not know, mapped to a Python codec name.
+# WHATWG labels that Python does not know (or only since 3.14, like windows-31j), mapped to a
+# Python codec name.
 _EXTRA_LABELS: Final = {
     **dict.fromkeys(["csgb2312", "gb_2312", "gb_2312-80", "x-gbk"], "gbk"),
     **dict.fromkeys(["csksc56011987", "iso-ir-149", "ks_c_5601-1989", "ksc_5601"], "cp949"),
@@ -60,8 +61,8 @@ _EXTRA_LABELS: Final = {
     **dict.fromkeys(["x-x-big5", "cn-big5"], "big5hkscs"),
     **dict.fromkeys(["koi8", "koi"], "koi8-r"),
     **dict.fromkeys(["unicode-1-1-utf-8", "unicode11utf8", "unicode20utf8"], "utf-8"),
-    "x-sjis": "cp932",
-    "dos-874": "cp874",
+    **dict.fromkeys(["windows-31j", "x-sjis"], "cp932"),
+    **dict.fromkeys(["windows-874", "dos-874", "iso885911"], "cp874"),
     "koi8-ru": "koi8-u",
 }
 # Encodings that browsers read as a superset (WHATWG): Latin-1 and ASCII as windows-1252,
