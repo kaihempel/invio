@@ -13,6 +13,7 @@ sources:
   - type: rss
     url: https://example.com/feed.xml
     name: Example blog
+    max_age_days: 30
   - type: web
     url: https://example.org/news
   - type: sitemap

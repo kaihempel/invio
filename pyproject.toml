@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "alembic>=1.20",
+    "feedparser>=6.0.14",
     "httpx2>=2.13",
     "mistralai>=3.0,<4",
     "pydantic-settings>=2.15.0",
@@ -65,6 +66,7 @@ select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF", "TID251"]
 "tests/test_cli_job*.py" = ["F811"]
 # Fixtures from ``tests/http_helpers.py`` are imported and used as parameters.
 "tests/test_http*.py" = ["F811"]
+"tests/test_source_rss.py" = ["F811"]
 
 [tool.ruff.format]
 quote-style = "double"
@@ -75,6 +77,11 @@ python_version = "3.12"
 mypy_path = "src"
 files = ["src"]
 plugins = ["pydantic.mypy"]
+
+# feedparser ships no type information; its results are confined to invio.sources.rss._parse.
+[[tool.mypy.overrides]]
+module = ["feedparser", "feedparser.*"]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
