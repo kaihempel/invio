@@ -475,6 +475,8 @@ def test_item_reset_versions_stores_candidate_and_restarts(db_session: Session) 
         None,
         None,
     )
+
+
 def test_item_set_status_updates_and_flushes(db_session: Session) -> None:
     job = make_job(db_session)
     repo = ItemRepository(db_session)
