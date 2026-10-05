@@ -14,9 +14,7 @@ import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
-from html.parser import HTMLParser
 from typing import Any, Final
-from urllib.parse import urljoin, urlsplit
 
 import feedparser
 from feedparser.exceptions import CharacterEncodingOverride, NonXMLContentType
@@ -25,26 +23,14 @@ from invio.config.job import RssSource
 from invio.domain import Candidate, url_hash
 from invio.sources.errors import FetchError
 from invio.sources.http import NotModified, SafeHttpClient
-from invio.sources.urls import canonical_url
+from invio.sources.text import TEASER_MAX_CHARS, collapse, html_to_text, teaser
+from invio.sources.urls import http_url_or_none
 
 __all__ = ["TEASER_MAX_CHARS", "RssFeedSource"]
 
-TEASER_MAX_CHARS: Final = 500
-"""Longest teaser kept from an entry summary, ellipsis included."""
-
-_ELLIPSIS: Final = "…"
-_SCHEMES: Final = frozenset({"http", "https"})
 # Notes feedparser raises for a feed it parsed fine: no or a non-XML Content-Type (the body is
 # passed without headers on purpose) and an encoding that differs from the declared one.
 _HARMLESS_BOZO: Final = (NonXMLContentType, CharacterEncodingOverride)
-# Elements whose content is code, not text; feedparser's sanitizer drops the tags but keeps it.
-_NON_TEXT_TAGS: Final = frozenset({"script", "style", "template"})
-# Elements that separate words: "<p>a</p><p>b</p>" reads "a b", while "wo<b>rd</b>" stays "word".
-_BLOCK_TAGS: Final = frozenset(
-    {"address", "article", "aside", "blockquote", "br", "dd", "div", "dl", "dt", "figcaption"}
-    | {"figure", "footer", "h1", "h2", "h3", "h4", "h5", "h6", "header", "hr", "li", "ol", "p"}
-    | {"pre", "section", "table", "td", "th", "tr", "ul"}
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,14 +117,14 @@ def _candidate(entry: Mapping[str, Any], *, base_url: str) -> Candidate | None:
     url = _entry_url(entry, base_url=base_url)
     if url is None:
         return None
-    title = _collapse(_entry_text(entry, "title"))
+    title = collapse(_entry_text(entry, "title"))
     return Candidate(
         url=url,
         url_hash=url_hash(url),
         title=title or url,
         published_at=_entry_date(entry),
         type="article",
-        teaser=_teaser(_entry_text(entry, "summary")),
+        teaser=teaser(_entry_text(entry, "summary")),
         content_hash=None,
     )
 
@@ -148,16 +134,7 @@ def _entry_url(entry: Mapping[str, Any], *, base_url: str) -> str | None:
     link = entry.get("link")
     if not isinstance(link, str) or not link.strip():
         return None
-    try:
-        url = canonical_url(urljoin(base_url, link.strip()))
-        parts = urlsplit(url)
-        # ``hostname`` (unlike ``netloc``) is empty for "http://user@" and "http://:80"; an
-        # invalid port raises ``ValueError``.
-        if parts.scheme not in _SCHEMES or not parts.hostname or parts.port == 0:
-            return None
-    except ValueError:  # e.g. an unclosed IPv6 bracket or an invalid port
-        return None
-    return url
+    return http_url_or_none(link, base_url)
 
 
 def _entry_text(entry: Mapping[str, Any], key: str) -> str:
@@ -167,7 +144,7 @@ def _entry_text(entry: Mapping[str, Any], key: str) -> str:
         return ""
     detail = entry.get(f"{key}_detail")
     content_type = detail.get("type") if isinstance(detail, Mapping) else None
-    return value if content_type == "text/plain" else _html_to_text(value)
+    return value if content_type == "text/plain" else html_to_text(value)
 
 
 def _entry_date(entry: Mapping[str, Any]) -> datetime | None:
@@ -186,62 +163,3 @@ def _entry_date(entry: Mapping[str, Any]) -> datetime | None:
         except (TypeError, ValueError, OverflowError):
             continue
     return None
-
-
-def _teaser(text: str) -> str | None:
-    """Whitespace-collapsed ``text`` cut at a word boundary to :data:`TEASER_MAX_CHARS`."""
-    text = _collapse(text)
-    if not text:
-        return None
-    if len(text) <= TEASER_MAX_CHARS:
-        return text
-    cut = text[: TEASER_MAX_CHARS - len(_ELLIPSIS)]
-    head, space, _ = cut.rpartition(" ")
-    return (head if space and head else cut).rstrip() + _ELLIPSIS
-
-
-def _collapse(text: str) -> str:
-    return " ".join(text.split())
-
-
-class _TextExtractor(HTMLParser):
-    """Collects the text nodes of an HTML fragment; character references are decoded.
-
-    The content of ``script``/``style``/``template`` elements is dropped, and block elements
-    separate words.
-    """
-
-    def __init__(self) -> None:
-        super().__init__(convert_charrefs=True)
-        self.parts: list[str] = []
-        self._non_text_depth = 0
-
-    def handle_data(self, data: str) -> None:
-        if not self._non_text_depth:
-            self.parts.append(data)
-
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag in _NON_TEXT_TAGS:
-            self._non_text_depth += 1
-        else:
-            self._separate(tag)
-
-    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        self._separate(tag)  # "<br/>"; a self-closed "<script/>" opens nothing
-
-    def handle_endtag(self, tag: str) -> None:
-        if tag in _NON_TEXT_TAGS:
-            self._non_text_depth = max(self._non_text_depth - 1, 0)
-        else:
-            self._separate(tag)
-
-    def _separate(self, tag: str) -> None:
-        if tag in _BLOCK_TAGS and not self._non_text_depth:
-            self.parts.append(" ")
-
-
-def _html_to_text(html: str) -> str:
-    extractor = _TextExtractor()
-    extractor.feed(html)
-    extractor.close()
-    return "".join(extractor.parts)

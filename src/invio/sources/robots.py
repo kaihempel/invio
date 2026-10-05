@@ -30,7 +30,8 @@ from urllib.parse import quote, unquote, urlsplit
 import httpx2
 
 from invio.sources.errors import BlockedError, FetchError
-from invio.sources.netguard import DEFAULT_PORTS, Origin
+from invio.sources.netguard import Origin
+from invio.sources.urls import DEFAULT_PORTS
 
 __all__ = [
     "ROBOTS_AGENT_TOKEN",

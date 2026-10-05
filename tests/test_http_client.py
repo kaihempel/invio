@@ -275,9 +275,25 @@ def test_public_names() -> None:
         "FetchResult",
         "HttpClientConfig",
         "NotModified",
+        "RenderUnavailableError",
         "SafeHttpClient",
         "TooLargeError",
+        "charset_label",
     }
+
+
+@pytest.mark.parametrize(
+    ("content_type", "label"),
+    [
+        ("text/html; charset=UTF-8", "UTF-8"),
+        ('text/html; charset="gb2312"', "gb2312"),
+        ("text/html;charset = 'koi8-r' ; x=y", "koi8-r"),
+        ("text/html", None),
+        ("", None),
+    ],
+)
+def test_charset_label_is_returned_as_written(content_type: str, label: str | None) -> None:
+    assert http.charset_label(content_type) == label
 
 
 # --- lifecycle -------------------------------------------------------------------------------

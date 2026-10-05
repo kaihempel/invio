@@ -15,6 +15,10 @@ every hop and not only to the URL the caller passed. The ordered steps of one ho
 7. ``_classify``: 2xx result, 304 not modified, redirect or ``http_status`` error.
 
 Each step is its own private method so a policy is added by filling in one method.
+
+Fetches made outside the client (a headless browser) reuse the same steps through
+:meth:`SafeHttpClient.check_target` (step 1 alone) and :meth:`SafeHttpClient.admission`
+(steps 1 to 3, the slot held while the caller fetches).
 """
 
 import asyncio
@@ -44,7 +48,13 @@ from invio.config.settings import (
     check_http_timeouts,
     get_settings,
 )
-from invio.sources.errors import BlockedError, BlockReason, FetchError, TooLargeError
+from invio.sources.errors import (
+    BlockedError,
+    BlockReason,
+    FetchError,
+    RenderUnavailableError,
+    TooLargeError,
+)
 from invio.sources.netguard import (
     GuardedTarget,
     Resolver,
@@ -64,8 +74,10 @@ __all__ = [
     "FetchResult",
     "HttpClientConfig",
     "NotModified",
+    "RenderUnavailableError",
     "SafeHttpClient",
     "TooLargeError",
+    "charset_label",
 ]
 
 _log = logging.getLogger("invio.sources.http")
@@ -83,6 +95,12 @@ _ENCODINGS: Final = {"gzip": "gzip", "x-gzip": "gzip", "deflate": "deflate"}
 _CHARSET: Final = re.compile(r"charset\s*=\s*[\"']?([^\s;\"']+)", re.IGNORECASE)
 # Conditional-GET validators kept per client; the least recently used are dropped beyond this.
 _MAX_VALIDATORS: Final = 10_000
+
+
+def charset_label(content_type: str) -> str | None:
+    """The ``charset`` parameter of a ``Content-Type`` value as written, if there is one."""
+    match = _CHARSET.search(content_type)
+    return match.group(1) if match is not None else None
 
 
 def _setting_default(name: str) -> Any:
@@ -152,10 +170,10 @@ class FetchResult:
         return self.content.decode(encoding or self._header_charset(), errors="replace")
 
     def _header_charset(self) -> str:
-        match = _CHARSET.search(self.headers.get("content-type", ""))
-        if match is not None:
+        label = charset_label(self.headers.get("content-type", ""))
+        if label is not None:
             try:
-                return codecs.lookup(match.group(1)).name
+                return codecs.lookup(label).name
             except LookupError:
                 pass
         return "utf-8"
@@ -328,6 +346,53 @@ class SafeHttpClient:
     async def aclose(self) -> None:
         """Close the connection pool; calling it again is harmless."""
         await self._client.aclose()
+
+    @property
+    def user_agent(self) -> str:
+        """The ``User-Agent`` the client sends; a browser driven under the guard sends it too."""
+        return self._config.user_agent
+
+    @property
+    def max_response_bytes(self) -> int:
+        """The largest response body the client accepts (also the cap for rendered pages)."""
+        return self._config.max_response_bytes
+
+    async def check_target(self, url: str) -> None:
+        """Refuse ``url`` unless its scheme and every address it resolves to are allowed.
+
+        Only the scheme and address guard of :meth:`get` (with the client's resolver and
+        ``allow_networks``): nothing is sent, robots.txt and the rate limit are not consulted.
+        For requests made outside the client, such as the sub-requests of a browser page.
+        Raises :class:`BlockedError`, or :class:`FetchError` (``"invalid_url"``,
+        ``"dns_failed"``, ``"timeout"``). Failures are not logged here: a page makes many
+        requests, and the caller decides what is worth reporting.
+
+        Unlike :meth:`get`, the connection is not pinned to the checked address, so whoever
+        connects resolves the name again (a DNS rebinding window).
+        """
+        await self._guard(self._parse(url))
+
+    @asynccontextmanager
+    async def admission(self, url: str) -> AsyncIterator[None]:
+        """Admit a fetch made outside the client (a browser navigation) to ``url``.
+
+        Runs the guard and the robots.txt check of :meth:`get` before yielding (a refusal
+        raises before the block runs), then holds the per-origin rate-limit slot while the
+        block runs. The slot is held for the whole block, so other fetches of the same origin
+        wait for it (up to the block's duration, which callers bound), and slots are not
+        re-entrant: do not call :meth:`get` for the same origin inside the block.
+
+        A refusal is logged once, like :meth:`get` does. An error raised inside the block
+        is the block's own to report.
+        """
+        try:
+            target = await self._guard(self._parse(url))
+            await self._check_robots(target)
+        except FetchError as error:
+            self._log_failure(error)
+            raise
+        async with self._slot(target):
+            yield
 
     async def get(
         self, url: str, *, headers: Mapping[str, str] | None = None

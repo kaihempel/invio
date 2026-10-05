@@ -6,11 +6,13 @@ import pytest
 
 from invio.config.job import (
     JobConfig,
+    JobConfigError,
     RssSource,
     SitemapSource,
     WebSource,
     YoutubeChannelSource,
     YoutubePlaylistSource,
+    validate_job,
 )
 from tests.job_helpers import validation_errors
 
@@ -173,3 +175,152 @@ def test_max_age_days_is_rss_only(job_data: dict[str, Any], kind: str) -> None:
     errors = _errors(job_data, {"type": kind, "url": "https://example.com/f", "max_age_days": 7})
 
     assert [location for location, _ in errors] == [("sources", 0, kind, "max_age_days")]
+
+
+# --- web source options (specs/008-gh-issue-12/contracts/job-file.md) -----------------------
+
+WEB_URL = "https://example.com/news"
+WEB_ALL_KEYS: dict[str, Any] = {
+    "type": "web",
+    "url": WEB_URL,
+    "name": "News",
+    "enabled": True,
+    "selector": "main .post-list",
+    "mode": "links",
+    "url_pattern": r"/news/\d{4}/",
+    "render": "js",
+    "wait_for": ".post-list li",
+}
+
+
+def _web(job_data: dict[str, Any], **fields: Any) -> WebSource:
+    job_data["sources"] = [{"type": "web", "url": WEB_URL, **fields}]
+    source = JobConfig.model_validate(job_data).sources[0]
+    assert isinstance(source, WebSource)
+    return source
+
+
+def test_web_source_with_all_keys_loads(job_data: dict[str, Any]) -> None:
+    job_data["sources"] = [WEB_ALL_KEYS]
+
+    source = JobConfig.model_validate(job_data).sources[0]
+
+    assert isinstance(source, WebSource)
+    assert source.selector == "main .post-list"
+    assert source.mode == "links"
+    assert source.url_pattern == r"/news/\d{4}/"
+    assert source.render == "js"
+    assert source.wait_for == ".post-list li"
+
+
+def test_web_source_defaults(job_data: dict[str, Any]) -> None:
+    source = _web(job_data)
+
+    assert (source.selector, source.mode, source.url_pattern) == (None, "page", None)
+    assert (source.render, source.wait_for) == ("static", None)
+
+
+def test_old_web_entry_without_new_keys_loads(job_data: dict[str, Any]) -> None:
+    source = _web(job_data, name="Old", enabled=False)
+
+    assert source.name == "Old"
+    assert source.enabled is False
+    assert source.mode == "page"
+
+
+def test_web_fields_are_written_in_contract_order() -> None:
+    assert list(WebSource.model_fields) == [
+        "type",
+        "url",
+        "name",
+        "enabled",
+        "selector",
+        "mode",
+        "url_pattern",
+        "render",
+        "wait_for",
+    ]
+
+
+WEB_ERRORS = [
+    ({"selector": "div["}, "sources[0].selector: invalid CSS selector"),
+    ({"render": "js", "wait_for": "div["}, "sources[0].wait_for: invalid CSS selector"),
+    ({"mode": "links", "url_pattern": "("}, "sources[0].url_pattern: invalid regular expression:"),
+    ({"url_pattern": "x"}, "sources[0].url_pattern: only allowed with mode: links"),
+    (
+        {"mode": "page", "url_pattern": "x"},
+        "sources[0].url_pattern: only allowed with mode: links",
+    ),
+    ({"wait_for": ".x"}, "sources[0].wait_for: only allowed with render: js"),
+    ({"render": "static", "wait_for": ".x"}, "sources[0].wait_for: only allowed with render: js"),
+    ({"mode": "feed"}, "sources[0].mode: Input should be 'page' or 'links'"),
+    ({"render": "browser"}, "sources[0].render: Input should be 'static' or 'js'"),
+    ({"selector": ""}, "sources[0].selector: String should have at least 1 character"),
+    ({"selector": "  "}, "sources[0].selector: String should have at least 1 character"),
+    ({"selector": " \t\u00a0\n"}, "sources[0].selector: String should have at least 1 character"),
+    (
+        {"mode": "links", "url_pattern": " \u00a0 "},
+        "sources[0].url_pattern: String should have at least 1 character",
+    ),
+    (
+        {"render": "js", "wait_for": "\t \u00a0"},
+        "sources[0].wait_for: String should have at least 1 character",
+    ),
+    (
+        {"mode": "links", "url_pattern": ""},
+        "sources[0].url_pattern: String should have at least 1 character",
+    ),
+    (
+        {"render": "js", "wait_for": ""},
+        "sources[0].wait_for: String should have at least 1 character",
+    ),
+    ({"foo": 1}, "sources[0].foo: Extra inputs are not permitted"),
+]
+
+
+@pytest.mark.parametrize(("fields", "line"), WEB_ERRORS)
+def test_web_load_time_errors(job_data: dict[str, Any], fields: dict[str, Any], line: str) -> None:
+    job_data["sources"] = [{"type": "web", "url": WEB_URL, **fields}]
+
+    with pytest.raises(JobConfigError) as info:
+        validate_job(job_data)
+
+    assert len(info.value.errors) == 1
+    assert info.value.errors[0].startswith(line)
+
+
+def test_invalid_regex_message_names_the_regex_error(job_data: dict[str, Any]) -> None:
+    job_data["sources"] = [{"type": "web", "url": WEB_URL, "mode": "links", "url_pattern": "("}]
+
+    with pytest.raises(JobConfigError) as info:
+        validate_job(job_data)
+
+    assert "missing ), unterminated subpattern" in info.value.errors[0]
+
+
+def test_invalid_pattern_is_reported_even_with_mode_page(job_data: dict[str, Any]) -> None:
+    # The regex is compiled before the cross-field rule is checked: one error per field.
+    job_data["sources"] = [{"type": "web", "url": WEB_URL, "url_pattern": "("}]
+
+    with pytest.raises(JobConfigError) as info:
+        validate_job(job_data)
+
+    assert len(info.value.errors) == 1
+    assert "invalid regular expression" in info.value.errors[0]
+
+
+@pytest.mark.parametrize("selector", ["a", "main .post-list > li:nth-child(2)", "a[href^='/n']"])
+def test_valid_selectors_are_accepted(job_data: dict[str, Any], selector: str) -> None:
+    assert _web(job_data, selector=selector).selector == selector
+
+
+def test_selector_validation_does_not_import_the_sources_package() -> None:
+    import subprocess
+    import sys
+
+    code = (
+        "import sys, invio.config.job as j;"
+        "j.WebSource.model_validate({'type':'web','url':'https://e.com','selector':'a'});"
+        "assert 'invio.sources' not in sys.modules"
+    )
+    subprocess.run([sys.executable, "-c", code], check=True)

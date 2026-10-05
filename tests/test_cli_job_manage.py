@@ -301,6 +301,20 @@ def test_import_invalid_file(job_cli: JobCli, tmp_path: Path) -> None:
     assert _stored_names(job_cli) == []
 
 
+def test_import_invalid_web_selector_exits_2(job_cli: JobCli, tmp_path: Path) -> None:
+    bad = tmp_path / "bad.yaml"
+    bad.write_text(
+        EXAMPLE.read_text(encoding="utf-8").replace('selector: "main"', 'selector: "div["'),
+        encoding="utf-8",
+    )
+
+    result = job_cli.invoke(["import", str(bad)])
+
+    assert result.exit_code == 2
+    assert "sources[1].selector: invalid CSS selector" in result.stderr
+    assert _stored_names(job_cli) == []
+
+
 def test_import_bad_name(job_cli: JobCli, example_file: Path) -> None:
     result = job_cli.invoke(["import", str(example_file), "--name", " x"])
 

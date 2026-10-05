@@ -3,7 +3,7 @@
 import pytest
 
 from invio.domain import url_hash
-from invio.sources.urls import canonical_url
+from invio.sources.urls import canonical_url, http_url_or_none
 
 
 @pytest.mark.parametrize(
@@ -86,3 +86,30 @@ def test_non_numeric_port_is_left_alone() -> None:
 def test_unsplittable_url_raises_value_error() -> None:
     with pytest.raises(ValueError):
         canonical_url("http://[::1/x")
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("/a/b", "https://e.com/a/b"),
+        ("c?utm_source=x#frag", "https://e.com/dir/c"),
+        ("  //other.org/x ", "https://other.org/x"),
+        ("HTTP://Other.ORG:80/x", "http://other.org/x"),
+        ("https://e.com", "https://e.com/"),
+        ("mailto:me@e.com", None),
+        ("javascript:void(0)", None),
+        ("ftp://e.com/file", None),
+        ("data:text/plain,hi", None),
+        ("http://user@", None),  # no host
+        ("http://:80/x", None),
+        ("http://e.com:0/x", None),
+        ("http://e.com:99999/x", None),  # invalid port
+        ("http://[::1/x", None),  # unclosed IPv6 bracket
+    ],
+)
+def test_http_url_or_none(raw: str, expected: str | None) -> None:
+    assert http_url_or_none(raw, "https://e.com/dir/page") == expected
+
+
+def test_empty_reference_resolves_to_the_base() -> None:
+    assert http_url_or_none("", "https://e.com/dir/page") == "https://e.com/dir/page"

@@ -16,12 +16,16 @@ dependencies = [
     "pyyaml>=6.0",
     "questionary>=2.1.1",
     "rich>=15.0.0",
+    "selectolax>=1.0",
     "sqlalchemy>=2.1",
     "typer>=0.27.2",
 ]
 
 [project.scripts]
 invio = "invio.cli.main:app"
+
+[project.optional-dependencies]
+render = ["playwright>=1.63"]
 
 [build-system]
 requires = ["uv_build>=0.12,<0.13"]
@@ -32,6 +36,7 @@ dev = [
     "hypothesis>=6.168.3",
     "jsonschema>=4",
     "mypy>=2.4.0",
+    "playwright>=1.63",
     "pre-commit>=4.6.2",
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
@@ -67,6 +72,8 @@ select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF", "TID251"]
 # Fixtures from ``tests/http_helpers.py`` are imported and used as parameters.
 "tests/test_http*.py" = ["F811"]
 "tests/test_source_rss.py" = ["F811"]
+"tests/test_source_web*.py" = ["F811"]
+"tests/test_http_admission.py" = ["F811"]
 
 [tool.ruff.format]
 quote-style = "double"
@@ -90,6 +97,7 @@ asyncio_default_fixture_loop_scope = "function"
 addopts = ["-ra", "--strict-markers", "--strict-config"]
 markers = [
     "live: real calls to external LLM providers (skipped unless -m names live, e.g. -m live)",
+    "browser: real headless-Chromium tests (skipped when Chromium cannot be launched)",
     "db: persistence tests that run on SQLite and, with INVIO_TEST_DATABASE_URL, on MariaDB",
 ]
 

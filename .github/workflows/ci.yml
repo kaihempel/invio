@@ -19,6 +19,9 @@ jobs:
       - name: Install dependencies
         run: uv sync --locked
 
+      - name: Install Chromium (browser tests)
+        run: uv run playwright install --with-deps chromium
+
       - name: Lint (ruff)
         run: uv run ruff check
 

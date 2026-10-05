@@ -15,9 +15,9 @@ from typing import Final, Literal, NamedTuple, Protocol
 import httpx2
 
 from invio.sources.errors import BlockedError, BlockReason, FetchError
+from invio.sources.urls import DEFAULT_PORTS
 
 __all__ = [
-    "DEFAULT_PORTS",
     "GuardedTarget",
     "Origin",
     "Resolver",
@@ -36,7 +36,6 @@ _DENIED: Final[tuple[IPv4Network | IPv6Network, ...]] = (
     IPv4Network("192.88.99.0/24"),
 )
 _NAT64: Final = IPv6Network("64:ff9b::/96")
-DEFAULT_PORTS: Final = {"http": 80, "https": 443}
 
 
 class Origin(NamedTuple):
