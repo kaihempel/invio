@@ -12,10 +12,10 @@ import logging
 import os
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal, Self
 
 from dotenv import dotenv_values
-from pydantic import Field, SecretStr, field_validator
+from pydantic import AfterValidator, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 ENV_PREFIX = "INVIO_"
@@ -51,6 +51,28 @@ def parse_log_level(value: str) -> str:
         valid = ", ".join(sorted(logging.getLevelNamesMapping()))
         raise ValueError(f"invalid log level {value!r}; expected one of: {valid}")
     return level
+
+
+def _header_safe(value: str) -> str:
+    # The contact ends up in the User-Agent header; control characters (CR/LF in particular)
+    # would allow header injection.
+    if not value.isascii() or any(ord(char) < 32 or ord(char) == 127 for char in value):
+        raise ValueError("must be ASCII without control characters")
+    return value
+
+
+# Constraints of the HTTP client settings, shared with ``invio.sources.http.HttpClientConfig``
+# so both validate alike; the defaults live on :class:`Settings` only.
+HttpContact = Annotated[str, Field(min_length=1), AfterValidator(_header_safe)]
+HttpBytes = Annotated[int, Field(gt=0)]
+HttpCount = Annotated[int, Field(ge=0)]
+HttpSeconds = Annotated[float, Field(gt=0, allow_inf_nan=False)]
+
+
+def check_http_timeouts(read: float, total: float, *, read_name: str, total_name: str) -> None:
+    """Raise :class:`ValueError` unless the total timeout covers at least one read timeout."""
+    if total < read:
+        raise ValueError(f"{total_name} must be >= {read_name}")
 
 
 class Settings(BaseSettings):
@@ -95,10 +117,30 @@ class Settings(BaseSettings):
     # Transcription
     whisper_model_size: WhisperModelSize = "small"
 
+    # HTTP client for sources
+    http_contact: HttpContact = "admin@example.invalid"
+    http_max_response_bytes: HttpBytes = 10_485_760
+    http_max_redirects: HttpCount = 5
+    http_connect_timeout_seconds: HttpSeconds = 10.0
+    http_read_timeout_seconds: HttpSeconds = 30.0
+    http_total_timeout_seconds: HttpSeconds = 60.0
+    http_host_interval_seconds: HttpSeconds = 1.0
+    http_respect_robots: bool = True
+
     @field_validator("log_level")
     @classmethod
     def _validate_log_level(cls, value: str) -> str:
         return parse_log_level(value)
+
+    @model_validator(mode="after")
+    def _validate_http_timeouts(self) -> Self:
+        check_http_timeouts(
+            self.http_read_timeout_seconds,
+            self.http_total_timeout_seconds,
+            read_name="http_read_timeout_seconds",
+            total_name="http_total_timeout_seconds",
+        )
+        return self
 
     def require_secret(self, name: SecretName) -> str:
         """Return the plain value of secret ``name`` or raise :class:`MissingSettingError`."""

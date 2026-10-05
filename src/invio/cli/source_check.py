@@ -1,7 +1,6 @@
 """Reachability and feed checks for sources entered in the job wizard."""
 
 import http.client
-import re
 import socket
 import ssl
 import time
@@ -12,8 +11,9 @@ from typing import Final, Protocol, cast
 from xml.etree.ElementTree import Element, ParseError, XMLPullParser
 
 import invio
+from invio.sources.urls import redact
 
-__all__ = ["CheckResult", "HttpSourceChecker", "SourceChecker", "is_feed_document", "redact"]
+__all__ = ["CheckResult", "HttpSourceChecker", "SourceChecker", "is_feed_document"]
 
 _FEED_ROOTS: Final = frozenset(
     {
@@ -23,8 +23,6 @@ _FEED_ROOTS: Final = frozenset(
     }
 )
 _CHUNK: Final = 8192
-# Greedy up to the last "@" before the path, so a password containing "@" is removed too.
-_USERINFO: Final = re.compile(r"(?<=//)[^/\s]*@")
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,11 +53,6 @@ def is_feed_document(head: bytes) -> bool:
     except ParseError:
         return False
     return False
-
-
-def redact(text: str) -> str:
-    """Remove ``user:password@`` from any URL in ``text``."""
-    return _USERINFO.sub("", text)
 
 
 def _opener() -> urllib.request.OpenerDirector:
