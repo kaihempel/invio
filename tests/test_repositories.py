@@ -252,6 +252,28 @@ def test_item_set_status_updates_and_flushes(db_session: Session) -> None:
     assert item.status == ItemStatus.SKIPPED_KEYWORD
 
 
+def test_item_set_relevance_stores_status_and_clears_error(db_session: Session) -> None:
+    job = make_job(db_session)
+    item = make_item(db_session, job, status=ItemStatus.FAILED, last_error="boom")
+    repo = ItemRepository(db_session)
+    repo.set_relevance(item, Decimal("0.80"), ItemStatus.RELEVANT)
+    db_session.expire_all()
+    assert item.relevance == Decimal("0.80")
+    assert item.status == ItemStatus.RELEVANT
+    assert item.last_error is None
+
+
+def test_item_mark_failed_keeps_relevance(db_session: Session) -> None:
+    job = make_job(db_session)
+    item = make_item(db_session, job, relevance=Decimal("0.50"))
+    repo = ItemRepository(db_session)
+    repo.mark_failed(item, "LLMUnavailableError: down")
+    db_session.expire_all()
+    assert item.relevance == Decimal("0.50")
+    assert item.status == ItemStatus.FAILED
+    assert item.last_error == "LLMUnavailableError: down"
+
+
 # --- DigestRepository ----------------------------------------------------------------------
 
 
