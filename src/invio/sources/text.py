@@ -1,16 +1,31 @@
-"""Readable-text helpers shared by the RSS and web page sources.
+"""Readable-text helpers shared by the RSS source, the web page source and article extraction.
 
 Feed summaries and web pages are untrusted HTML. These helpers reduce a fragment to plain
 text with one set of rules, so a feed and a page give the same text for the same markup:
 comments and the content of ``script``/``style``/``noscript``/``template`` are dropped,
-character references are decoded and block elements separate words. The web page source reads
-its parsed tree directly with the same :data:`NON_TEXT_TAGS` and :data:`BLOCK_TAGS`.
+character references are decoded and block elements separate words. Whole pages are parsed
+with selectolax (:func:`parse_html`) and read with :func:`node_text`, which applies the same
+:data:`NON_TEXT_TAGS` and :data:`BLOCK_TAGS` to the parsed tree.
 """
 
+import re
+import unicodedata
 from html.parser import HTMLParser
 from typing import Final
 
-__all__ = ["BLOCK_TAGS", "NON_TEXT_TAGS", "TEASER_MAX_CHARS", "collapse", "html_to_text", "teaser"]
+from selectolax.lexbor import LexborHTMLParser, LexborNode
+
+__all__ = [
+    "BLOCK_TAGS",
+    "NON_TEXT_TAGS",
+    "TEASER_MAX_CHARS",
+    "collapse",
+    "html_to_text",
+    "node_text",
+    "parse_html",
+    "readable",
+    "teaser",
+]
 
 TEASER_MAX_CHARS: Final = 500
 """Longest teaser kept from a summary or a page text, ellipsis included."""
@@ -24,6 +39,7 @@ BLOCK_TAGS: Final = frozenset(
     | {"pre", "section", "table", "td", "th", "tr", "ul"}
 )
 """Elements that separate words: ``<p>a</p><p>b</p>`` reads "a b", ``wo<b>rd</b>`` "word"."""
+_WHITESPACE_RUN: Final = re.compile(r"\s+")  # \s is str.isspace(), the set collapse() uses
 
 
 def collapse(text: str) -> str:
@@ -82,6 +98,11 @@ class _TextExtractor(HTMLParser):
             self.parts.append(" ")
 
 
+def readable(text: str) -> str:
+    """``text`` in NFC with its whitespace collapsed: the form that is hashed and shown."""
+    return collapse(unicodedata.normalize("NFC", text))
+
+
 def html_to_text(html: str) -> str:
     """The text of an HTML fragment; block elements leave a space, comments leave nothing.
 
@@ -91,3 +112,37 @@ def html_to_text(html: str) -> str:
     extractor.feed(html)
     extractor.close()
     return "".join(extractor.parts)
+
+
+def parse_html(html: str) -> LexborHTMLParser:
+    """Parse ``html`` (HTML5 tree building) and remove the elements that hold no text."""
+    tree = LexborHTMLParser(html)
+    tree.strip_tags(sorted(NON_TEXT_TAGS))
+    return tree
+
+
+def node_text(root: LexborNode, *, separator: str = " ") -> str:
+    """The text nodes under ``root`` in document order; block elements leave ``separator``.
+
+    Read from the parsed tree itself (comments carry no text, and :func:`parse_html` has
+    removed the non-text elements), with the block elements of :data:`BLOCK_TAGS`.
+    selectolax's own ``text()`` either merges paragraphs or splits inline words. Whitespace
+    runs inside a text node become one space, as a browser renders them, so a ``"\\n"``
+    separator yields one line per block. Iterative, so a deeply nested page cannot exhaust
+    the stack. Whitespace is not collapsed across nodes: pass the result through
+    :func:`collapse` (or collapse it line by line).
+    """
+    parts: list[str] = []
+    pending: list[tuple[LexborNode, bool]] = [(root, False)]  # (node, its end was reached)
+    while pending:
+        node, closing = pending.pop()
+        if node.is_text_node:
+            parts.append(_WHITESPACE_RUN.sub(" ", node.text_content or ""))
+            continue
+        if node.tag in BLOCK_TAGS:
+            parts.append(separator)
+        if closing or not (node.is_element_node or node is root):
+            continue
+        pending.append((node, True))
+        pending.extend((child, False) for child in reversed(list(node.iter(include_text=True))))
+    return "".join(parts)
