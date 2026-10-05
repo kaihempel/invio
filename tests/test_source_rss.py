@@ -10,7 +10,7 @@ from invio.config.job import RssSource
 from invio.domain import Candidate, url_hash
 from invio.sources.base import Source
 from invio.sources.http import FetchError, HttpClientConfig, SafeHttpClient
-from invio.sources.rss import TEASER_MAX_CHARS, RssFeedSource, _entry_date
+from invio.sources.rss import TEASER_MAX_CHARS, RssFeedSource, _entry_date, _html_to_text
 from tests.http_helpers import LOOPBACK, LoopbackServer, Route, server  # noqa: F401
 
 FEEDS = Path(__file__).parent / "fixtures" / "feeds"
@@ -135,7 +135,7 @@ async def test_xml_declaration_encoding_wins_over_http_charset(
 async def test_adapter_satisfies_source_protocol(client: SafeHttpClient) -> None:
     source: Source[RssSource] = RssFeedSource(client)
 
-    assert isinstance(source, RssFeedSource)
+    assert isinstance(source, Source)
 
 
 # --- acceptance: utm_* variants share one hash -----------------------------------------------
@@ -186,6 +186,36 @@ async def test_entries_older_than_max_age_days_are_dropped(
         "https://e.com/edge",  # exactly max_age_days old: kept
         "https://e.com/undated",  # no date: kept
     ]
+
+
+async def test_duplicate_is_decided_by_its_first_occurrence(
+    server: LoopbackServer, client: SafeHttpClient
+) -> None:
+    serve(
+        server,
+        rss(
+            "<link>https://e.com/a</link><pubDate>Mon, 01 Jan 2001 00:00:00 GMT</pubDate>",
+            "<link>https://e.com/a?utm_source=x</link>",  # undated repeat of a dropped entry
+            "<link>https://e.com/b</link>",
+        ),
+    )
+
+    candidates = await fetch(client, feed_config(server, max_age_days=4))
+
+    assert [c.url for c in candidates] == ["https://e.com/b"]
+
+
+async def test_future_date_is_clamped_to_now(
+    server: LoopbackServer, client: SafeHttpClient
+) -> None:
+    serve(
+        server,
+        rss("<link>https://e.com/a</link><pubDate>Fri, 01 Jan 2100 00:00:00 GMT</pubDate>"),
+    )
+
+    [candidate] = await fetch(client, feed_config(server, max_age_days=1))
+
+    assert candidate.published_at == NOW
 
 
 async def test_no_max_age_keeps_old_entries(server: LoopbackServer, client: SafeHttpClient) -> None:
@@ -351,6 +381,17 @@ async def test_entries_without_usable_link_are_skipped(
     assert [c.url for c in candidates] == ["https://e.com/ok"]
 
 
+async def test_credentials_are_removed_from_entry_links(
+    server: LoopbackServer, client: SafeHttpClient
+) -> None:
+    serve(server, rss("<link>https://user:s3cret@e.com/a</link>"))
+
+    [candidate] = await fetch(client, feed_config(server))
+
+    assert candidate.url == candidate.title == "https://e.com/a"
+    assert candidate.url_hash == url_hash("https://e.com/a")
+
+
 async def test_entry_without_link_element_is_skipped(
     server: LoopbackServer, client: SafeHttpClient
 ) -> None:
@@ -411,6 +452,39 @@ async def test_markup_only_summary_gives_no_teaser(
     [candidate] = await fetch(client, feed_config(server))
 
     assert candidate.teaser is None
+
+
+async def test_script_and_style_content_stays_out_of_the_teaser(
+    server: LoopbackServer, client: SafeHttpClient
+) -> None:
+    summary = (
+        "&lt;p&gt;Hi&lt;/p&gt;&lt;script&gt;alert(1)&lt;/script&gt;"
+        "&lt;style&gt;p{}&lt;/style&gt;there"
+    )
+    serve(server, rss(f"<link>https://e.com/a</link><description>{summary}</description>"))
+
+    [candidate] = await fetch(client, feed_config(server))
+
+    assert candidate.teaser == "Hi there"
+
+
+@pytest.mark.parametrize(
+    ("html", "expected"),
+    [
+        ("<p>a</p><p>b</p>", " a  b "),
+        ("a</p>b", "a b"),
+        ("a<br>b<br/>c", "a b c"),
+        ("wo<b>rd</b>s", "words"),  # inline markup does not split words
+        ("a<script>x()</script>b", "ab"),
+        ("a<template><template>x</template>y</template>b", "ab"),  # nested
+        ("a<script/>b", "ab"),  # self-closed: nothing to skip
+        ("a</script>b", "ab"),  # stray end tag
+        ("a<template><p>t</p></template>b", "ab"),
+        ("a &amp; b", "a & b"),
+    ],
+)
+def test_html_to_text(html: str, expected: str) -> None:
+    assert _html_to_text(html) == expected
 
 
 @pytest.mark.parametrize(

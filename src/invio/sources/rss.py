@@ -12,7 +12,7 @@ and the ``_entry_*`` accessors, which hand typed values to the rest of the modul
 import io
 import time
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from html.parser import HTMLParser
 from typing import Any, Final
@@ -25,7 +25,7 @@ from invio.config.job import RssSource
 from invio.domain import Candidate, url_hash
 from invio.sources.errors import FetchError
 from invio.sources.http import NotModified, SafeHttpClient
-from invio.sources.urls import normalize_url
+from invio.sources.urls import canonical_url
 
 __all__ = ["TEASER_MAX_CHARS", "RssFeedSource"]
 
@@ -37,6 +37,14 @@ _SCHEMES: Final = frozenset({"http", "https"})
 # Notes feedparser raises for a feed it parsed fine: no or a non-XML Content-Type (the body is
 # passed without headers on purpose) and an encoding that differs from the declared one.
 _HARMLESS_BOZO: Final = (NonXMLContentType, CharacterEncodingOverride)
+# Elements whose content is code, not text; feedparser's sanitizer drops the tags but keeps it.
+_NON_TEXT_TAGS: Final = frozenset({"script", "style", "template"})
+# Elements that separate words: "<p>a</p><p>b</p>" reads "a b", while "wo<b>rd</b>" stays "word".
+_BLOCK_TAGS: Final = frozenset(
+    {"address", "article", "aside", "blockquote", "br", "dd", "div", "dl", "dt", "figcaption"}
+    | {"figure", "footer", "h1", "h2", "h3", "h4", "h5", "h6", "header", "hr", "li", "ol", "p"}
+    | {"pre", "section", "table", "td", "th", "tr", "ul"}
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,9 +72,13 @@ class RssFeedSource:
     async def fetch(self, config: RssSource) -> list[Candidate]:
         """Fetch and parse the feed; raises :class:`FetchError` (``"malformed_feed"``).
 
-        Entries without a usable http(s) link are skipped; entries older than
-        ``config.max_age_days`` are dropped (undated ones are kept); a URL that occurs more
-        than once (after normalization) is kept at its first position.
+        Entries without a usable http(s) link are skipped; a URL that occurs more than once
+        (after canonicalization) is decided by its first occurrence only. Entries older than
+        ``config.max_age_days`` are dropped (undated ones are kept); a date in the future is
+        clamped to now, so it cannot keep an entry inside the age window forever.
+
+        ``[]`` for HTTP 304: the client only sends validators it remembers from an earlier
+        fetch by the same client instance; they are not persisted across runs yet.
         """
         url = str(config.url)
         result = await self._client.get(url)
@@ -78,20 +90,21 @@ class RssFeedSource:
         # Some entries survive a parse error (truncated feed); none means it is unusable.
         if not feed.version or (feed.broken and not candidates):
             raise FetchError("malformed_feed", url=url)
+        now = self._now()
         cutoff = (
-            self._now() - timedelta(days=config.max_age_days)
-            if config.max_age_days is not None
-            else None
+            now - timedelta(days=config.max_age_days) if config.max_age_days is not None else None
         )
         seen: set[str] = set()
         kept: list[Candidate] = []
         for candidate in candidates:
             if candidate.url in seen:
                 continue
-            published = candidate.published_at
-            if cutoff is not None and published is not None and published < cutoff:
-                continue
             seen.add(candidate.url)
+            published = candidate.published_at
+            if published is not None and published > now:
+                candidate = replace(candidate, published_at=now)
+            elif cutoff is not None and published is not None and published < cutoff:
+                continue
             kept.append(candidate)
         return kept
 
@@ -131,12 +144,12 @@ def _candidate(entry: Mapping[str, Any], *, base_url: str) -> Candidate | None:
 
 
 def _entry_url(entry: Mapping[str, Any], *, base_url: str) -> str | None:
-    """The entry link resolved against the feed URL and normalized; http(s) only."""
+    """The entry link resolved against the feed URL and canonicalized; http(s) only."""
     link = entry.get("link")
     if not isinstance(link, str) or not link.strip():
         return None
     try:
-        url = normalize_url(urljoin(base_url, link.strip()))
+        url = canonical_url(urljoin(base_url, link.strip()))
         parts = urlsplit(url)
         # ``hostname`` (unlike ``netloc``) is empty for "http://user@" and "http://:80"; an
         # invalid port raises ``ValueError``.
@@ -192,17 +205,39 @@ def _collapse(text: str) -> str:
 
 
 class _TextExtractor(HTMLParser):
-    """Collects the text nodes of an HTML fragment; character references are decoded."""
+    """Collects the text nodes of an HTML fragment; character references are decoded.
+
+    The content of ``script``/``style``/``template`` elements is dropped, and block elements
+    separate words.
+    """
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self.parts: list[str] = []
+        self._non_text_depth = 0
 
     def handle_data(self, data: str) -> None:
-        self.parts.append(data)
+        if not self._non_text_depth:
+            self.parts.append(data)
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        self.parts.append(" ")  # "<p>a</p><p>b</p>" reads "a b", not "ab"
+        if tag in _NON_TEXT_TAGS:
+            self._non_text_depth += 1
+        else:
+            self._separate(tag)
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self._separate(tag)  # "<br/>"; a self-closed "<script/>" opens nothing
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in _NON_TEXT_TAGS:
+            self._non_text_depth = max(self._non_text_depth - 1, 0)
+        else:
+            self._separate(tag)
+
+    def _separate(self, tag: str) -> None:
+        if tag in _BLOCK_TAGS and not self._non_text_depth:
+            self.parts.append(" ")
 
 
 def _html_to_text(html: str) -> str:

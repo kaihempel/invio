@@ -4,7 +4,7 @@ import re
 from typing import Final
 from urllib.parse import unquote, urlsplit, urlunsplit
 
-__all__ = ["normalize_url", "redact", "redact_url", "without_query"]
+__all__ = ["canonical_url", "redact", "redact_url", "without_query"]
 
 # Greedy up to the last "@" before the path, so a password containing "@" is removed too. The
 # userinfo ends at "/", "?" or "#", so an "@" in a query string or fragment is left alone.
@@ -35,27 +35,28 @@ def without_query(url: str) -> str:
     return _QUERY.sub("", url)
 
 
-def normalize_url(url: str) -> str:
+def canonical_url(url: str) -> str:
     """Canonical form of ``url`` for identity: same page, same string, same ``url_hash``.
 
-    Lower-cases the scheme and host, drops the default port, the fragment and tracking
-    parameters (``utm_*``, ``fbclid``, ``gclid``, ...). The remaining query parameters keep
-    their order and their exact encoding; an empty path of an http(s) URL becomes ``/``.
+    Lower-cases the scheme and host, drops userinfo (credentials must never end up in a stored
+    URL), the default port, the fragment and tracking parameters (``utm_*``, ``fbclid``,
+    ``gclid``, ...). The remaining query parameters keep their order and their exact encoding;
+    an empty path of an http(s) URL becomes ``/``. Percent-encoding case (``%7e``/``%7E``) and
+    trailing slashes are left as they are, so such variants stay distinct.
     Raises ``ValueError`` for a URL that cannot be split (e.g. an unclosed IPv6 bracket).
     """
     parts = urlsplit(url.strip())
     scheme = parts.scheme.lower()
-    userinfo, at, hostport = parts.netloc.rpartition("@")
-    hostport = hostport.lower().removesuffix(":")
+    host = parts.netloc.rpartition("@")[2].lower().removesuffix(":")
     try:
         port = parts.port
     except ValueError:
         port = None  # not a number: leave the host part as it is
     if port is not None and port == _DEFAULT_PORTS.get(scheme):
-        hostport = hostport[: hostport.rfind(":")]
-    path = parts.path or ("/" if scheme in _DEFAULT_PORTS and hostport else "")
+        host = host[: host.rfind(":")]
+    path = parts.path or ("/" if scheme in _DEFAULT_PORTS and host else "")
     query = "&".join(param for param in parts.query.split("&") if param and not _is_tracking(param))
-    return urlunsplit((scheme, f"{userinfo}{at}{hostport}", path, query, ""))
+    return urlunsplit((scheme, host, path, query, ""))
 
 
 def _is_tracking(param: str) -> bool:

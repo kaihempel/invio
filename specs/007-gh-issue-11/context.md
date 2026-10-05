@@ -14,7 +14,7 @@ pipeline can process it.
 | `Candidate`, `url_hash()` | `src/invio/domain.py` | frozen kw-only dataclass; `url_hash` = SHA-256 hex of the URL string |
 | `SafeHttpClient.get()` | `src/invio/sources/http.py` | returns `FetchResult` (2xx) or `NotModified` (304); raises `FetchError` |
 | `FetchError` | `src/invio/sources/errors.py` | `FetchError(reason, *, url, status=None)`; URL is redacted |
-| URL helpers | `src/invio/sources/urls.py` | redaction only; `normalize_url()` goes here |
+| URL helpers | `src/invio/sources/urls.py` | redaction only; `canonical_url()` goes here |
 | `RssSource` config | `src/invio/config/job.py` | `type`, `url`, `name`, `enabled`; **no `max_age_days` yet** |
 | Loopback test server | `tests/http_helpers.py` | `server` fixture, `Route`, `LOOPBACK` |
 
@@ -24,7 +24,7 @@ Layering (ruff `TID251`): `invio.sources` must not import `invio.db`, `invio.ser
 ## Design
 
 1. **`src/invio/sources/base.py`**: a `Source` protocol, `async fetch(config) -> list[Candidate]`.
-2. **`normalize_url()`** in `src/invio/sources/urls.py`: lower-case the scheme and host, drop
+2. **`canonical_url()`** in `src/invio/sources/urls.py`: lower-case the scheme and host, drop
    the default port, the fragment and tracking parameters (`utm_*`, plus common ones such as
    `fbclid`, `gclid`, `mc_cid`, `mc_eid`), keep the order of the remaining parameters. Candidates
    store the normalized URL and `url_hash(normalized)`.
@@ -57,7 +57,7 @@ Layering (ruff `TID251`): `invio.sources` must not import `invio.db`, `invio.ser
 | Criterion | Test |
 |-----------|------|
 | RSS 2.0 and Atom fixtures yield correct candidates | `tests/test_source_rss.py` with fixtures under `tests/fixtures/feeds/` served by the loopback server |
-| URLs differing only by `utm_*` get the same hash | `tests/test_source_urls.py` (`normalize_url`) and an RSS test |
+| URLs differing only by `utm_*` get the same hash | `tests/test_source_urls.py` (`canonical_url`) and an RSS test |
 | Entries older than `max_age_days` are dropped | `tests/test_source_rss.py` with a fixed `now` |
 | Malformed feeds produce a `FetchError`, not a crash | `tests/test_source_rss.py` (HTML page, truncated XML, binary garbage) |
 
@@ -80,3 +80,14 @@ Coverage must stay ≥ 95 %.
   files); entries exactly `max_age_days` old are kept.
 - The adapter class is `RssFeedSource` (`Source[RssSource]`) to avoid clashing with the config
   model `RssSource`.
+- The URL helper is `canonical_url` (not `normalize_url`, which `invio.db.session` already uses
+  for database URLs). It drops userinfo, so credentials in a feed link never reach a stored URL,
+  title or hash. Percent-encoding case and trailing slashes are not normalized.
+- Duplicates are decided by their first occurrence: a URL dropped for age is not brought back by
+  a later (newer or undated) repeat. A date in the future is clamped to now, so it cannot keep an
+  entry inside the `max_age_days` window forever.
+- Title and teaser text skip the content of `script`, `style` and `template` (feedparser's
+  sanitizer removes these tags but keeps their text); only block elements separate words.
+- HTTP 304 → `[]` relies on the validators `SafeHttpClient` keeps in memory per instance; they
+  are not persisted across runs yet (no issue covers that so far).
+- The adapter is not wired into the pipeline yet; the `fetch_sources` node of #21 will call it.

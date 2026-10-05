@@ -1,9 +1,9 @@
-"""Tests for ``normalize_url``: the canonical URL behind a candidate's ``url_hash``."""
+"""Tests for ``canonical_url``: the canonical URL behind a candidate's ``url_hash``."""
 
 import pytest
 
 from invio.domain import url_hash
-from invio.sources.urls import normalize_url
+from invio.sources.urls import canonical_url
 
 
 @pytest.mark.parametrize(
@@ -20,12 +20,14 @@ from invio.sources.urls import normalize_url
         ("https://example.com/a#section", "https://example.com/a"),
         ("https://example.com/a?", "https://example.com/a"),
         ("  https://example.com/a  ", "https://example.com/a"),
-        ("https://user:pw@Example.com/a", "https://user:pw@example.com/a"),
+        ("https://user:pw@Example.com/a", "https://example.com/a"),  # credentials dropped
+        ("https://p%40ss@word@e.com:443/a", "https://e.com/a"),  # "@" in the password
+        ("http://user@", "http://"),
         ("mailto:Someone@Example.com", "mailto:Someone@Example.com"),
     ],
 )
-def test_normalize_url(url: str, expected: str) -> None:
-    assert normalize_url(url) == expected
+def test_canonical_url(url: str, expected: str) -> None:
+    assert canonical_url(url) == expected
 
 
 @pytest.mark.parametrize(
@@ -40,10 +42,11 @@ def test_normalize_url(url: str, expected: str) -> None:
         ("https://e.com/a?q=a%20b&r=c+d&flag", "https://e.com/a?q=a%20b&r=c+d&flag"),
         ("https://e.com/a?q=1&&utm_term=x&", "https://e.com/a?q=1"),
         ("https://e.com/a?utmost=1", "https://e.com/a?utmost=1"),  # only the utm_ prefix
+        ("https://e.com/a%7e?x=1", "https://e.com/a%7e?x=1"),  # escapes are not re-cased
     ],
 )
 def test_tracking_parameters_are_dropped(url: str, expected: str) -> None:
-    assert normalize_url(url) == expected
+    assert canonical_url(url) == expected
 
 
 def test_utm_variants_share_one_hash() -> None:
@@ -54,28 +57,32 @@ def test_utm_variants_share_one_hash() -> None:
         "https://blog.example.com/posts/1?utm_campaign=x#top",
     ]
 
-    hashes = {url_hash(normalize_url(url)) for url in [plain, *variants]}
+    hashes = {url_hash(canonical_url(url)) for url in [plain, *variants]}
 
     assert hashes == {url_hash(plain)}
 
 
+def test_credentials_do_not_change_the_hash() -> None:
+    assert canonical_url("https://u:secret@e.com/a") == canonical_url("https://e.com/a")
+
+
 def test_different_pages_keep_different_hashes() -> None:
-    first = normalize_url("https://e.com/a?id=1&utm_source=x")
-    second = normalize_url("https://e.com/a?id=2&utm_source=x")
+    first = canonical_url("https://e.com/a?id=1&utm_source=x")
+    second = canonical_url("https://e.com/a?id=2&utm_source=x")
 
     assert url_hash(first) != url_hash(second)
 
 
 def test_normalize_is_idempotent() -> None:
-    once = normalize_url("HTTP://E.com:80?b=1&utm_source=x#f")
+    once = canonical_url("HTTP://E.com:80?b=1&utm_source=x#f")
 
-    assert normalize_url(once) == once == "http://e.com/?b=1"
+    assert canonical_url(once) == once == "http://e.com/?b=1"
 
 
 def test_non_numeric_port_is_left_alone() -> None:
-    assert normalize_url("http://E.com:abc/x") == "http://e.com:abc/x"
+    assert canonical_url("http://E.com:abc/x") == "http://e.com:abc/x"
 
 
 def test_unsplittable_url_raises_value_error() -> None:
     with pytest.raises(ValueError):
-        normalize_url("http://[::1/x")
+        canonical_url("http://[::1/x")
