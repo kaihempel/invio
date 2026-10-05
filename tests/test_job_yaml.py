@@ -531,7 +531,13 @@ def test_omitted_defaults_written_to_file(tmp_path: Path) -> None:
     assert saved["search"]["min_relevance"] == 0.6
     assert saved["llm"]["fallback_provider"] is None
     assert saved["sources"] == [
-        {"type": "rss", "url": "https://example.com/feed.xml", "name": None, "enabled": True}
+        {
+            "type": "rss",
+            "url": "https://example.com/feed.xml",
+            "name": None,
+            "enabled": True,
+            "max_age_days": None,
+        }
     ]
     assert saved["limits"] == {
         "max_items_per_source": 20,
@@ -547,7 +553,7 @@ def test_dump_nested_key_order() -> None:
     assert list(dumped["schedule"]) == ["frequency", "time", "weekday", "day_of_month", "timezone"]
     assert list(dumped["notification"]) == ["to", "subject", "send_if_empty"]
     assert [list(s) for s in dumped["sources"]] == [
-        ["type", "url", "name", "enabled"],
+        ["type", "url", "name", "enabled", "max_age_days"],
         ["type", "url", "name", "enabled"],
         ["type", "url", "name", "enabled"],
         ["type", "channel_id", "name", "enabled"],

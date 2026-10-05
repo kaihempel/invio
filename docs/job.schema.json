@@ -170,7 +170,7 @@
     },
     "RssSource": {
       "additionalProperties": false,
-      "description": "An RSS/Atom feed.",
+      "description": "An RSS/Atom feed; entries older than ``max_age_days`` (if set) are ignored.",
       "properties": {
         "type": {
           "const": "rss",
@@ -201,6 +201,19 @@
           "default": true,
           "title": "Enabled",
           "type": "boolean"
+        },
+        "max_age_days": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Age Days"
         }
       },
       "required": [

@@ -240,12 +240,13 @@ _SourceName = Annotated[str | None, Field(min_length=1)]
 
 
 class RssSource(_StrictModel):
-    """An RSS/Atom feed."""
+    """An RSS/Atom feed; entries older than ``max_age_days`` (if set) are ignored."""
 
     type: Literal["rss"]
     url: HttpUrl
     name: _SourceName = None
     enabled: StrictBool = True
+    max_age_days: StrictInt | None = Field(default=None, ge=1)
 
 
 class WebSource(_StrictModel):

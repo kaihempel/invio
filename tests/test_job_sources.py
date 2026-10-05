@@ -136,3 +136,40 @@ def test_blank_name_rejected(job_data: dict[str, Any]) -> None:
     errors = _errors(job_data, {"type": "rss", "url": "https://example.com/f", "name": "  "})
 
     assert [loc for loc, _ in errors] == [("sources", 0, "rss", "name")]
+
+
+def test_rss_max_age_days_defaults_to_none(job_data: dict[str, Any]) -> None:
+    job_data["sources"] = [{"type": "rss", "url": "https://example.com/feed.xml"}]
+
+    parsed = JobConfig.model_validate(job_data).sources[0]
+
+    assert isinstance(parsed, RssSource)
+    assert parsed.max_age_days is None
+
+
+def test_rss_max_age_days_is_accepted_and_saved_last(job_data: dict[str, Any]) -> None:
+    job_data["sources"] = [
+        {"type": "rss", "url": "https://example.com/feed.xml", "max_age_days": 7}
+    ]
+
+    parsed = JobConfig.model_validate(job_data).sources[0]
+
+    assert isinstance(parsed, RssSource)
+    assert parsed.max_age_days == 7
+    assert list(parsed.model_dump()) == ["type", "url", "name", "enabled", "max_age_days"]
+
+
+@pytest.mark.parametrize("value", [0, -1, 1.5, "7", True])
+def test_rss_max_age_days_rejects_invalid(job_data: dict[str, Any], value: object) -> None:
+    errors = _errors(
+        job_data, {"type": "rss", "url": "https://example.com/f", "max_age_days": value}
+    )
+
+    assert [location for location, _ in errors] == [("sources", 0, "rss", "max_age_days")]
+
+
+@pytest.mark.parametrize("kind", ["web", "sitemap"])
+def test_max_age_days_is_rss_only(job_data: dict[str, Any], kind: str) -> None:
+    errors = _errors(job_data, {"type": kind, "url": "https://example.com/f", "max_age_days": 7})
+
+    assert [location for location, _ in errors] == [("sources", 0, kind, "max_age_days")]
