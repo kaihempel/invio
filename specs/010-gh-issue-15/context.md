@@ -28,8 +28,9 @@ rules come from the job config `search.keywords` (`any`, `all`, `exclude`).
    - `keyword_filter(item: Item, keywords: KeywordsConfig, items: ItemRepository) -> MatchResult`:
      evaluates `item_text(item.title, item.teaser, item.raw_content)`; a rejected item is
      persisted with status `skipped_keyword`.
-2. **Matching**: Unicode NFC normalization + `casefold()` on text and terms; word boundaries via
-   `(?<!\w)…(?!\w)` (Unicode `\w`), so terms such as `C++` work; a multi-word term matches as a
+2. **Matching**: canonical caseless folding (`NFC(casefold(NFD(x)))`) on text and terms; word
+   boundaries via `(?<!\w)…(?!\w)` (Unicode `\w`) plus a check that no combining mark sits
+   directly before or after a match, so terms such as `C++` work; a multi-word term matches as a
    phrase with any whitespace run between its words. Terms are stripped; blank terms ignored.
 3. **Rules** (in order): any `exclude` hit → reject; every `all` term must occur; `any` needs at
    least one hit when non-empty; both `any` and `all` empty → pass (unless excluded).
@@ -54,11 +55,21 @@ Coverage must stay ≥ 95 %.
 
 ## Implementation decisions
 
-- **Term patterns are cached** (`functools.lru_cache(maxsize=1024)` on the stripped term), so a
-  job's terms compile once per process instead of once per item.
-- **Folding**: `NFC` first, then `casefold()`, on both text and terms. `casefold()` expands
-  `ß` to `ss`, so `Straße` matches `STRASSE`; `Äpfel` does not match `Apfel` (umlauts are not
-  stripped to their base letters).
+- **Term patterns are cached** (`functools.lru_cache(maxsize=1024)` on the folded term, so
+  `LLM` and `llm` share one), so a job's terms compile once per process instead of once per
+  item.
+- **Folding**: `NFD`, then `casefold()`, then `NFC`, on both text and terms (the Unicode
+  canonical caseless match). Folding the NFC form directly misses cases where `casefold()`
+  yields a non-NFC sequence (uppercase `Ϊ́` vs. `ΐ`). `casefold()` expands `ß` to `ss`, so
+  `Straße` matches `STRASSE`; `Äpfel` does not match `Apfel` (umlauts are not stripped to their
+  base letters).
+- **Combining marks**: `\w` does not cover combining marks (category `M*`). A letter with a
+  mark that has no precomposed form stays two characters after NFC, so a match directly next to
+  a mark is inside a word and is discarded (`x` does not match `x\u0301`).
+- **Known limitations** (documented in the module docstring): no Turkish tailoring (`İstanbul`
+  does not match `istanbul`); a term that starts or ends with a non-word character needs a
+  non-word neighbour on that side (`.NET` does not match `x.NET`, `-foo` does not match
+  `a-foo`).
 - **Phrase splitting**: a term is split on any whitespace, so `large   language model` behaves
   like `large language model`; a phrase needs at least one whitespace character between
   words (`large language` does not match `largelanguage`). Hyphens and other punctuation are
