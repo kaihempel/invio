@@ -23,10 +23,12 @@ Layering (ruff `TID251`): `invio.sources` must not import `invio.db`, `invio.ser
 ## Design
 
 1. **`src/invio/sources/extract.py`** (the issue's `scout/sources/extract.py`):
-   `extract_text(html, url, *, max_chars=MAX_CHARS, min_chars=MIN_CHARS) -> ExtractedText`.
+   `extract_text(html, url, *, max_chars=MAX_CHARS, min_chars=MIN_CHARS,
+   max_input_chars=MAX_INPUT_CHARS) -> ExtractedText`.
    - `ExtractedText`: frozen kw-only dataclass `title: str | None`, `text: str`,
      `published_at: datetime | None` (aware, UTC), `language: str | None`, `truncated: bool`.
-   - `MAX_CHARS = 200_000`, `MIN_CHARS = 200` (module constants; overridable per call).
+   - `MAX_CHARS = 200_000`, `MIN_CHARS = 200`, `MAX_INPUT_CHARS = 4_000_000` (module constants;
+     overridable per call).
 2. **Primary path**: `trafilatura.bare_extraction(html, url=url, favor_precision=True,
    with_metadata=True, include_comments=False)` — one pass gives text and metadata.
 3. **Fallback**: when trafilatura returns no (or blank) text, or raises on hostile input, take
@@ -39,8 +41,9 @@ Layering (ruff `TID251`): `invio.sources` must not import `invio.db`, `invio.ser
    lines, blank lines dropped.
 6. **Truncation**: text longer than `max_chars` is cut to `max_chars` (at a word boundary where
    possible) and `truncated=True`.
-7. **`ExtractionError`** (in `extract.py`): `reason` (`"too_short"`) and redacted `url`; raised
-   when the text (after fallback) is shorter than `min_chars`.
+7. **`ExtractionError`** (in `extract.py`): `reason` and redacted `url`; `"too_short"` when the
+   text (after fallback) is shorter than `min_chars`, `"too_large"` when the HTML is longer than
+   `max_input_chars` (checked before any parsing).
 
 ## Dependencies
 
@@ -82,16 +85,23 @@ Coverage must stay ≥ 95 %.
   suffix such as "| Tagesblatt"); blank values are skipped.
 - **Language**: trafilatura only reports a language when a language detector is installed
   (not the case here), so in practice it comes from `<html lang>`. Both sources are reduced to
-  the lower-case primary subtag and must match `[a-z]{2,8}`, else `None`; `_` is read as `-`.
-- **Dates**: only from trafilatura (`date.fromisoformat`, midnight UTC); the fallback path does
+  the lower-case primary subtag and must match `[a-z]{2,3}` (ISO 639; the 4–8 letter BCP 47
+  subtags are reserved or registered names, so `lang="english"` gives `None`); `_` is read as `-`.
+- **Dates**: only from trafilatura (`date.fromisoformat` of the first 10 characters, so a
+  trailing time is ignored; midnight UTC); the fallback path does
   not parse `article:published_time` itself.
 - **Normalization**: NFC (as in the web source) in addition to per-line whitespace collapse and
   dropping blank lines.
 - **Limits**: `ValueError` when `max_chars < 1`, `min_chars < 1` or `min_chars > max_chars`.
   `min_chars` is checked against the full text, before truncation. A single word longer than
   `max_chars` is cut inside the word.
-- **Hostile input**: no own size cap (the HTTP client already caps responses at
-  `INVIO_HTTP_MAX_RESPONSE_BYTES`); tests cover control characters, lone surrogates, 50 000
+- **Hostile input**: extraction time grows with the page size (≈1 s per MB, far more for pages
+  near the 10 MiB HTTP response cap), so HTML longer than `max_input_chars` is rejected with
+  `"too_large"` before parsing. Extraction is synchronous and CPU-bound; async callers run it via
+  `asyncio.to_thread`. A trafilatura exception is logged at debug level (type only, no message
+  or URL), so a broken upgrade that silently degrades every page to the fallback is visible.
+  The selectolax tree is built lazily, only when a fallback (text, title or language) needs it.
+  Tests cover control characters, lone surrogates, 50 000
   nested `<div>`s, unclosed tags, XML, ~2 MB of text and Hypothesis-generated strings.
 - **Fixture note**: trafilatura drops repeated identical paragraphs, so the large-input test
   uses distinct paragraphs.

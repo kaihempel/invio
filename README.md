@@ -205,7 +205,7 @@ or footers. It never touches the network.
 ```python
 from invio.sources.extract import ExtractionError, extract_text
 
-article = extract_text(html, url)  # max_chars=200_000, min_chars=200 by default
+article = extract_text(html, url)  # max_chars=200_000, min_chars=200, max_input_chars=4_000_000
 article.title, article.published_at, article.language, article.truncated
 print(article.text)  # one paragraph per line, whitespace collapsed, NFC
 ```
@@ -216,7 +216,9 @@ the text rules of web page sources. The title is trafilatura's, else `og:title`,
 `published_at` is the publish day at midnight UTC (trafilatura dates have no time); `language`
 is the primary subtag (`de` for `de-DE`) from trafilatura, else `<html lang>`. Text longer than
 `max_chars` is cut at a word boundary with `truncated=True`; text shorter than `min_chars`
-raises `ExtractionError` with `reason == "too_short"` and the redacted URL.
+raises `ExtractionError` with `reason == "too_short"` and the redacted URL. HTML longer than
+`max_input_chars` raises `reason == "too_large"` before parsing. Extraction is synchronous and
+CPU-bound: call it via `asyncio.to_thread` from async code.
 
 ## Job files
 

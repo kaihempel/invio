@@ -2,7 +2,15 @@
 
 import pytest
 
-from invio.sources.text import TEASER_MAX_CHARS, collapse, html_to_text, teaser
+from invio.sources.text import (
+    TEASER_MAX_CHARS,
+    collapse,
+    html_to_text,
+    node_text,
+    parse_html,
+    readable,
+    teaser,
+)
 
 
 @pytest.mark.parametrize(
@@ -45,6 +53,46 @@ def test_html_to_text(html: str, expected: str) -> None:
 def test_block_elements_separate_words_after_collapse() -> None:
     assert collapse(html_to_text("<p>a</p><p>b</p>")) == "a b"
     assert collapse(html_to_text("wo<b>rd</b>")) == "word"
+
+
+def test_node_text_separates_blocks_and_folds_whitespace_per_node() -> None:
+    tree = parse_html(
+        "<h1>Head</h1><p>first\n   paragraph <b>bo</b>ld</p><ul><li>one</li><li>two</li></ul>"
+        "<p>a<br>b</p><script>evil()</script><!-- note -->"
+    )
+    assert tree.body is not None
+
+    lines = node_text(tree.body, separator="\n").splitlines()
+    spaced = node_text(tree.body)
+
+    assert [line for line in lines if line] == [
+        "Head",
+        "first paragraph bold",
+        "one",
+        "two",
+        "a",
+        "b",
+    ]
+    assert "\n" not in spaced  # the newline inside the text node was folded, too
+    assert collapse(spaced) == "Head first paragraph bold one two a b"
+
+
+def test_node_text_of_deeply_nested_page_does_not_recurse() -> None:
+    tree = parse_html("<span>" * 100_000 + "deep" + "</span>" * 100_000)
+    assert tree.body is not None
+
+    assert node_text(tree.body) == "deep"
+
+
+def test_parse_html_drops_non_text_elements() -> None:
+    tree = parse_html("<p>a</p><script>s()</script><style>p{}</style><noscript>n</noscript>")
+    assert tree.body is not None
+
+    assert collapse(node_text(tree.body)) == "a"
+
+
+def test_readable_is_nfc_and_collapsed() -> None:
+    assert readable("  Cafe\u0301 \n\t au  lait ") == "Café au lait"
 
 
 @pytest.mark.parametrize("text", ["", "   ", "\n\t\u00a0"])

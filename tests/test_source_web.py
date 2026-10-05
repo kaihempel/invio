@@ -664,9 +664,10 @@ async def test_page_without_qualifying_links_gives_no_candidates(server: Loopbac
 
 
 def test_host_comparison_is_case_insensitive_and_exact() -> None:
-    from invio.sources.web import _links, _parse
+    from invio.sources.text import parse_html
+    from invio.sources.web import _links
 
-    tree = _parse(
+    tree = parse_html(
         index(
             anchors(
                 "https://EXAMPLE.org/a", "https://www.example.org/b", "https://example.org:8443/c"

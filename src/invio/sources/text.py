@@ -9,6 +9,7 @@ with selectolax (:func:`parse_html`) and read with :func:`node_text`, which appl
 """
 
 import re
+import unicodedata
 from html.parser import HTMLParser
 from typing import Final
 
@@ -22,6 +23,7 @@ __all__ = [
     "html_to_text",
     "node_text",
     "parse_html",
+    "readable",
     "teaser",
 ]
 
@@ -94,6 +96,11 @@ class _TextExtractor(HTMLParser):
     def _separate(self, tag: str) -> None:
         if tag in BLOCK_TAGS and not self._non_text_depth:
             self.parts.append(" ")
+
+
+def readable(text: str) -> str:
+    """``text`` in NFC with its whitespace collapsed: the form that is hashed and shown."""
+    return collapse(unicodedata.normalize("NFC", text))
 
 
 def html_to_text(html: str) -> str:

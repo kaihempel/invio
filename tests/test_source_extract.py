@@ -1,5 +1,6 @@
 """Tests for ``invio.sources.extract``: article text, metadata, fallback, limits and errors."""
 
+import logging
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -11,6 +12,7 @@ from trafilatura.settings import Document
 from invio.sources import extract
 from invio.sources.extract import (
     MAX_CHARS,
+    MAX_INPUT_CHARS,
     MIN_CHARS,
     ExtractedText,
     ExtractionError,
@@ -270,6 +272,9 @@ def test_fallback_title(no_trafilatura: None, head: str, expected: str | None) -
         ("EN_us", "en"),
         (" fr ", "fr"),
         ("zh-Hant-TW", "zh"),
+        ("gsw", "gsw"),
+        ("english", None),
+        ("deutsch-DE", None),
         ("", None),
         ("x", None),
         ("123", None),
@@ -289,6 +294,8 @@ def test_language_from_html_lang(
     ("value", "expected"),
     [
         ("2026-03-14", datetime(2026, 3, 14, tzinfo=UTC)),
+        ("2026-03-14T10:30:00+02:00", datetime(2026, 3, 14, tzinfo=UTC)),
+        ("2026-03-14 10:30", datetime(2026, 3, 14, tzinfo=UTC)),
         ("2026-02-30", None),
         ("14.03.2026", None),
         ("", None),
@@ -310,7 +317,7 @@ def test_published_at(
 
 
 def test_defaults() -> None:
-    assert (MAX_CHARS, MIN_CHARS) == (200_000, 200)
+    assert (MAX_CHARS, MIN_CHARS, MAX_INPUT_CHARS) == (200_000, 200, 4_000_000)
 
 
 @pytest.mark.parametrize(
@@ -320,6 +327,85 @@ def test_defaults() -> None:
 def test_invalid_limits_raise_value_error(max_chars: int, min_chars: int) -> None:
     with pytest.raises(ValueError, match="chars"):
         extract_text(fixture("news_article.html"), URL, max_chars=max_chars, min_chars=min_chars)
+
+
+@pytest.mark.parametrize("max_input_chars", [0, -1])
+def test_invalid_input_limit_raises_value_error(max_input_chars: int) -> None:
+    with pytest.raises(ValueError, match="max_input_chars"):
+        extract_text(fixture("news_article.html"), URL, max_input_chars=max_input_chars)
+
+
+def test_overlong_input_raises_before_parsing(monkeypatch: pytest.MonkeyPatch) -> None:
+    def unexpected(*args: object, **kwargs: object) -> None:
+        raise AssertionError("parsed")
+
+    monkeypatch.setattr(extract.trafilatura, "bare_extraction", unexpected)
+    monkeypatch.setattr(extract, "parse_html", unexpected)
+    html = fixture("news_article.html")
+
+    with pytest.raises(ExtractionError) as excinfo:
+        extract_text(html, "https://u:p@example.org/a?t=1", max_input_chars=len(html) - 1)
+
+    assert excinfo.value.reason == "too_large"
+    assert str(excinfo.value) == "too_large: https://example.org/a"
+
+
+def test_input_at_the_limit_is_extracted() -> None:
+    html = fixture("news_article.html")
+
+    result = extract_text(html, URL, max_input_chars=len(html))
+
+    assert ARTICLE_PARAGRAPHS[0] in result.text
+
+
+def test_page_is_not_parsed_when_trafilatura_found_everything(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    trafilatura_returns(
+        monkeypatch, Document(title="T", text="Article text.", date="2026-01-02", language="de")
+    )
+
+    def unexpected(html: str) -> None:
+        raise AssertionError("parsed")
+
+    monkeypatch.setattr(extract, "parse_html", unexpected)
+
+    result = extract_text(page("<p>x</p>"), URL, min_chars=1)
+
+    assert (result.title, result.text, result.language) == ("T", "Article text.", "de")
+
+
+def test_page_is_parsed_once_for_all_fallbacks(
+    no_trafilatura: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[str] = []
+    real = extract.parse_html
+
+    def counting(html: str) -> object:
+        calls.append(html)
+        return real(html)
+
+    monkeypatch.setattr(extract, "parse_html", counting)
+
+    result = extract_text(page("<p>text</p>", head="<title>T</title>", lang="de"), URL, min_chars=1)
+
+    assert (result.title, result.language) == ("T", "de")
+    assert len(calls) == 1
+
+
+def test_trafilatura_failure_is_logged_without_its_message(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    def explode(*args: object, **kwargs: object) -> None:
+        raise ValueError("secret page content")
+
+    monkeypatch.setattr(extract.trafilatura, "bare_extraction", explode)
+
+    with caplog.at_level(logging.DEBUG, logger="invio.sources.extract"):
+        extract_text(fixture("news_article.html"), URL)
+
+    assert "ValueError" in caplog.text
+    assert "secret page content" not in caplog.text
 
 
 @pytest.mark.parametrize(
@@ -351,12 +437,22 @@ def test_large_input_is_extracted_and_truncated() -> None:
     assert len(result.text) <= MAX_CHARS
 
 
-@settings(max_examples=50, deadline=None)
-@given(st.text())
-def test_any_text_gives_a_result_or_extraction_error(html: str) -> None:
+_TAGS = ("p", "div", "article", "nav", "footer", "b", "li", "h1", "script", "title", "br")
+_FRAGMENTS = st.one_of(
+    st.text(max_size=30),
+    st.sampled_from(_TAGS).map(lambda tag: f"<{tag}>"),
+    st.sampled_from(_TAGS).map(lambda tag: f"</{tag}>"),
+    st.sampled_from(("&amp;", "&nbsp;", "&#x1F600;", "<!-- c -->", "\n", "  ", "\u0301")),
+)
+
+
+@settings(max_examples=100, deadline=2_000)
+@given(st.lists(_FRAGMENTS, max_size=60).map("".join), st.integers(1, 80))
+def test_any_html_gives_normalized_text_or_extraction_error(html: str, max_chars: int) -> None:
     try:
-        result = extract_text(html, URL, min_chars=1)
+        result = extract_text(html, URL, min_chars=1, max_chars=max_chars)
     except ExtractionError:
         return
     assert result.text
-    assert "\n\n" not in result.text
+    assert len(result.text) <= max_chars
+    assert extract._normalize(result.text) == result.text  # NFC, collapsed, no blank lines

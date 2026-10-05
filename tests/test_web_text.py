@@ -9,11 +9,11 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 from invio.sources.http import FetchResult
+from invio.sources.text import parse_html
 from invio.sources.web import (
     _content_hash,
     _decode,
     _is_html,
-    _parse,
     _region_text,
     _regions,
     _title,
@@ -23,7 +23,7 @@ URL = "https://example.org/page"
 
 
 def text_of(html: str, selector: str | None = None) -> str:
-    return _region_text(_regions(_parse(html), selector, url=URL))
+    return _region_text(_regions(parse_html(html), selector, url=URL))
 
 
 def hash_of(html: str, selector: str | None = None) -> str:
@@ -132,7 +132,7 @@ def test_selector_may_match_the_body_itself() -> None:
     ],
 )
 def test_title(html: str, expected: str) -> None:
-    assert _title(_parse(html), URL) == expected
+    assert _title(parse_html(html), URL) == expected
 
 
 # --- hash ------------------------------------------------------------------------------------

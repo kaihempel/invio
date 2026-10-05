@@ -16,7 +16,6 @@ import codecs
 import hashlib
 import importlib
 import re
-import unicodedata
 from collections.abc import Iterator, Mapping, Sequence
 from typing import Final, NamedTuple, Protocol, Self
 from urllib.parse import urljoin, urlsplit
@@ -27,8 +26,7 @@ from invio.config.job import WebSource
 from invio.domain import Candidate, url_hash
 from invio.sources.errors import FetchError, RenderUnavailableError, TooLargeError
 from invio.sources.http import FetchResult, NotModified, SafeHttpClient, charset_label
-from invio.sources.text import collapse, node_text, teaser
-from invio.sources.text import parse_html as _parse  # the tests use the old name
+from invio.sources.text import node_text, parse_html, readable, teaser
 from invio.sources.urls import canonical_url, http_url_or_none
 
 __all__ = ["PageRenderer", "RenderedPage", "WebPageSource"]
@@ -220,7 +218,7 @@ class WebPageSource:
 def _candidates(config: WebSource, html: str, *, final_url: str) -> list[Candidate]:
     """Map a decoded document to the source's candidates (the same for static and rendered)."""
     url = str(config.url)
-    tree = _parse(html)
+    tree = parse_html(html)
     regions = _regions(tree, config.selector, url=url)
     page_url = canonical_url(url)
     if config.mode == "links":
@@ -328,12 +326,7 @@ def _region_text(nodes: Sequence[LexborNode]) -> str:
 
     The nodes are joined by a space.
     """
-    return _readable(" ".join(node_text(node) for node in nodes))
-
-
-def _readable(text: str) -> str:
-    """``text`` in NFC with its whitespace collapsed: the form that is hashed and shown."""
-    return collapse(unicodedata.normalize("NFC", text))
+    return readable(" ".join(node_text(node) for node in nodes))
 
 
 def _content_hash(text: str) -> str:
@@ -349,7 +342,7 @@ def _content_hash(text: str) -> str:
 def _title(tree: LexborHTMLParser, fallback: str) -> str:
     """The collapsed ``<title>`` of the document head, else ``fallback``."""
     node = tree.css_first("head > title")
-    title = _readable(node.text()) if node is not None else ""
+    title = readable(node.text()) if node is not None else ""
     return title or fallback
 
 
@@ -379,7 +372,7 @@ def _links(
         seen.add(url)  # a repeated URL gets the same verdict, so the first one decides
         if not (pattern.search(url) if pattern is not None else urlsplit(url).hostname == host):
             continue
-        title = _readable(node_text(anchor))
+        title = readable(node_text(anchor))
         candidates.append(
             Candidate(
                 url=url,
