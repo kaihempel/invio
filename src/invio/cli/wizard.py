@@ -93,6 +93,7 @@ _ID_QUESTIONS: Final = {
 _LIMIT_QUESTIONS: Final = (
     ("max_items_per_source", "Max items per source"),
     ("max_items_per_run", "Max items per run"),
+    ("baseline_items", "Max baseline items per source (first run)"),
     ("max_items_in_notification", "Max items in notification"),
     ("max_llm_tokens_per_run", "Max LLM tokens per run"),
 )

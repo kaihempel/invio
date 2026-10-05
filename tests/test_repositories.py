@@ -150,6 +150,29 @@ def test_latest_status_by_job_newest_run_per_job(db_session: Session) -> None:
     }
 
 
+@pytest.mark.parametrize(
+    ("statuses", "expected"),
+    [
+        ([], False),
+        ([RunStatus.RUNNING, RunStatus.FAILED], False),
+        ([RunStatus.SUCCEEDED], True),
+        ([RunStatus.PARTIAL], True),
+    ],
+    ids=["none", "running-failed", "succeeded", "partial"],
+)
+def test_has_successful_run(db_session: Session, statuses: list[RunStatus], expected: bool) -> None:
+    job = make_job(db_session)
+    for status in statuses:
+        make_run(db_session, job, status=status)
+    assert RunRepository(db_session).has_successful_run(job.id) is expected
+
+
+def test_has_successful_run_ignores_other_jobs(db_session: Session) -> None:
+    job, other = make_job(db_session, "a"), make_job(db_session, "b")
+    make_run(db_session, other, status=RunStatus.SUCCEEDED)
+    assert RunRepository(db_session).has_successful_run(job.id) is False
+
+
 def test_latest_status_by_job_empty(db_session: Session) -> None:
     make_job(db_session, "a")
 
@@ -240,6 +263,117 @@ def test_item_seen_get_and_list(db_session: Session) -> None:
     assert repo.get(9999) is None
     assert repo.list_for_job(job.id) == [one, two]
     assert repo.list_for_job(job.id, status=ItemStatus.FAILED) == [two]
+
+
+def test_item_find_many_is_scoped_to_job_and_keyed_by_hash(db_session: Session) -> None:
+    a, b = make_job(db_session, "a"), make_job(db_session, "b")
+    repo = ItemRepository(db_session)
+    one, _ = repo.add(a.id, make_candidate("https://example.com/1"))
+    repo.add(a.id, make_candidate("https://example.com/2"))
+    repo.add(b.id, make_candidate("https://example.com/3"))
+    hashes = [url_hash(f"https://example.com/{n}") for n in (1, 3, 9)]
+    assert repo.find_many(a.id, hashes) == {one.url_hash: one}
+
+
+def test_item_find_many_empty(db_session: Session) -> None:
+    job = make_job(db_session)
+    assert ItemRepository(db_session).find_many(job.id, []) == {}
+
+
+def test_item_find_many_chunks_large_input(db_session: Session) -> None:
+    job = make_job(db_session)
+    repo = ItemRepository(db_session)
+    for n in range(3):
+        repo.add(job.id, make_candidate(f"https://example.com/{n}"))
+    hashes = [url_hash(f"https://example.com/{n}") for n in range(1200)]
+    found = repo.find_many(job.id, hashes)
+    assert set(found) == {url_hash(f"https://example.com/{n}") for n in range(3)}
+
+
+@pytest.mark.parametrize(("size", "queries"), [(499, 1), (500, 1), (501, 2), (1000, 2), (1001, 3)])
+def test_item_find_many_chunk_boundaries(db_session: Session, size: int, queries: int) -> None:
+    job = make_job(db_session)
+    repo = ItemRepository(db_session)
+    # stored rows sit at both edges of each 500-hash chunk
+    stored = [n for n in (0, 499, 500, 999, 1000) if n < size]
+    for n in stored:
+        repo.add(job.id, make_candidate(f"https://example.com/{n}"))
+    hashes = [url_hash(f"https://example.com/{n}") for n in range(size)]
+    statements: list[str] = []
+
+    def record(conn: object, cursor: object, statement: str, *args: object) -> None:
+        statements.append(statement)
+
+    engine = db_session.get_bind()
+    event.listen(engine, "before_cursor_execute", record)
+    try:
+        found = repo.find_many(job.id, hashes)
+    finally:
+        event.remove(engine, "before_cursor_execute", record)
+
+    assert set(found) == {url_hash(f"https://example.com/{n}") for n in stored}
+    assert len(statements) == queries
+
+
+def test_item_list_waiting(db_session: Session) -> None:
+    job, other = make_job(db_session, "a"), make_job(db_session, "b")
+    first = make_item(db_session, job, "https://example.com/1")
+    make_item(db_session, job, "https://example.com/2", attempts=1)
+    make_item(db_session, job, "https://example.com/3", status=ItemStatus.FAILED)
+    third = make_item(db_session, job, "https://example.com/4")
+    make_item(db_session, other, "https://example.com/5")
+    assert ItemRepository(db_session).list_waiting(job.id) == [first, third]
+
+
+def test_item_mark_taken_links_run_and_increments_attempts(db_session: Session) -> None:
+    job = make_job(db_session)
+    run = make_run(db_session, job)
+    one = make_item(db_session, job, "https://example.com/1")
+    two = make_item(db_session, job, "https://example.com/2", attempts=2)
+    ItemRepository(db_session).mark_taken([one, two], run.id)
+    assert (one.run_id, one.attempts) == (run.id, 1)
+    assert (two.run_id, two.attempts) == (run.id, 3)
+    ItemRepository(db_session).mark_taken([], run.id)
+
+
+def test_item_mark_skipped_sets_status_and_reason(db_session: Session) -> None:
+    job = make_job(db_session)
+    item = make_item(db_session, job)
+    result = ItemRepository(db_session).mark_skipped(
+        item, ItemStatus.SKIPPED_IRRELEVANT, reason="baseline"
+    )
+    assert result is item
+    assert (item.status, item.last_error) == (ItemStatus.SKIPPED_IRRELEVANT, "baseline")
+
+
+def test_item_reset_version_stores_candidate_and_restarts(db_session: Session) -> None:
+    job = make_job(db_session)
+    run = make_run(db_session, job)
+    item = make_item(
+        db_session,
+        job,
+        content_hash="x" * 64,
+        status=ItemStatus.FAILED,
+        attempts=3,
+        last_error="boom",
+        run_id=run.id,
+    )
+    cand = make_candidate(
+        title="New",
+        teaser="t2",
+        content_hash="y" * 64,
+        published_at=datetime(2026, 3, 1, tzinfo=UTC),
+    )
+    result = ItemRepository(db_session).reset_version(item, cand)
+    assert result is item
+    assert (item.content_hash, item.title, item.teaser) == ("y" * 64, "New", "t2")
+    assert item.published_at == datetime(2026, 3, 1, tzinfo=UTC)
+    assert (item.status, item.attempts, item.last_error, item.run_id) == (
+        ItemStatus.NEW,
+        0,
+        None,
+        None,
+    )
 
 
 # --- DigestRepository ----------------------------------------------------------------------
@@ -416,7 +550,11 @@ def test_no_repository_commits(db_session: Session) -> None:
     job = JobRepository(db_session).add(Job(name="a", config={}))
     run = RunRepository(db_session).start(job.id)
     RunRepository(db_session).finish(run, RunStatus.SUCCEEDED)
-    ItemRepository(db_session).add(job.id, make_candidate(), run_id=run.id)
+    items = ItemRepository(db_session)
+    item, _ = items.add(job.id, make_candidate(), run_id=run.id)
+    items.mark_taken([item], run.id)
+    items.mark_skipped(item, ItemStatus.SKIPPED_IRRELEVANT, reason="baseline")
+    items.reset_version(item, make_candidate(content_hash="d" * 64))
     DigestRepository(db_session).add(job.id, "t", "b", [], run_id=run.id)
     n = NotificationRepository(db_session).add(job.id, "email", "a@example.com", run_id=run.id)
     NotificationRepository(db_session).mark(n, NotificationStatus.SENT)

@@ -49,6 +49,7 @@ def test_rejected(job_data: dict[str, Any], path: str, value: Any, message: str)
     [
         "max_items_per_source",
         "max_items_per_run",
+        "baseline_items",
         "max_items_in_notification",
         "max_llm_tokens_per_run",
     ],
@@ -60,6 +61,23 @@ def test_limits_rejected(job_data: dict[str, Any], field: str, value: Any) -> No
     errors = validation_errors(job_data)
 
     assert [loc for loc, _ in errors] == [("limits", field)]
+
+
+def test_baseline_items_default_and_minimum(job_data: dict[str, Any]) -> None:
+    assert JobConfig.model_validate(job_data).limits.baseline_items == 10
+
+    job_data["limits"] = {"baseline_items": 1}
+
+    assert JobConfig.model_validate(job_data).limits.baseline_items == 1
+
+
+def test_baseline_items_rejects_string(job_data: dict[str, Any]) -> None:
+    job_data["limits"] = {"baseline_items": "10"}
+
+    errors = validation_errors(job_data)
+
+    assert [loc for loc, _ in errors] == [("limits", "baseline_items")]
+    assert "valid integer" in errors[0][1]
 
 
 def test_fallback_must_differ(job_data: dict[str, Any]) -> None:

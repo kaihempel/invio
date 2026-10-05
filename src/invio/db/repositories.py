@@ -5,12 +5,13 @@ errors surface immediately, and never commit or roll back (see ``session_scope``
 """
 
 import builtins
+from collections.abc import Collection, Iterable
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import Select, func, select
+from sqlalchemy import Select, exists, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -105,6 +106,16 @@ class RunRepository:
             stmt = stmt.limit(limit)
         return _all(self._session, stmt)
 
+    def has_successful_run(self, job_id: int) -> bool:
+        """Whether the job has any run with status ``succeeded`` or ``partial``."""
+        stmt = select(
+            exists().where(
+                Run.job_id == job_id,
+                Run.status.in_((RunStatus.SUCCEEDED, RunStatus.PARTIAL)),
+            )
+        )
+        return bool(self._session.scalar(stmt))
+
     def latest_status_by_job(self) -> dict[int, RunStatus]:
         """Return ``job_id -> status`` of each job's newest run (one query).
 
@@ -119,6 +130,9 @@ class RunRepository:
         ranked = select(Run.job_id, Run.status, rank).subquery()
         stmt = select(ranked.c.job_id, ranked.c.status).where(ranked.c.rn == 1)
         return {job_id: RunStatus(status) for job_id, status in self._session.execute(stmt)}
+
+
+_FIND_MANY_CHUNK = 500
 
 
 class ItemRepository:
@@ -183,6 +197,61 @@ class ItemRepository:
         if status is not None:
             stmt = stmt.where(Item.status == status)
         return _all(self._session, stmt)
+
+    def find_many(self, job_id: int, url_hashes: Collection[str]) -> dict[str, Item]:
+        """Return the job's stored items for ``url_hashes``, keyed by url_hash (batched IN)."""
+        wanted = builtins.list(url_hashes)
+        found: dict[str, Item] = {}
+        for start in range(0, len(wanted), _FIND_MANY_CHUNK):
+            chunk = wanted[start : start + _FIND_MANY_CHUNK]
+            stmt = select(Item).where(Item.job_id == job_id, Item.url_hash.in_(chunk))
+            for item in self._session.scalars(stmt):
+                found[item.url_hash] = item
+        return found
+
+    def list_waiting(self, job_id: int) -> builtins.list[Item]:
+        """Return the job's items with status ``new`` and 0 attempts, ordered by id."""
+        stmt = (
+            select(Item)
+            .where(Item.job_id == job_id, Item.status == ItemStatus.NEW, Item.attempts == 0)
+            .order_by(Item.id)
+        )
+        return _all(self._session, stmt)
+
+    def reset_version(self, item: Item, candidate: Candidate) -> Item:
+        """Store a new content version and restart processing.
+
+        Sets content_hash/title/teaser/published_at from ``candidate``; status ``new``,
+        attempts 0, last_error ``None``, run_id ``None``.
+        """
+        item.content_hash = candidate.content_hash
+        item.title = candidate.title
+        item.teaser = candidate.teaser
+        item.published_at = candidate.published_at
+        item.status = ItemStatus.NEW
+        item.attempts = 0
+        item.last_error = None
+        item.run_id = None
+        self._session.flush()
+        return item
+
+    def mark_taken(self, items: Iterable[Item], run_id: int) -> None:
+        """Link ``items`` to ``run_id`` and increment each item's attempts by one.
+
+        The read-modify-write increment relies on the per-job scheduler lock (#23) to keep
+        concurrent runs of the same job apart.
+        """
+        for item in items:
+            item.run_id = run_id
+            item.attempts += 1
+        self._session.flush()
+
+    def mark_skipped(self, item: Item, status: ItemStatus, *, reason: str) -> Item:
+        """Set ``status`` and store ``reason`` in ``last_error``."""
+        item.status = status
+        item.last_error = reason
+        self._session.flush()
+        return item
 
 
 class DigestRepository:
