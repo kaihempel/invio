@@ -5,10 +5,14 @@ description = "Invio: CLI-based AI research system"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "aiosmtplib>=4",
     "alembic>=1.20",
     "feedparser>=6.0.14",
     "httpx2>=2.13",
+    "jinja2>=3.1",
+    "markdown-it-py>=3",
     "mistralai>=3.0,<4",
+    "nh3>=0.2.18",
     "pydantic-settings>=2.15.0",
     "pydantic[email]>=2.13",
     "pymysql>=1.2",
@@ -34,6 +38,7 @@ build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
+    "aiosmtpd>=1.4",
     "hypothesis>=6.168.3",
     "jsonschema>=4",
     "mypy>=2.4.0",
@@ -43,6 +48,7 @@ dev = [
     "pytest-asyncio>=1.4.0",
     "pytest-cov>=7.1.0",
     "ruff>=0.16.10",
+    "trustme>=1.2",
     "types-pyyaml>=6.0.12.20260906",
 ]
 
@@ -75,6 +81,9 @@ select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF", "TID251"]
 "tests/test_source_rss.py" = ["F811"]
 "tests/test_source_web*.py" = ["F811"]
 "tests/test_http_admission.py" = ["F811"]
+# Fixtures from ``tests/smtp_helpers.py`` are imported and used as parameters.
+"tests/test_notify*.py" = ["F811", "RUF001"]
+"tests/test_cli_notify.py" = ["F811", "RUF001"]
 
 [tool.ruff.format]
 quote-style = "double"
@@ -96,6 +105,8 @@ testpaths = ["tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 addopts = ["-ra", "--strict-markers", "--strict-config"]
+# The test SMTP server requires AUTH without TLS on purpose (tests/smtp_helpers.py).
+filterwarnings = ["ignore:Requiring AUTH while not requiring TLS:UserWarning"]
 markers = [
     "live: real calls to external LLM providers (skipped unless -m names live, e.g. -m live)",
     "browser: real headless-Chromium tests (skipped when Chromium cannot be launched)",

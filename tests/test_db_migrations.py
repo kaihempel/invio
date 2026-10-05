@@ -62,17 +62,17 @@ def _tables(engine: Engine) -> set[str]:
 
 
 def test_upgrade_creates_all_tables_and_reports_revision(migration_engine: Engine) -> None:
-    assert _upgrade(migration_engine) == "0002"
+    assert _upgrade(migration_engine) == "0003"
 
     assert _tables(migration_engine) == APP_TABLES | {"alembic_version"}
     with migration_engine.begin() as conn:
-        assert current_revision(conn) == "0002"
+        assert current_revision(conn) == "0003"
 
 
 def test_second_upgrade_is_a_noop(migration_engine: Engine) -> None:
     _upgrade(migration_engine)
 
-    assert _upgrade(migration_engine) == "0002"
+    assert _upgrade(migration_engine) == "0003"
     assert _tables(migration_engine) == APP_TABLES | {"alembic_version"}
 
 
@@ -202,8 +202,8 @@ def test_upgrade_to_unknown_revision_fails(migration_engine: Engine) -> None:
 def test_upgrade_with_url_creates_its_own_engine(tmp_path: Path) -> None:
     url = f"sqlite:///{tmp_path}/own.sqlite"
 
-    assert upgrade(alembic_config(url=url)) == "0002"
-    assert upgrade(alembic_config(url=url)) == "0002"
+    assert upgrade(alembic_config(url=url)) == "0003"
+    assert upgrade(alembic_config(url=url)) == "0003"
     downgrade(alembic_config(url=url))
 
     engine = create_db_engine(url)
@@ -275,3 +275,58 @@ def test_connection_type_is_sqlalchemy_connection(migration_engine: Engine) -> N
     with migration_engine.connect() as conn:
         assert isinstance(conn, Connection)
         assert current_revision(conn) is None
+
+
+def _notification_columns(engine: Engine) -> dict[str, dict[str, object]]:
+    return {str(c["name"]): dict(c) for c in inspect(engine).get_columns("notifications")}
+
+
+def _notification_checks(engine: Engine) -> set[str]:
+    return {str(c["name"]) for c in inspect(engine).get_check_constraints("notifications")}
+
+
+def test_0003_adds_attempt_columns_and_backfills_existing_rows(migration_engine: Engine) -> None:
+    _upgrade(migration_engine, "0002")
+    with migration_engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO jobs (name, enabled, created_at, updated_at) "
+                "VALUES ('j', 1, '2026-10-04 12:00:00', '2026-10-04 12:00:00')"
+            )
+        )
+        conn.execute(
+            text(
+                "INSERT INTO notifications (job_id, channel, recipient, status, created_at) "
+                "VALUES ((SELECT id FROM jobs WHERE name = 'j'), 'email', 'a@example.org', "
+                "'pending', '2026-10-04 12:00:00')"
+            )
+        )
+    assert "attempts" not in _notification_columns(migration_engine)
+
+    _upgrade(migration_engine, "0003")
+
+    columns = _notification_columns(migration_engine)
+    assert columns["attempts"]["nullable"] is False
+    assert str(columns["attempts"]["default"]).strip("'()") == "0"
+    assert columns["last_attempt_at"]["nullable"] is True
+    with migration_engine.connect() as conn:
+        row = conn.execute(text("SELECT attempts, last_attempt_at FROM notifications")).one()
+    assert tuple(row) == (0, None)
+
+
+def test_0003_downgrade_removes_columns_and_keeps_status_check(migration_engine: Engine) -> None:
+    _upgrade(migration_engine)
+
+    _downgrade(migration_engine, "0002")
+
+    columns = _notification_columns(migration_engine)
+    assert "attempts" not in columns
+    assert "last_attempt_at" not in columns
+    if uses_sqlite():
+        assert "ck_notifications_notification_status" in _notification_checks(migration_engine)
+
+    _upgrade(migration_engine)
+
+    assert {"attempts", "last_attempt_at"} <= set(_notification_columns(migration_engine))
+    if uses_sqlite():
+        assert "ck_notifications_notification_status" in _notification_checks(migration_engine)

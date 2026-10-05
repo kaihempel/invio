@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>{{ subject }}</title>
+</head>
+<body style="margin:0;padding:16px;background:#f5f5f5;font-family:Helvetica,Arial,sans-serif;color:#222;">
+<div style="max-width:680px;margin:0 auto;padding:24px;background:#ffffff;line-height:1.5;">
+<h2 style="margin:0 0 4px 0;font-size:20px;">{{ job_name }}</h2>
+<p style="margin:0 0 24px 0;color:#666;font-size:14px;">{{ date }}</p>
+{% if is_empty %}
+<p>No new items were found for this run.</p>
+{% else %}
+{{ body_html }}
+{% endif %}
+<footer style="margin-top:32px;padding-top:12px;border-top:1px solid #ddd;color:#888;font-size:12px;">
+Items found: {{ stats.items_found }} · Included: {{ stats.items_included }} · Run time: {{ stats.duration }}
+</footer>
+</div>
+</body>
+</html>

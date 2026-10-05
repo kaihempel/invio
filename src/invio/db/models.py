@@ -208,6 +208,9 @@ class Notification(Base):
     error: Mapped[str | None] = mapped_column(Text, default=None)
     payload: Mapped[dict[str, Any] | None] = mapped_column(JSON(none_as_null=True), default=None)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+    # Send attempts started so far and the start of the latest one (see NotificationRepository).
+    attempts: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"))
+    last_attempt_at: Mapped[datetime | None] = mapped_column(UTCDateTime, default=None)
 
 
 class LlmUsage(Base):
