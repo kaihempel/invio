@@ -97,3 +97,7 @@ Coverage must stay ≥ 95 %.
   or fullwidth `＜/document＞` are passed through unchanged. They are not real delimiters, but a
   model could read them as such; the schema check still limits the impact to a valid 0..1 score.
 - The title is sent in full (FR-005); its length is bounded only by `Item.title` (`String(1000)`).
+- Unavailable and rate-limit errors fail only the current item (FR-009), so a provider outage
+  marks the remaining items `failed` one by one, each after its own timeout. A circuit breaker
+  (stop the step after N consecutive systemic errors) and a retry policy for `failed` items
+  belong with the graph wiring.

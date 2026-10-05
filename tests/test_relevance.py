@@ -3,6 +3,7 @@
 import json
 import logging
 import re
+import time
 from collections.abc import Callable
 from decimal import Decimal
 from pathlib import Path
@@ -98,6 +99,7 @@ def test_result_score_bounds_accepted(score: float) -> None:
         pytest.param('{"score": NaN, "reason": "r", "key_points": []}', id="nan"),
         pytest.param('{"score": Infinity, "reason": "r", "key_points": []}', id="inf"),
         pytest.param('{"score": true, "reason": "r", "key_points": []}', id="bool"),
+        pytest.param('{"score": "0.9", "reason": "r", "key_points": []}', id="string"),
         pytest.param('{"score": 0.5, "reason": "   ", "key_points": []}', id="blank-reason"),
         pytest.param('{"score": 0.5, "reason": "", "key_points": []}', id="empty-reason"),
         pytest.param('{"score": 0.5, "key_points": []}', id="missing-reason"),
@@ -548,6 +550,22 @@ def test_open_bracket_as_last_kept_character() -> None:
     _, user = build_messages("t", None, body, "d")
     _assert_one_block(user)
     assert user.endswith(f"{_quoted('[')}\n[truncated]</content>\n</document>")
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param("<" + " " * 200_000 + "x", id="one-long-run"),
+        pytest.param(("<" + " " * 2_000 + "x") * 100, id="many-runs"),
+        pytest.param("</" + " " * 200_000 + "x", id="after-slash"),
+    ],
+)
+def test_neutralise_is_linear_on_whitespace_runs(body: str) -> None:
+    # The whole raw_content is neutralised before the cut, so a page must not stall the step.
+    # Two adjacent whitespace runs in the pattern took minutes on the first input.
+    start = time.perf_counter()
+    build_messages("t", None, body, "d")
+    assert time.perf_counter() - start < 1.0
 
 
 def test_ordinary_angle_brackets_are_not_altered() -> None:

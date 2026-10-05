@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Annotated, Final
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 from invio.config.job import SearchConfig
 from invio.db.models import Item
@@ -59,17 +59,10 @@ class RelevanceResult(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    score: float = Field(ge=0, le=1, allow_inf_nan=False)
+    # Strict: a JSON number only. ``true`` or ``"0.9"`` would otherwise coerce to a score.
+    score: float = Field(ge=0, le=1, allow_inf_nan=False, strict=True)
     reason: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
     key_points: list[str]
-
-    @field_validator("score", mode="before")
-    @classmethod
-    def _not_bool(cls, value: object) -> object:
-        # ``True`` would otherwise coerce to 1.0 and read as a perfect score.
-        if isinstance(value, bool):
-            raise ValueError("score must be a number, not a boolean")
-        return value
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
@@ -107,7 +100,9 @@ _OPEN: Final = chr(0x2039)  # single left angle quote, replaces "<" in neutralis
 _CLOSE: Final = chr(0x203A)  # single right angle quote, replaces ">" in neutralised tags
 # Any opening or closing delimiter tag, also with attributes, spaces around the slash or
 # trailing text, and also unterminated (no ">"), which the template's own tag would complete.
-_DELIMITER = re.compile(r"<\s*/?\s*(?:document|title|content)\b[^<>]*>?", re.IGNORECASE)
+# Each whitespace run has its own anchor ("<" or "/"): two adjacent runs would backtrack
+# quadratically on "<" followed by a long run of spaces.
+_DELIMITER = re.compile(r"<\s*(?:/\s*)?(?:document|title|content)\b[^<>]*>?", re.IGNORECASE)
 
 
 def _neutralise(text: str) -> str:

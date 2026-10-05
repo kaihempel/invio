@@ -19,7 +19,7 @@ PURPOSE: Final = "relevance"  # llm_usage.purpose
 
 ```python
 class RelevanceResult(BaseModel):  # extra="forbid"
-    score: float  # 0..1, finite, no bool
+    score: float  # strict JSON number (no bool, no numeric string), 0..1, finite
     reason: str  # non-blank
     key_points: list[str]
 
@@ -82,6 +82,11 @@ async def score_items(items: Iterable[Item], ctx: ScoringContext) -> list[Releva
 - Scores sequentially in input order; one outcome per item, same order.
 - A per-item failure never stops the loop; a propagating error stops it (items already
   scored keep their flushed state).
+- Transactions belong to the caller: commit after a normal return. When an error propagates,
+  the items scored before it (and their `llm_usage` rows) are flushed but not committed; the
+  caller decides whether to commit them (keep the spent tokens on record) or roll back.
+- Delimiter neutralisation matches ASCII `<`/`>` only; look-alikes pass through (see
+  `context.md`, Known limitations). The schema check is the backstop.
 
 ## Repository additions (`invio.db.repositories.ItemRepository`)
 
