@@ -203,6 +203,24 @@ class ItemRepository:
         """Return whether the job already stores an item with ``url_hash``."""
         return self._find(job_id, url_hash) is not None
 
+    def set_status(self, item: Item, status: ItemStatus) -> None:
+        """Set the item's processing status and flush."""
+        item.status = status
+        self._session.flush()
+
+    def set_relevance(self, item: Item, relevance: Decimal, status: ItemStatus) -> None:
+        """Store relevance and status, clear last_error, flush."""
+        item.relevance = relevance
+        item.status = status
+        item.last_error = None
+        self._session.flush()
+
+    def mark_failed(self, item: Item, error: str) -> None:
+        """Set status FAILED and last_error, flush (relevance unchanged)."""
+        item.status = ItemStatus.FAILED
+        item.last_error = error
+        self._session.flush()
+
     def list_for_job(self, job_id: int, *, status: ItemStatus | None = None) -> builtins.list[Item]:
         """Return the job's items by id, optionally filtered by status."""
         stmt = select(Item).where(Item.job_id == job_id).order_by(Item.id)
