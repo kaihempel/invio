@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from typing import Final, Literal
 from urllib.parse import quote, unquote, urlsplit
 
-import httpx
+import httpx2
 
 from invio.sources.errors import BlockedError, FetchError
 from invio.sources.netguard import DEFAULT_PORTS, Origin
@@ -50,7 +50,7 @@ _TRANSIENT_REASONS: Final = frozenset({"timeout", "connection_failed", "dns_fail
 # pattern operators); everything else is compared in its percent-encoded form.
 _PATH_SAFE: Final = "/?&=:;@!,+*$'()~"
 
-RobotsFetch = Callable[[httpx.URL], Awaitable[tuple[int, bytes]]]
+RobotsFetch = Callable[[httpx2.URL], Awaitable[tuple[int, bytes]]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,9 +140,9 @@ class RobotsCache:
         return RobotsPolicy("disallow_all")
 
     @staticmethod
-    def _robots_url(origin: Origin) -> httpx.URL:
+    def _robots_url(origin: Origin) -> httpx2.URL:
         port = None if origin.port == DEFAULT_PORTS[origin.scheme] else origin.port
-        return httpx.URL(scheme=origin.scheme, host=origin.host, port=port, path="/robots.txt")
+        return httpx2.URL(scheme=origin.scheme, host=origin.host, port=port, path="/robots.txt")
 
 
 @dataclass

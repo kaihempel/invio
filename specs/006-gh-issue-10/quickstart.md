@@ -1,13 +1,13 @@
 # Quickstart / Validation Guide: Safe Shared HTTP Client (gh-issue-10)
 
 Proves the feature end-to-end. No internet access is needed; every test runs against loopback
-servers or `httpx.MockTransport`. API details: [contracts/python-api.md](contracts/python-api.md);
+servers or `httpx2.MockTransport`. API details: [contracts/python-api.md](contracts/python-api.md);
 entities and defaults: [data-model.md](data-model.md).
 
 ## Prerequisites
 
 ```bash
-uv sync --locked          # httpx is added to [project.dependencies] by this feature
+uv sync --locked          # httpx2 is a runtime dependency (shared with mistralai)
 ```
 
 ## 1. Quality gates (same as CI)

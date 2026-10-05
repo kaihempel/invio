@@ -77,7 +77,7 @@ with run_context(job="digest") as run_id:
 ### Fetching sources safely
 
 Source fetchers get web content only through `invio.sources.http.SafeHttpClient`; importing
-`httpx` or `urllib.request` in `src/invio/sources/` outside the client modules fails `ruff check`.
+`httpx2` or `urllib.request` in `src/invio/sources/` outside the client modules fails `ruff check`.
 
 ```python
 from invio.sources.http import HttpClientConfig, SafeHttpClient

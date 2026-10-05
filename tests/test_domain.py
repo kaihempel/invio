@@ -75,7 +75,7 @@ def test_replace_returns_updated_copy() -> None:
 def test_import_loads_no_heavy_dependencies() -> None:
     code = (
         "import sys, invio.domain; "
-        "bad = {'pydantic','yaml','sqlalchemy','httpx','requests','langgraph'} "
+        "bad = {'pydantic','yaml','sqlalchemy','httpx2','requests','langgraph'} "
         "& {m.split('.')[0] for m in sys.modules}; "
         "sys.exit(sorted(bad) or 0)"
     )

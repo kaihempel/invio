@@ -2,7 +2,7 @@
 
 from collections.abc import Callable
 
-import httpx
+import httpx2
 import pytest
 from pydantic import ValidationError
 
@@ -342,8 +342,8 @@ async def test_malformed_redirect_target_is_invalid_response(
 
 
 async def test_other_protocol_errors_are_connection_failed() -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        raise httpx.RemoteProtocolError("Server disconnected without sending a response.")
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        raise httpx2.RemoteProtocolError("Server disconnected without sending a response.")
 
     client = SafeHttpClient(
         HttpClientConfig(respect_robots=False, host_interval=0.01),
@@ -369,7 +369,7 @@ def test_non_public_allowance_is_not_configurable() -> None:
 
 
 def dual_stack_client(
-    handler: Callable[[httpx.Request], httpx.Response],
+    handler: Callable[[httpx2.Request], httpx2.Response],
 ) -> tuple[SafeHttpClient, RecordingTransport]:
     transport = RecordingTransport(handler)
     client = SafeHttpClient(
@@ -380,14 +380,14 @@ def dual_stack_client(
     return client, transport
 
 
-@pytest.mark.parametrize("error", [httpx.ConnectError, httpx.ConnectTimeout])
+@pytest.mark.parametrize("error", [httpx2.ConnectError, httpx2.ConnectTimeout])
 async def test_unreachable_first_address_falls_back_to_the_next(
-    error: type[httpx.TransportError],
+    error: type[httpx2.TransportError],
 ) -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         if request.url.host == "2606:4700::1111":
             raise error("no route to host")
-        return httpx.Response(200, content=b"ok")
+        return httpx2.Response(200, content=b"ok")
 
     client, transport = dual_stack_client(handler)
     async with client:
@@ -400,8 +400,8 @@ async def test_unreachable_first_address_falls_back_to_the_next(
 
 
 async def test_every_address_unreachable_is_connection_failed() -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        raise httpx.ConnectError("no route to host")
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        raise httpx2.ConnectError("no route to host")
 
     client, transport = dual_stack_client(handler)
     async with client:
@@ -413,8 +413,8 @@ async def test_every_address_unreachable_is_connection_failed() -> None:
 
 
 async def test_failure_after_connecting_is_not_retried_on_another_address() -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        raise httpx.ReadError("connection reset")
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        raise httpx2.ReadError("connection reset")
 
     client, transport = dual_stack_client(handler)
     async with client:
@@ -440,8 +440,8 @@ async def test_cookies_are_never_stored_or_sent(server: LoopbackServer) -> None:
 
 
 async def test_cookies_do_not_cross_between_hosts_on_one_address() -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, headers={"Set-Cookie": "session=abc"}, content=b"x")
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(200, headers={"Set-Cookie": "session=abc"}, content=b"x")
 
     transport = RecordingTransport(handler)
     shared = ["93.184.216.34"]

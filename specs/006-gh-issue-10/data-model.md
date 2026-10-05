@@ -38,7 +38,7 @@ Result of a successful guard check for one hop.
 
 | Field | Type | Meaning |
 |-------|------|---------|
-| `url` | `httpx.URL` | logical URL (original hostname) |
+| `url` | `httpx2.URL` | logical URL (original hostname) |
 | `origin` | `Origin` | key for policies |
 | `addresses` | `tuple[IPv4Address \| IPv6Address, ...]` | validated addresses in resolver order; the connection is pinned to the first reachable one |
 

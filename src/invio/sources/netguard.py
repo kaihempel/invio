@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from ipaddress import IPv4Address, IPv4Network, IPv6Address, IPv6Network, ip_address
 from typing import Final, Literal, NamedTuple, Protocol
 
-import httpx
+import httpx2
 
 from invio.sources.errors import BlockedError, BlockReason, FetchError
 
@@ -69,7 +69,7 @@ class GuardedTarget:
     ``addresses`` keeps the resolver's order and is never empty; the client tries them in turn.
     """
 
-    url: httpx.URL
+    url: httpx2.URL
     origin: Origin
     addresses: tuple[IPv4Address | IPv6Address, ...]
 
@@ -98,13 +98,13 @@ def is_public_address(addr: IPv4Address | IPv6Address) -> bool:
     return addr.is_global and not addr.is_multicast
 
 
-def check_scheme(url: httpx.URL) -> None:
+def check_scheme(url: httpx2.URL) -> None:
     """Raise :class:`BlockedError` unless ``url`` is http or https."""
     if url.scheme.lower() not in DEFAULT_PORTS:
         raise BlockedError(BlockReason.UNSUPPORTED_SCHEME, url=str(url))
 
 
-def origin_of(url: httpx.URL) -> Origin:
+def origin_of(url: httpx2.URL) -> Origin:
     """The :class:`Origin` of ``url`` (host lower-cased, default port filled in)."""
     scheme: Literal["http", "https"] = "https" if url.scheme.lower() == "https" else "http"
     # raw_host is the ASCII (IDNA) form, which is what gets resolved and sent as SNI.
@@ -112,7 +112,7 @@ def origin_of(url: httpx.URL) -> Origin:
 
 
 async def guard_url(
-    url: httpx.URL,
+    url: httpx2.URL,
     resolver: Resolver,
     allow_networks: Iterable[IPv4Network | IPv6Network],
 ) -> GuardedTarget:
@@ -146,7 +146,7 @@ async def guard_url(
 
 
 def _parse_literal(host: str) -> IPv4Address | IPv6Address | None:
-    # httpx hosts carry no brackets, so an IPv6 literal parses as it is.
+    # httpx2 hosts carry no brackets, so an IPv6 literal parses as it is.
     try:
         return ip_address(host)
     except ValueError:

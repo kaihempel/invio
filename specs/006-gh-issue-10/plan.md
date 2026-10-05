@@ -6,7 +6,7 @@
 
 ## Summary
 
-Add `invio.sources.http.SafeHttpClient`, an async wrapper around `httpx.AsyncClient` that every
+Add `invio.sources.http.SafeHttpClient`, an async wrapper around `httpx2.AsyncClient` that every
 source fetcher will use. Each `get()` runs through one pipeline per redirect hop:
 
 1. **Scheme + SSRF guard** — only `http`/`https`; resolve the host; reject if any address is not
@@ -23,20 +23,20 @@ source fetcher will use. Each `get()` runs through one pipeline per redirect hop
    client), other 4xx/5xx → `FetchError`; typed `BlockedError` / `TooLargeError` subclasses.
 
 Limits come from new `INVIO_HTTP_*` settings. Tests use loopback `http.server` instances and
-`httpx.MockTransport` with a fake resolver — no internet. Details: [research.md](research.md).
+`httpx2.MockTransport` with a fake resolver — no internet. Details: [research.md](research.md).
 
 ## Technical Context
 
 **Language/Version**: Python 3.12+ (uv-managed)
 
-**Primary Dependencies**: **httpx `>=0.28`** (new runtime dependency, justified in R1); stdlib
+**Primary Dependencies**: **httpx2 `>=2.13`** (runtime dependency shared with `mistralai`, see R1); stdlib
 `ipaddress`, `asyncio`, `urllib.robotparser`; Pydantic v2 / pydantic-settings (existing).
 
 **Storage**: N/A — all caches in memory per client instance; no schema change.
 
 **Testing**: pytest + pytest-asyncio (`asyncio_mode = "auto"`, existing), Hypothesis
 (existing) for the address classifier; threaded `http.server` on `127.0.0.1` and
-`httpx.MockTransport`; no new test dependency.
+`httpx2.MockTransport`; no new test dependency.
 
 **Target Platform**: Linux server (cron/systemd) and macOS for development.
 
@@ -58,13 +58,13 @@ plus tests.
 
 | Principle | Assessment | Status |
 |-----------|------------|--------|
-| I. Strict contracts at boundaries | URLs are parsed with `httpx.URL` and checked before use; `HttpClientConfig` is a frozen Pydantic model with `extra="forbid"`; new settings validated (`gt=0`, finite) and fail fast with field names. Errors/results are typed and defined once in `invio.sources.http`. | ✅ |
+| I. Strict contracts at boundaries | URLs are parsed with `httpx2.URL` and checked before use; `HttpClientConfig` is a frozen Pydantic model with `extra="forbid"`; new settings validated (`gt=0`, finite) and fail fast with field names. Errors/results are typed and defined once in `invio.sources.http`. | ✅ |
 | II. CLI-first | No user-facing command is added; this is an adapter used by future fetchers that are reached via `invio` jobs. Settings are documented. | ✅ (N/A for commands) |
 | III. Test-covered behaviour | Every acceptance criterion and FR maps to tests (quickstart table); unit tests use loopback servers / MockTransport only; rate-limit assertions are lower bounds on small intervals to stay deterministic. | ✅ |
-| IV. Quality gates mirror CI | ruff, ruff format, mypy strict over `src/`, pytest; `uv.lock` updated with httpx, CI installs `--locked`. No `Any`/`type: ignore` planned except a justified, narrow one if `RobotFileParser` typing requires it. | ✅ |
+| IV. Quality gates mirror CI | ruff, ruff format, mypy strict over `src/`, pytest; `uv.lock` updated with httpx2, CI installs `--locked`. No `Any`/`type: ignore` planned except a justified, narrow one if `RobotFileParser` typing requires it. | ✅ |
 | V. Secrets & observability | URLs are redacted (userinfo stripped) in errors and logs; request headers never logged; blocked/failed fetches logged as structured events with `host`, `reason`, `url`; `trust_env=False` keeps proxy credentials out of play. | ✅ |
-| Dependency direction | `sources` imports only `config`, `log` and stdlib/httpx. `redact()` moves from `cli.source_check` to `sources.urls` so `sources` never imports `cli`. | ✅ |
-| New runtime dependency justified | httpx — see R1; to be repeated in the PR description. | ✅ |
+| Dependency direction | `sources` imports only `config`, `log` and stdlib/httpx2. `redact()` moves from `cli.source_check` to `sources.urls` so `sources` never imports `cli`. | ✅ |
+| New runtime dependency justified | httpx2 — see R1; to be repeated in the PR description. | ✅ |
 | Simplicity first | No retries, no persistent cache, no proxy support, no HEAD/POST; four focused modules instead of one 500-line file. | ✅ |
 | Docs updated with user-facing config | README "Settings" section and `.env.example` get the `INVIO_HTTP_*` keys. | ✅ |
 
@@ -140,7 +140,7 @@ decided for #9). Helpers are split by concern so each can be tested in isolation
 - **Concurrency**: robots fetch per origin guarded by its own `asyncio.Lock` so concurrent first
   requests trigger exactly one robots.txt request.
 - **Timeouts**: `asyncio.timeout(total_timeout)` wraps send+read for one hop, not the limiter
-  wait; `httpx.TimeoutException` and `TimeoutError` both map to `FetchError("timeout")`.
+  wait; `httpx2.TimeoutException` and `TimeoutError` both map to `FetchError("timeout")`.
 
 ## Risks
 
@@ -149,7 +149,7 @@ decided for #9). Helpers are split by concern so each can be tested in isolation
 | `RobotFileParser` uses first-match rather than RFC 9309 longest-match | Accept for now; tests use unambiguous rules; swap to `protego` later if needed (R6). |
 | Decompression chunk can exceed the remaining budget | Only gzip/deflate accepted; documented as accepted risk (R5). |
 | Timing-based rate-limit tests flaky on slow CI | Assert lower bounds only, intervals ≥ 0.2 s, no upper-bound assertions except a generous one for cross-origin independence. |
-| `sni_hostname` relies on an httpcore extension | Verified in httpcore 1.0.9; covered by a MockTransport test asserting the extension is set; declare `httpx>=0.28` and rely on `uv.lock` for the exact version. |
+| `sni_hostname` relies on an httpcore2 extension | Verified in httpcore2 2.13.1; covered by a MockTransport test asserting the extension is set; declare `httpx2>=2.13` and rely on `uv.lock` for the exact version. |
 
 ## Complexity Tracking
 

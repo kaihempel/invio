@@ -84,7 +84,7 @@ def test_quickstart_end_to_end(tmp_path: Path, capsys: pytest.CaptureFixture[str
     # Step 6: the domain records import without heavy dependencies (SC-006).
     code = (
         "import sys, invio.domain; "
-        "bad = {'pydantic','yaml','sqlalchemy','httpx','requests','email_validator'} "
+        "bad = {'pydantic','yaml','sqlalchemy','httpx2','requests','email_validator'} "
         "& {m.split('.')[0] for m in sys.modules}; "
         "sys.exit(sorted(bad) or 0)"
     )

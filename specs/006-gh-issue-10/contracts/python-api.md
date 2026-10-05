@@ -21,7 +21,7 @@ class SafeHttpClient:
         *,
         allow_networks: Iterable[IPv4Network | IPv6Network] = (),  # TEST ONLY (FR-010)
         resolver: Resolver | None = None,  # TEST ONLY; default: loop.getaddrinfo
-        transport: httpx.AsyncBaseTransport | None = None,  # TEST ONLY (MockTransport)
+        transport: httpx2.AsyncBaseTransport | None = None,  # TEST ONLY (MockTransport)
     ) -> None: ...
     async def __aenter__(self) -> Self: ...
     async def __aexit__(self, *exc: object) -> None: ...  # closes the pool

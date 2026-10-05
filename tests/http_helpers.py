@@ -15,7 +15,7 @@ from collections.abc import AsyncIterator, Callable, Iterator
 from dataclasses import dataclass, field
 from ipaddress import IPv4Network, IPv6Network, ip_network
 
-import httpx
+import httpx2
 import pytest
 
 __all__ = [
@@ -227,7 +227,7 @@ class FakeResolver:
         return list(queue.popleft() if len(queue) > 1 else queue[0])
 
 
-class _RawStream(httpx.AsyncByteStream):
+class _RawStream(httpx2.AsyncByteStream):
     """An unread body, delivered in network-sized chunks like a real connection."""
 
     def __init__(self, body: bytes) -> None:
@@ -238,24 +238,24 @@ class _RawStream(httpx.AsyncByteStream):
             yield self._body[start : start + 16_384]
 
 
-class RecordingTransport(httpx.AsyncBaseTransport):
-    """``httpx.MockTransport`` that also logs every request it is asked to send.
+class RecordingTransport(httpx2.AsyncBaseTransport):
+    """``httpx2.MockTransport`` that also logs every request it is asked to send.
 
-    A response built with ``content=`` is read (and decoded) by httpx on creation; it is handed
+    A response built with ``content=`` is read (and decoded) by httpx2 on creation; it is handed
     on as an unread raw stream instead, so the client decodes it as it would a network body.
     """
 
-    def __init__(self, handler: Callable[[httpx.Request], httpx.Response]) -> None:
-        self.requests: list[httpx.Request] = []
-        self._inner = httpx.MockTransport(handler)
+    def __init__(self, handler: Callable[[httpx2.Request], httpx2.Response]) -> None:
+        self.requests: list[httpx2.Request] = []
+        self._inner = httpx2.MockTransport(handler)
 
-    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+    async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
         self.requests.append(request)
         response = await self._inner.handle_async_request(request)
-        if not isinstance(response.stream, httpx.ByteStream):
+        if not isinstance(response.stream, httpx2.ByteStream):
             return response
         raw = b"".join([chunk async for chunk in response.stream])
-        return httpx.Response(
+        return httpx2.Response(
             response.status_code,
             headers=response.headers,
             stream=_RawStream(raw),

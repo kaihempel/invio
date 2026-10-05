@@ -3,7 +3,7 @@
 import asyncio
 import logging
 
-import httpx
+import httpx2
 import pytest
 
 from invio.sources.http import (
@@ -26,8 +26,8 @@ from tests.http_helpers import (
 PUBLIC = "93.184.216.34"
 
 
-def ok_handler(request: httpx.Request) -> httpx.Response:
-    return httpx.Response(200, content=b"ok")
+def ok_handler(request: httpx2.Request) -> httpx2.Response:
+    return httpx2.Response(200, content=b"ok")
 
 
 def config(**overrides: object) -> HttpClientConfig:
@@ -152,10 +152,10 @@ async def test_rebinding_after_validation_cannot_redirect_the_connection() -> No
 
 
 async def test_resolver_is_consulted_once_per_hop() -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         if request.url.path == "/a":
-            return httpx.Response(302, headers={"Location": "/b"})
-        return httpx.Response(200, content=b"ok")
+            return httpx2.Response(302, headers={"Location": "/b"})
+        return httpx2.Response(200, content=b"ok")
 
     resolver = FakeResolver({"example.org": [PUBLIC]})
 
@@ -171,13 +171,13 @@ async def test_connections_are_not_shared_between_host_names(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     created: list[dict[str, object]] = []
-    real = httpx.AsyncClient
+    real = httpx2.AsyncClient
 
-    def spy(*args: object, **kwargs: object) -> httpx.AsyncClient:
+    def spy(*args: object, **kwargs: object) -> httpx2.AsyncClient:
         created.append(kwargs)
         return real(*args, **kwargs)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(httpx, "AsyncClient", spy)
+    monkeypatch.setattr(httpx2, "AsyncClient", spy)
     transport = RecordingTransport(ok_handler)
     resolver = FakeResolver({"a.example": [PUBLIC], "b.example": [PUBLIC]})
 
@@ -186,7 +186,7 @@ async def test_connections_are_not_shared_between_host_names(
         await client.get("https://b.example/")
 
     limits = created[0]["limits"]
-    assert isinstance(limits, httpx.Limits)
+    assert isinstance(limits, httpx2.Limits)
     assert limits.max_keepalive_connections == 0
     assert [r.extensions["sni_hostname"] for r in transport.requests] == ["a.example", "b.example"]
 
@@ -279,10 +279,10 @@ async def test_userinfo_is_stripped_from_result_and_never_sent() -> None:
 
 
 async def test_credentials_are_not_forwarded_to_another_origin() -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         if request.headers["Host"] == "a.example":
-            return httpx.Response(302, headers={"Location": "http://b.example/x"})
-        return httpx.Response(200, content=b"ok")
+            return httpx2.Response(302, headers={"Location": "http://b.example/x"})
+        return httpx2.Response(200, content=b"ok")
 
     transport = RecordingTransport(handler)
     resolver = FakeResolver({"a.example": [PUBLIC], "b.example": [PUBLIC]})
@@ -300,10 +300,10 @@ async def test_credentials_are_not_forwarded_to_another_origin() -> None:
 
 
 async def test_large_redirect_body_is_not_read() -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         if request.url.path == "/a":
-            return httpx.Response(302, headers={"Location": "/b"}, content=b"x" * 5000)
-        return httpx.Response(200, content=b"ok")
+            return httpx2.Response(302, headers={"Location": "/b"}, content=b"x" * 5000)
+        return httpx2.Response(200, content=b"ok")
 
     resolver = FakeResolver({"example.org": [PUBLIC]})
 
@@ -330,8 +330,8 @@ async def test_slow_dns_is_a_timeout() -> None:
 
 
 async def test_corrupt_content_encoding_is_invalid_response() -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, headers={"Content-Encoding": "gzip"}, content=b"not gzip")
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(200, headers={"Content-Encoding": "gzip"}, content=b"not gzip")
 
     resolver = FakeResolver({"example.org": [PUBLIC]})
 
@@ -394,8 +394,8 @@ async def test_userinfo_without_slashes_never_leaks(
 
 
 async def test_userinfo_in_redirect_location_never_leaks() -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(302, headers={"Location": "foo:secret@host"})
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(302, headers={"Location": "foo:secret@host"})
 
     resolver = FakeResolver({"example.org": [PUBLIC]})
 

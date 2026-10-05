@@ -4,18 +4,25 @@ All Technical Context unknowns are resolved below. Each entry: Decision / Ration
 
 ## R1 — HTTP library
 
-- **Decision**: Add **httpx** (`>=0.28`) as a runtime dependency and use `httpx.AsyncClient` with
-  `follow_redirects=False` and `trust_env=False`.
-- **Rationale**: The issue names it; it is async-native, supports streaming bodies with a
-  per-chunk iterator, granular timeouts (`httpx.Timeout(connect=…, read=…)`), and ships
-  `httpx.MockTransport` for transport-level tests without an extra test dependency. The
-  stdlib `urllib` used by `invio.cli.source_check` is blocking and has no async API.
-  `trust_env=False` stops `HTTP(S)_PROXY`/`.netrc` from routing requests around the SSRF guard.
+- **Decision**: Use **httpx2** (`>=2.13`, pydantic's maintained fork of httpx) and its
+  `httpx2.AsyncClient` with `follow_redirects=False` and `trust_env=False`.
+- **Rationale**: The issue names httpx; httpx2 keeps its API. It is async-native, supports
+  streaming bodies with a per-chunk iterator, granular timeouts
+  (`httpx2.Timeout(connect=…, read=…)`), and ships `httpx2.MockTransport` for transport-level
+  tests without an extra test dependency. The stdlib `urllib` used by
+  `invio.cli.source_check` is blocking and has no async API. `trust_env=False` stops
+  `HTTP(S)_PROXY`/`.netrc`/`SSL_CERT_FILE` from routing requests around the SSRF guard or
+  swapping the trust store; TLS uses the system trust store (`truststore`).
+- **Why httpx2 and not httpx**: the plan first chose httpx 0.28. `mistralai` 3.x (gh-issue-8)
+  depends on httpx2 and `invio.llm` already imports it (see specs/005-gh-issue-8/research.md
+  R2). Shipping both stacks would double the HTTP dependencies for the same API, so the safe
+  client moved to httpx2 when the branches were merged.
 - **Alternatives**: `aiohttp` (heavier, own server/client stack, no advantage here);
   stdlib `urllib` in a thread pool (no streaming limits per chunk without re-implementing
-  what `HttpSourceChecker` already does, no async rate limiting integration).
-- **Constitution**: new runtime dependency → justified in the PR description (Technology
-  constraints). Verified: httpx 0.28.1 / httpcore 1.0.9.
+  what `HttpSourceChecker` already does, no async rate limiting integration); httpx 0.28
+  (a second HTTP stack next to the SDK's httpx2).
+- **Constitution**: runtime dependency → justified in the PR description (Technology
+  constraints). Verified: httpx2 2.13.1 / httpcore2 2.13.1.
 
 ## R2 — SSRF guard: which addresses are "non-public"
 
@@ -38,30 +45,30 @@ All Technical Context unknowns are resolved below. Each entry: Decision / Ration
   the first validated IP; the request URL's host is replaced by that IP, the original
   `Host` header is set explicitly, and the request extension `sni_hostname=<original host>`
   is passed so TLS SNI and certificate verification still use the hostname.
-- **Rationale**: Only public httpx/httpcore API is used (httpcore reads
-  `request.extensions["sni_hostname"]` for `server_hostname`; verified in httpcore 1.0.9).
+- **Rationale**: Only public httpx2/httpcore2 API is used (httpcore2 reads
+  `request.extensions["sni_hostname"]` for `server_hostname`; verified in httpcore2 2.13.1).
   No second resolution happens inside the transport, so check and connect use the same IP.
-- **Alternatives**: custom `httpcore.AsyncNetworkBackend` that validates in `connect_tcp`
-  (cleaner, but httpx's `AsyncHTTPTransport` does not accept a backend parameter, so it needs a
+- **Alternatives**: custom `httpcore2.AsyncNetworkBackend` that validates in `connect_tcp`
+  (cleaner, but httpx2's `AsyncHTTPTransport` does not accept a backend parameter, so it needs a
   hand-written transport or private-attribute patching); resolving twice and comparing
   (still racy).
-- **Connection reuse**: because requests are pinned to an IP, httpx's pool groups connections
+- **Connection reuse**: because requests are pinned to an IP, httpx2's pool groups connections
   by IP rather than by hostname. A keep-alive connection opened for `a.example` (TLS name and
   certificate for `a.example`) could otherwise be reused for `b.example` on the same IP, so
   TLS verification for `b.example` would never happen. The client therefore disables
-  keep-alive (`httpx.Limits(max_keepalive_connections=0)`): every hop opens a new connection
+  keep-alive (`httpx2.Limits(max_keepalive_connections=0)`): every hop opens a new connection
   whose TLS name matches its own `Host`. That costs little at >= 1 s per host. Keeping a
   separate pool per hostname is the alternative if reuse is ever needed.
 
 ## R4 — Redirect handling
 
 - **Decision**: Manual redirect loop in the client: on 301/302/303/307/308 read `Location`,
-  resolve it relative to the current URL (`httpx.URL.join`), then run scheme check → SSRF
+  resolve it relative to the current URL (`httpx2.URL.join`), then run scheme check → SSRF
   guard → robots check → rate limiter for the new URL before sending. Stop with
   `FetchError("too many redirects")` after `max_redirects` (default 5). Missing `Location` →
   `FetchError`. Method stays `GET` for all codes (only GET is in scope).
-- **Rationale**: httpx's built-in redirect following cannot run an async check per hop.
-- **Alternatives**: httpx event hooks (`request` hook runs per hop but cannot pin the IP or
+- **Rationale**: httpx2's built-in redirect following cannot run an async check per hop.
+- **Alternatives**: httpx2 event hooks (`request` hook runs per hop but cannot pin the IP or
   rate-limit cleanly).
 
 ## R5 — Response size limit (FR-011/FR-012)
@@ -73,7 +80,7 @@ All Technical Context unknowns are resolved below. Each entry: Decision / Ration
 - **Rationale**: Covers announced, unannounced and lying sizes and applies the limit to decoded
   content. Restricting encodings avoids `br`/`zstd` decoders that are not always installed and
   keeps the decompression path to zlib.
-- **Accepted risk**: httpx decodes per network chunk, so one decoded chunk of a highly
+- **Accepted risk**: httpx2 decodes per network chunk, so one decoded chunk of a highly
   compressed body can exceed the remaining budget before the check fires (bounded by
   zlib's ratio on one raw chunk). SC-002's "limit plus one chunk" is interpreted as one decoded
   chunk. A streaming `zlib.decompressobj(max_length=…)` decoder is a possible later hardening.
@@ -126,7 +133,7 @@ All Technical Context unknowns are resolved below. Each entry: Decision / Ration
 
 ## R9 — Timeouts
 
-- **Decision**: `httpx.Timeout(connect=10, read=30, write=10, pool=10)` plus a **total deadline
+- **Decision**: `httpx2.Timeout(connect=10, read=30, write=10, pool=10)` plus a **total deadline
   for the whole `get()`** (`asyncio.timeout_at`, default 60 s) that starts when the first
   request is about to be sent (after the first rate-limiter slot) and is shared by all redirect
   hops. Timeout → `FetchError(reason="timeout")`.
@@ -171,7 +178,7 @@ All Technical Context unknowns are resolved below. Each entry: Decision / Ration
      Covers size limits, redirects, robots, rate limiting, conditional GET, timeouts,
      User-Agent. Client is created with `allow_networks=[127.0.0.0/8]`.
   2. **Guard tests with fakes** — an injectable `Resolver` (fake mapping host → IPs) and
-     `httpx.MockTransport` recording requests prove: blocked targets never reach the transport,
+     `httpx2.MockTransport` recording requests prove: blocked targets never reach the transport,
      multi-address hosts are rejected, connections are pinned to the checked IP with correct
      `Host` header and `sni_hostname` extension (rebinding scenario: resolver returns a public
      IP first, a private one afterwards).

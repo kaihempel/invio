@@ -31,7 +31,7 @@ from ipaddress import IPv4Address, IPv4Network, IPv6Address, IPv6Network
 from types import MappingProxyType
 from typing import Any, Final, Self
 
-import httpx
+import httpx2
 from pydantic import BaseModel, ConfigDict, model_validator
 
 import invio
@@ -178,8 +178,8 @@ class _Hop:
     """
 
     status: int
-    headers: httpx.Headers
-    url: httpx.URL  # logical URL (original host name), never the pinned address
+    headers: httpx2.Headers
+    url: httpx2.URL  # logical URL (original host name), never the pinned address
     body: bytes
 
 
@@ -191,7 +191,7 @@ class _Decoder:
     stream is a malformed response.
     """
 
-    def __init__(self, encoding: str | None, url: httpx.URL) -> None:
+    def __init__(self, encoding: str | None, url: httpx2.URL) -> None:
         self.encoding = encoding
         self._url = url
         self._inflater: zlib._Decompress | None = None
@@ -235,7 +235,7 @@ class _Decoder:
         return zlib.MAX_WBITS if looks_zlib else -zlib.MAX_WBITS
 
 
-def _decoder_for(headers: httpx.Headers, url: httpx.URL) -> _Decoder:
+def _decoder_for(headers: httpx2.Headers, url: httpx2.URL) -> _Decoder:
     """Pick the decoder for ``Content-Encoding``; stacked or unknown encodings are refused.
 
     Only one layer of gzip or deflate is accepted (the client asks for nothing else), which
@@ -291,7 +291,7 @@ class SafeHttpClient:
         *,
         allow_networks: Iterable[IPv4Network | IPv6Network] = (),
         resolver: Resolver | None = None,
-        transport: httpx.AsyncBaseTransport | None = None,
+        transport: httpx2.AsyncBaseTransport | None = None,
     ) -> None:
         self._config = config if config is not None else HttpClientConfig.from_settings()
         self._allow_networks = tuple(allow_networks)
@@ -305,18 +305,18 @@ class SafeHttpClient:
         # host name. No cookies (an empty allow list refuses every domain): requests are pinned
         # to an IP address, so a jar would key cookies on the address and hand one site's
         # cookies to another site on the same (shared hosting) address.
-        self._client = httpx.AsyncClient(
+        self._client = httpx2.AsyncClient(
             follow_redirects=False,
             trust_env=False,
             cookies=CookieJar(policy=DefaultCookiePolicy(allowed_domains=[])),
             transport=transport,
-            timeout=httpx.Timeout(
+            timeout=httpx2.Timeout(
                 connect=self._config.connect_timeout,
                 read=self._config.read_timeout,
                 write=self._config.connect_timeout,
                 pool=self._config.connect_timeout,
             ),
-            limits=httpx.Limits(max_keepalive_connections=0),
+            limits=httpx2.Limits(max_keepalive_connections=0),
         )
 
     async def __aenter__(self) -> Self:
@@ -400,8 +400,8 @@ class SafeHttpClient:
     def _log_failure(error: FetchError) -> None:
         """Log a refused or failed fetch; the URL carries no credentials, query or fragment."""
         try:
-            host = httpx.URL(error.url).host
-        except (httpx.InvalidURL, ValueError):  # error.url is the unparsable input
+            host = httpx2.URL(error.url).host
+        except (httpx2.InvalidURL, ValueError):  # error.url is the unparsable input
             host = ""
         extra = {"url": without_query(error.url), "host": host, "reason": str(error.reason)}
         if isinstance(error, BlockedError):
@@ -412,11 +412,11 @@ class SafeHttpClient:
     # --- URL handling ------------------------------------------------------------------------
 
     @staticmethod
-    def _parse(url: str) -> httpx.URL:
+    def _parse(url: str) -> httpx2.URL:
         """Parse, then check the scheme, then require a host; userinfo is dropped."""
         try:
-            parsed = httpx.URL(url)
-        except (httpx.InvalidURL, ValueError):
+            parsed = httpx2.URL(url)
+        except (httpx2.InvalidURL, ValueError):
             raise FetchError("invalid_url", url=url) from None
         if not parsed.scheme:
             raise FetchError("invalid_url", url=url)
@@ -426,20 +426,20 @@ class SafeHttpClient:
         return parsed.copy_with(userinfo=b"")
 
     @classmethod
-    def _join(cls, base: httpx.URL, location: str) -> httpx.URL:
+    def _join(cls, base: httpx2.URL, location: str) -> httpx2.URL:
         """Resolve a redirect target; a malformed one is the server's fault (invalid_response)."""
         try:
             return cls._parse(str(base.join(location)))
         except BlockedError:
             raise  # a non-web scheme stays a blocked error
-        except (httpx.InvalidURL, ValueError, FetchError):
+        except (httpx2.InvalidURL, ValueError, FetchError):
             raise FetchError("invalid_response", url=str(base)) from None
 
     # --- the pipeline of one hop -------------------------------------------------------------
 
     async def _hop(
         self,
-        url: httpx.URL,
+        url: httpx2.URL,
         extra_headers: Mapping[str, str],
         budget: _Budget,
         *,
@@ -466,20 +466,20 @@ class SafeHttpClient:
                         return _Hop(response.status_code, response.headers, target.url, body)
                     finally:
                         await response.aclose()
-            except (TimeoutError, httpx.TimeoutException):
+            except (TimeoutError, httpx2.TimeoutException):
                 raise FetchError("timeout", url=str(url)) from None
-            except (httpx.DecodingError, httpx.InvalidURL):
+            except (httpx2.DecodingError, httpx2.InvalidURL):
                 raise FetchError("invalid_response", url=str(url)) from None
-            except httpx.RemoteProtocolError as exc:
-                # httpx parses the Location of a redirect even when it does not follow it, and
+            except httpx2.RemoteProtocolError as exc:
+                # httpx2 parses the Location of a redirect even when it does not follow it, and
                 # reports an unparsable one as a protocol error: that is a malformed response.
                 malformed = "location header" in str(exc).lower()
                 reason = "invalid_response" if malformed else "connection_failed"
                 raise FetchError(reason, url=str(url)) from None
-            except httpx.RequestError:
+            except httpx2.RequestError:
                 raise FetchError("connection_failed", url=str(url)) from None
 
-    async def _guard(self, url: httpx.URL) -> GuardedTarget:
+    async def _guard(self, url: httpx2.URL) -> GuardedTarget:
         """Check scheme and resolved addresses; nothing is sent to a refused target."""
         try:
             async with asyncio.timeout(self._config.connect_timeout):
@@ -495,7 +495,7 @@ class SafeHttpClient:
         if not policy.allows(str(target.url)):
             raise BlockedError(BlockReason.BLOCKED_BY_ROBOTS, url=str(target.url))
 
-    async def _fetch_robots(self, url: httpx.URL) -> tuple[int, bytes]:
+    async def _fetch_robots(self, url: httpx2.URL) -> tuple[int, bytes]:
         """Fetch robots.txt through the normal pipeline, minus the robots check itself.
 
         Returns the raw status (a 4xx is a policy, not an error) and at most 500 KB of body.
@@ -524,7 +524,7 @@ class SafeHttpClient:
         target: GuardedTarget,
         address: IPv4Address | IPv6Address,
         extra_headers: Mapping[str, str],
-    ) -> httpx.Request:
+    ) -> httpx2.Request:
         """Build the GET request pinned to ``address``, one of the target's validated addresses.
 
         The client owns User-Agent, Host and Accept-Encoding. The URL carries the IP; ``Host``
@@ -546,7 +546,7 @@ class SafeHttpClient:
 
     async def _send_pinned(
         self, target: GuardedTarget, extra_headers: Mapping[str, str]
-    ) -> httpx.Response:
+    ) -> httpx2.Response:
         """Send to the validated addresses in resolver order; return once headers arrived.
 
         Only a connection that cannot be made moves on to the next address (a dual-stack host
@@ -557,19 +557,19 @@ class SafeHttpClient:
         for address in others:
             try:
                 return await self._send(self._build_request(target, address, extra_headers))
-            except (httpx.ConnectError, httpx.ConnectTimeout):
+            except (httpx2.ConnectError, httpx2.ConnectTimeout):
                 continue
         return await self._send(self._build_request(target, last, extra_headers))
 
-    async def _send(self, request: httpx.Request) -> httpx.Response:
+    async def _send(self, request: httpx2.Request) -> httpx2.Response:
         """Send ``request`` and return as soon as the headers have arrived."""
         return await self._client.send(request, stream=True)
 
     async def _read_body(
-        self, response: httpx.Response, url: httpx.URL, *, max_bytes: int, truncate: bool
+        self, response: httpx2.Response, url: httpx2.URL, *, max_bytes: int, truncate: bool
     ) -> bytes:
         """Read the decoded body; more than ``max_bytes`` raises, or is cut off if ``truncate``."""
-        # The raw stream is decoded here, never by httpx: a single network chunk can inflate to
+        # The raw stream is decoded here, never by httpx2: a single network chunk can inflate to
         # hundreds of MiB, so decoding must stop at the size limit.
         decoder = _decoder_for(response.headers, url)
         # Content-Length counts the encoded bytes, so it only predicts the size when the body
@@ -598,8 +598,8 @@ class SafeHttpClient:
     def _cache_key(requested_url: str) -> str:
         """The validator cache key: case, default port and fragment do not make a new URL."""
         try:
-            return str(httpx.URL(requested_url).copy_with(fragment=None))
-        except (httpx.InvalidURL, ValueError):
+            return str(httpx2.URL(requested_url).copy_with(fragment=None))
+        except (httpx2.InvalidURL, ValueError):
             return requested_url  # the fetch fails with invalid_url; nothing gets cached
 
     def _with_validators(self, cache_key: str, headers: Mapping[str, str]) -> Mapping[str, str]:
@@ -642,7 +642,7 @@ class SafeHttpClient:
             url=str(hop.url),
             requested_url=requested_url,
             status=hop.status,
-            headers=MappingProxyType(httpx.Headers(hop.headers)),
+            headers=MappingProxyType(httpx2.Headers(hop.headers)),
             content=hop.body,
             etag=hop.headers.get("etag"),
             last_modified=hop.headers.get("last-modified"),

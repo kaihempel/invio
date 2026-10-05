@@ -6,7 +6,7 @@ import re
 import time
 import zlib
 
-import httpx
+import httpx2
 import pytest
 
 from invio.sources.http import (
@@ -291,8 +291,8 @@ async def test_compressed_content_length_above_the_limit_is_judged_by_decoded_si
 
 @pytest.mark.parametrize("raw", [b"\xb2", b"1e9", b"-5", b" "])
 async def test_unusable_content_length_does_not_escape_as_a_bare_exception(raw: bytes) -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, headers=[(b"Content-Length", raw)], content=b"ok")
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(200, headers=[(b"Content-Length", raw)], content=b"ok")
 
     client = SafeHttpClient(
         HttpClientConfig(respect_robots=False, host_interval=0.01),
