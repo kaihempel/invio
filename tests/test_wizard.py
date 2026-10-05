@@ -39,7 +39,7 @@ from invio.cli.wizard import (
 )
 from invio.config.job import JobConfig, JobConfigError, LimitsConfig, dump_yaml, validate_job
 from invio.llm.base import ModelRegistryError
-from invio.llm.registry import ModelRegistry
+from invio.llm.registry import ModelInfo, ModelRegistry
 from tests.cli_helpers import FakeChecker, FakePrompter, make_registry
 
 
@@ -345,7 +345,7 @@ def test_registry_none_gives_free_text_without_warning() -> None:
 
 def test_broken_registry_warns_once_and_uses_free_text() -> None:
     class Broken(ModelRegistry):
-        def models_for(self, provider: str) -> list[str]:
+        def models_for(self, provider: str) -> list[ModelInfo]:
             raise ModelRegistryError("models.d/openai.yaml: invalid")
 
     result, _, out = run(

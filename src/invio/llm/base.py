@@ -5,6 +5,10 @@ across providers: :func:`structured_with_repair` (one repair request for malform
 answers), :func:`with_timeout` (per-request bound) and :func:`require_api_key` (clear message
 for a missing credential).
 
+Typed errors: :class:`LLMRateLimitError` (with the provider's ``retry_after``),
+:class:`LLMAuthError`, :class:`LLMUnavailableError`, :class:`LLMInvalidRequestError` (the
+provider rejected the request itself), :class:`LLMInvalidOutputError`.
+
 No exception message, attribute or log line produced here contains a credential or a prompt,
 and the answer text is never included verbatim. Caveat: validation problems are reported as
 ``<loc>: <message>``, and ``loc`` can contain keys taken from the answer (for example an
@@ -14,6 +18,7 @@ unexpected extra field name); no redaction is applied.
 import asyncio
 import json
 import logging
+import math
 import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -68,6 +73,10 @@ class LLMProvider(Protocol):
         """Return an answer validated against ``schema`` and the (summed) token usage."""
         ...
 
+    async def aclose(self) -> None:
+        """Release the connections opened from the running event loop (safe to call twice)."""
+        ...
+
 
 class LLMError(Exception):
     """Base class of LLM call failures."""
@@ -81,7 +90,20 @@ class LLMError(Exception):
 
 
 class LLMRateLimitError(LLMError):
-    """The provider reported rate limiting."""
+    """The provider reported rate limiting; ``retry_after`` is the wait it asked for, if any."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        provider: str | None = None,
+        model: str | None = None,
+        retry_after: float | None = None,
+    ) -> None:
+        if retry_after is not None and not (math.isfinite(retry_after) and retry_after >= 0):
+            raise ValueError(f"retry_after must be finite and >= 0, got {retry_after}")
+        super().__init__(message, provider=provider, model=model)
+        self.retry_after = retry_after
 
 
 class LLMAuthError(LLMError):
@@ -90,6 +112,21 @@ class LLMAuthError(LLMError):
 
 class LLMUnavailableError(LLMError):
     """The provider is unreachable, failed with a server error or did not answer in time."""
+
+
+class LLMInvalidRequestError(LLMError):
+    """The provider rejected the request itself (malformed input, unknown model, bad schema)."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        provider: str | None = None,
+        model: str | None = None,
+        status: int | None = None,
+    ) -> None:
+        super().__init__(message, provider=provider, model=model)
+        self.status = status
 
 
 class LLMInvalidOutputError(LLMError):
@@ -183,12 +220,19 @@ def _validate[T: BaseModel](schema: type[T], text: str) -> T | str:
 
 
 async def structured_with_repair[T: BaseModel](
-    request: RawRequest, system: str, user: str, schema: type[T]
+    request: RawRequest,
+    system: str,
+    user: str,
+    schema: type[T],
+    *,
+    provider: str | None = None,
+    model: str | None = None,
 ) -> tuple[T, Usage]:
     """Run ``request`` and validate the answer against ``schema``; repair at most once.
 
-    A second invalid answer raises :class:`LLMInvalidOutputError` carrying the final problems
-    and the usage of both requests. Errors raised by ``request`` propagate unchanged.
+    A second invalid answer raises :class:`LLMInvalidOutputError` carrying the final problems,
+    the usage of both requests, ``provider`` and ``model``. Errors raised by ``request``
+    propagate unchanged.
     """
     instruction = (
         f"{system}\n\nAnswer with a single JSON document that matches this JSON Schema and "
@@ -209,8 +253,12 @@ async def structured_with_repair[T: BaseModel](
     result = _validate(schema, text)
     if not isinstance(result, str):
         return result, usage
+    where = f" (model {model})" if model is not None else ""
     raise LLMInvalidOutputError(
-        f"structured output for {schema.__name__} is invalid after one repair attempt: {result}",
+        f"structured output for {schema.__name__} is invalid after one repair attempt{where}: "
+        f"{result}",
         errors=result,
         usage=usage,
+        provider=provider,
+        model=model,
     )

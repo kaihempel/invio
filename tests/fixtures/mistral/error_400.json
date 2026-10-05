@@ -1,0 +1,9 @@
+{
+  "status": 400,
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": {
+    "message": "Invalid model: x"
+  }
+}
