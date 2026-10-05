@@ -107,7 +107,7 @@
     },
     "LimitsConfig": {
       "additionalProperties": false,
-      "description": "Per-run caps.",
+      "description": "Per-run caps (``baseline_items``: per source, first runs only).",
       "properties": {
         "max_items_per_source": {
           "default": 20,
@@ -119,6 +119,12 @@
           "default": 100,
           "minimum": 1,
           "title": "Max Items Per Run",
+          "type": "integer"
+        },
+        "baseline_items": {
+          "default": 10,
+          "minimum": 1,
+          "title": "Baseline Items",
           "type": "integer"
         },
         "max_items_in_notification": {

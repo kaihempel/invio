@@ -278,7 +278,7 @@ INVIO_DATABASE_URL=sqlite:////absolute/path/invio.sqlite   # development only
 - The schema is versioned with Alembic; the migrations ship inside the package.
 
 ```bash
-uv run invio db upgrade       # apply migrations; prints "database at revision 0002"
+uv run invio db upgrade       # apply migrations; prints "database at revision 0003"
 ```
 
 DDL is not transactional on MariaDB: if an upgrade fails midway, earlier steps stay applied and

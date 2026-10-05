@@ -1,1 +1,1 @@
-"""Invio graph nodes package."""
+"""Pipeline nodes of the research graph."""

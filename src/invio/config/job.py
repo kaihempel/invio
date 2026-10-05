@@ -228,10 +228,11 @@ class LLMConfig(_StrictModel):
 
 
 class LimitsConfig(_StrictModel):
-    """Per-run caps."""
+    """Per-run caps (``baseline_items``: per source, first runs only)."""
 
     max_items_per_source: StrictInt = Field(default=20, ge=1)
     max_items_per_run: StrictInt = Field(default=100, ge=1)
+    baseline_items: StrictInt = Field(default=10, ge=1)
     max_items_in_notification: StrictInt = Field(default=20, ge=1)
     max_llm_tokens_per_run: StrictInt = Field(default=200000, ge=1)
 

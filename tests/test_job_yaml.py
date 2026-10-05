@@ -265,6 +265,7 @@ def test_dump_includes_defaults_and_nulls(job_data: dict[str, Any]) -> None:
     assert dumped["limits"] == {
         "max_items_per_source": 20,
         "max_items_per_run": 100,
+        "baseline_items": 10,
         "max_items_in_notification": 20,
         "max_llm_tokens_per_run": 200000,
     }
@@ -563,6 +564,7 @@ def test_omitted_defaults_written_to_file(tmp_path: Path) -> None:
     assert saved["limits"] == {
         "max_items_per_source": 20,
         "max_items_per_run": 100,
+        "baseline_items": 10,
         "max_items_in_notification": 20,
         "max_llm_tokens_per_run": 200000,
     }
@@ -587,6 +589,7 @@ def test_dump_nested_key_order() -> None:
     assert list(dumped["limits"]) == [
         "max_items_per_source",
         "max_items_per_run",
+        "baseline_items",
         "max_items_in_notification",
         "max_llm_tokens_per_run",
     ]

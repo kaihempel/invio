@@ -41,5 +41,6 @@ llm:
 limits:
   max_items_per_source: 20
   max_items_per_run: 100
+  baseline_items: 10
   max_items_in_notification: 20
   max_llm_tokens_per_run: 200000
