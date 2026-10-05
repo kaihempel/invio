@@ -1,7 +1,7 @@
 """Network guard for the safe HTTP client: scheme check, address validation and pinning.
 
-The guard resolves the host of every hop itself and returns one validated address. The client
-connects to exactly that address, so the address that was checked is the address that is used
+The guard resolves the host of every hop itself and returns the validated addresses. The client
+connects only to those addresses, so the addresses that were checked are the ones that are used
 and a DNS answer that changes in between (DNS rebinding) has no effect.
 """
 
@@ -17,6 +17,7 @@ import httpx
 from invio.sources.errors import BlockedError, BlockReason, FetchError
 
 __all__ = [
+    "DEFAULT_PORTS",
     "GuardedTarget",
     "Origin",
     "Resolver",
@@ -35,7 +36,7 @@ _DENIED: Final[tuple[IPv4Network | IPv6Network, ...]] = (
     IPv4Network("192.88.99.0/24"),
 )
 _NAT64: Final = IPv6Network("64:ff9b::/96")
-_DEFAULT_PORTS: Final = {"http": 80, "https": 443}
+DEFAULT_PORTS: Final = {"http": 80, "https": 443}
 
 
 class Origin(NamedTuple):
@@ -63,11 +64,14 @@ class SystemResolver:
 
 @dataclass(frozen=True, slots=True)
 class GuardedTarget:
-    """A hop's URL (logical, with the original host name) and the address to connect to."""
+    """A hop's URL (logical, with the original host name) and the addresses to connect to.
+
+    ``addresses`` keeps the resolver's order and is never empty; the client tries them in turn.
+    """
 
     url: httpx.URL
     origin: Origin
-    address: IPv4Address | IPv6Address
+    addresses: tuple[IPv4Address | IPv6Address, ...]
 
 
 def is_public_address(addr: IPv4Address | IPv6Address) -> bool:
@@ -96,7 +100,7 @@ def is_public_address(addr: IPv4Address | IPv6Address) -> bool:
 
 def check_scheme(url: httpx.URL) -> None:
     """Raise :class:`BlockedError` unless ``url`` is http or https."""
-    if url.scheme.lower() not in _DEFAULT_PORTS:
+    if url.scheme.lower() not in DEFAULT_PORTS:
         raise BlockedError(BlockReason.UNSUPPORTED_SCHEME, url=str(url))
 
 
@@ -104,7 +108,7 @@ def origin_of(url: httpx.URL) -> Origin:
     """The :class:`Origin` of ``url`` (host lower-cased, default port filled in)."""
     scheme: Literal["http", "https"] = "https" if url.scheme.lower() == "https" else "http"
     # raw_host is the ASCII (IDNA) form, which is what gets resolved and sent as SNI.
-    return Origin(scheme, url.raw_host.decode("ascii").lower(), url.port or _DEFAULT_PORTS[scheme])
+    return Origin(scheme, url.raw_host.decode("ascii").lower(), url.port or DEFAULT_PORTS[scheme])
 
 
 async def guard_url(
@@ -138,11 +142,12 @@ async def guard_url(
     for address in addresses:
         if not is_public_address(address) and not any(address in net for net in allowed):
             raise BlockedError(BlockReason.NON_PUBLIC_ADDRESS, url=str(url))
-    return GuardedTarget(url, origin, addresses[0])
+    return GuardedTarget(url, origin, tuple(addresses))
 
 
 def _parse_literal(host: str) -> IPv4Address | IPv6Address | None:
+    # httpx hosts carry no brackets, so an IPv6 literal parses as it is.
     try:
-        return ip_address(host.strip("[]"))
+        return ip_address(host)
     except ValueError:
         return None

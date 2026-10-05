@@ -44,42 +44,49 @@ class SafeHttpClient:
 - Caller headers are forwarded to redirect hops on the same origin; on another origin only
   `Accept*`, `If-None-Match` and `If-Modified-Since` are kept.
 - URL userinfo (`user:password@`) is stripped before anything else: it is never sent, and never
-  appears in `FetchResult.url`, errors or logs.
-- `total_timeout` bounds one `get()` including all redirect hops, measured from the first send.
-- Only one layer of `gzip` or `deflate` content encoding is accepted; the size limit applies to
-  the decoded body.
+  appears in `FetchResult.url`, errors or logs. Query and fragment are left out of `str(error)`
+  and logs (`error.url` keeps them).
+- `total_timeout` bounds sending and reading within one `get()` including all redirect hops,
+  measured from the first send. DNS checks (each up to `connect_timeout`), rate-limit waits and
+  the first robots.txt fetch of an origin (its own `total_timeout`) come on top.
+- Only one layer of `gzip` or `deflate` content encoding is accepted (a gzip body may have
+  several members); the size limit applies to the decoded body. `Content-Length` is only
+  checked up front for an uncompressed body.
+- Cookies are never stored or sent by the client.
 
 ## `get` outcome table
 
 | Situation | Outcome |
 |-----------|---------|
 | 2xx | `FetchResult` |
-| 304 | `NotModified` |
+| 304 to a conditional request | `NotModified` |
+| 304 to a request without `If-None-Match`/`If-Modified-Since` | `FetchError(reason="http_status", status=304)` |
 | other 4xx/5xx (after redirects) | `FetchError(reason="http_status", status=<code>)` |
 | scheme not http/https (start or redirect) | `BlockedError(reason=UNSUPPORTED_SCHEME)` |
 | host resolves to any non-public address (start or redirect) | `BlockedError(reason=NON_PUBLIC_ADDRESS)` |
-| robots.txt disallows path, or robots.txt failed with 5xx/network error | `BlockedError(reason=BLOCKED_BY_ROBOTS)` |
+| robots.txt disallows path, or robots.txt failed (5xx/blocked/malformed: for the run; timeout/connection/DNS: for 5 minutes) | `BlockedError(reason=BLOCKED_BY_ROBOTS)` |
 | `Content-Length` > limit, or decoded body exceeds limit | `TooLargeError(limit=…)` |
 | > `max_redirects` hops | `FetchError(reason="too_many_redirects")` |
 | redirect without `Location` | `FetchError(reason="missing_location")` |
 | DNS failure | `FetchError(reason="dns_failed")` |
 | connect/read/total timeout | `FetchError(reason="timeout")` |
-| other transport error | `FetchError(reason="connection_failed")` |
+| other transport error (every validated address tried if the connect fails) | `FetchError(reason="connection_failed")` |
 | malformed URL | `FetchError(reason="invalid_url")` |
-| corrupt/truncated body, stacked or unsupported `Content-Encoding`, malformed redirect target | `FetchError(reason="invalid_response")` |
+| corrupt/truncated body, data after the compressed stream, stacked or unsupported `Content-Encoding`, malformed redirect target | `FetchError(reason="invalid_response")` |
 
 Guarantees:
 - A `BlockedError` for `UNSUPPORTED_SCHEME`/`NON_PUBLIC_ADDRESS` is raised **before** any
   connection to that target; for `BLOCKED_BY_ROBOTS` no request for the disallowed URL is sent.
-- `str(error)` and `error.url` never contain URL userinfo or request headers.
+- `str(error)` and `error.url` never contain URL userinfo or request headers; `str(error)`
+  contains no query or fragment.
 - `isinstance(BlockedError(...), FetchError)` and `isinstance(TooLargeError(...), FetchError)`.
 
 ## Requests on the wire
 
 - Method `GET` only; `Accept-Encoding: gzip, deflate`.
 - `User-Agent: invio/<version> (+https://github.com/kaihempel/invio; contact: <contact>)`.
-- `Host: <original host[:port]>`; TCP connection to the validated IP; TLS SNI/cert check against
-  the original host name.
+- `Host: <original host[:port]>`; TCP connection to a validated IP (in resolver order, the
+  next only if connecting fails); TLS SNI/cert check against the original host name.
 - `If-None-Match` / `If-Modified-Since` when validators for that URL are cached.
 - Per origin: at most one in flight; starts spaced by the effective interval
   (configured, raised by `Crawl-delay` up to 30 s). robots.txt and each redirect hop count.
@@ -90,8 +97,8 @@ Logger `invio.sources.http`, JSON via `invio.log`:
 
 | Event message | Level | `extra` |
 |---------------|-------|---------|
-| `http_blocked` | WARNING | `url` (redacted), `host`, `reason` |
-| `http_failed` | WARNING | `url` (redacted), `host`, `reason`, `status` |
+| `http_blocked` | WARNING | `url` (redacted, no query/fragment), `host`, `reason` |
+| `http_failed` | WARNING | `url` (redacted, no query/fragment), `host`, `reason`, `status` |
 
 ## Settings (`invio.config.settings.Settings`)
 

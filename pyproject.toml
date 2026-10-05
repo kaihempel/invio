@@ -59,7 +59,7 @@ select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF", "TID251"]
 [tool.ruff.lint.per-file-ignores]
 "!src/invio/{scheduling,sources}/**" = ["TID251"]
 # The modules that implement the safe client are the only ones allowed to use httpx.
-"src/invio/sources/{http,netguard,robots,errors}.py" = ["TID251"]
+"src/invio/sources/{http,netguard,robots}.py" = ["TID251"]
 # The ``job_cli`` fixture is imported into the CLI test modules and used as a parameter.
 "tests/test_cli_job*.py" = ["F811"]
 # Fixtures from ``tests/http_helpers.py`` are imported and used as parameters.

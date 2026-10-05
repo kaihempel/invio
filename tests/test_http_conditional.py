@@ -1,6 +1,15 @@
 """Conditional GET: validators are remembered per URL for the lifetime of one client."""
 
-from invio.sources.http import FetchResult, HttpClientConfig, NotModified, SafeHttpClient
+import pytest
+
+from invio.sources import http
+from invio.sources.http import (
+    FetchError,
+    FetchResult,
+    HttpClientConfig,
+    NotModified,
+    SafeHttpClient,
+)
 from tests.http_helpers import LOOPBACK, LoopbackServer, Route, server  # noqa: F401
 
 ETAG = '"v1"'
@@ -90,15 +99,15 @@ async def test_validators_are_stored_under_the_requested_url_after_a_redirect(
     assert final != requested
 
 
-async def test_304_without_a_cached_entry_is_not_modified_with_empty_validators(
-    server: LoopbackServer,
-) -> None:
+async def test_304_to_an_unconditional_request_is_an_error(server: LoopbackServer) -> None:
+    # The caller has no copy that could be "not modified", so it must not skip the source.
     server.routes["/n"] = Route(status=304)
 
     async with make_client() as client:
-        result = await client.get(f"{server.base_url}/n")
+        with pytest.raises(FetchError) as info:
+            await client.get(f"{server.base_url}/n")
 
-    assert result == NotModified(f"{server.base_url}/n", None, None)
+    assert (info.value.reason, info.value.status) == ("http_status", 304)
 
 
 async def test_304_reports_the_validators_the_caller_sent(
@@ -139,3 +148,33 @@ async def test_caller_if_modified_since_overrides_the_cached_one(
 
     assert server.requests[1].headers["if-modified-since"] == older
     assert server.requests[1].headers["if-none-match"] == ETAG  # still from the cache
+
+
+async def test_validators_are_shared_by_spellings_of_the_same_url(server: LoopbackServer) -> None:
+    validated(server)
+    port = server.origin_port
+
+    async with make_client() as client:
+        await client.get(f"http://127.0.0.1:{port}/feed#top")
+        result = await client.get(f"HTTP://127.0.0.1:{port}/feed")
+
+    assert isinstance(result, NotModified)
+    assert server.requests[1].headers["if-none-match"] == ETAG
+
+
+async def test_least_recently_used_validators_are_dropped_beyond_the_cap(
+    server: LoopbackServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(http, "_MAX_VALIDATORS", 2)
+    a, b, c = (validated(server, path) for path in ("/a", "/b", "/c"))
+
+    async with make_client() as client:
+        await client.get(a)
+        await client.get(b)
+        await client.get(a)  # conditional: "a" is now the most recently used
+        await client.get(c)  # evicts "b"
+        again_a = await client.get(a)
+        again_b = await client.get(b)
+
+    assert isinstance(again_a, NotModified)
+    assert isinstance(again_b, FetchResult)

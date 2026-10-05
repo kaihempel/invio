@@ -10,6 +10,12 @@
 
 ## Clarifications
 
+### Amendment 2026-10-05 (PR #48 review)
+
+- A robots.txt fetch that fails with a timeout, connection or DNS error disallows the origin for 5 minutes, then robots.txt is fetched again; one network blip must not block a site for a whole long run. 5xx, blocked and malformed answers still disallow for the rest of the run.
+- robots.txt rules are matched by invio's own RFC 9309 matcher instead of `urllib.robotparser`, which ignores `*` and `$` before Python 3.14.
+- A 304 to a request that carried no validators is an `http_status` error, not `NotModified`.
+
 ### Session 2026-10-05
 
 - Q: When a site answers with an error status (4xx/5xx), should the client raise a fetch error or return the response for the fetcher to decide? → A: Raise a fetch error carrying the status code and final URL for every 4xx/5xx response; only 2xx returns a fetch result and 304 returns a not-modified result.

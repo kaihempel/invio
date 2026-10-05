@@ -6,7 +6,7 @@ can raise them without an import cycle; ``invio.sources.http`` re-exports all of
 
 from enum import StrEnum
 
-from invio.sources.urls import redact_url
+from invio.sources.urls import redact_url, without_query
 
 __all__ = ["BlockReason", "BlockedError", "FetchError", "TooLargeError"]
 
@@ -22,15 +22,16 @@ class BlockReason(StrEnum):
 class FetchError(Exception):
     """A fetch failed; ``reason`` is a short machine-readable code such as ``"timeout"``.
 
-    ``url`` is always stored redacted (no ``user:password@``), and the message never contains
-    request headers, so the error is safe to log and to show to the operator.
+    ``url`` is always stored redacted (no ``user:password@``). The message leaves out the
+    query and fragment as well (feed URLs often carry ``?token=``) and never contains request
+    headers, so the error is safe to log and to show to the operator.
     """
 
     def __init__(self, reason: str, *, url: str, status: int | None = None) -> None:
         self.url = redact_url(url)
         self.status = status
         self.reason = reason
-        message = f"{reason}: {self.url}"
+        message = f"{reason}: {without_query(self.url)}"
         if status is not None:
             message += f" (HTTP {status})"
         super().__init__(message)

@@ -13,7 +13,7 @@ from xml.etree.ElementTree import Element, ParseError, XMLPullParser
 import invio
 from invio.sources.urls import redact
 
-__all__ = ["CheckResult", "HttpSourceChecker", "SourceChecker", "is_feed_document", "redact"]
+__all__ = ["CheckResult", "HttpSourceChecker", "SourceChecker", "is_feed_document"]
 
 _FEED_ROOTS: Final = frozenset(
     {

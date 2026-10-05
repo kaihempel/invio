@@ -7,8 +7,10 @@ every hop and not only to the URL the caller passed. The ordered steps of one ho
    address);
 2. ``_check_robots``: robots.txt policy of the target origin (skipped for the robots fetch);
 3. ``_slot``: per-origin rate limit, held until the body has been read;
-4. ``_build_request``: pinned request with the headers the client controls;
-5. ``_send``: send with ``stream=True`` and map transport errors to :class:`FetchError`;
+4. ``_build_request``: request pinned to one validated address, with the headers the client
+   controls;
+5. ``_send_pinned``: send with ``stream=True``, trying the next validated address only when the
+   connection cannot be made; transport errors become :class:`FetchError`;
 6. ``_read_body``: read the body within the response size limit;
 7. ``_classify``: 2xx result, 304 not modified, redirect or ``http_status`` error.
 
@@ -20,18 +22,28 @@ import codecs
 import logging
 import re
 import zlib
+from collections import OrderedDict
 from collections.abc import AsyncIterator, Iterable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from ipaddress import IPv4Network, IPv6Network
+from http.cookiejar import CookieJar, DefaultCookiePolicy
+from ipaddress import IPv4Address, IPv4Network, IPv6Address, IPv6Network
 from types import MappingProxyType
-from typing import Final, Self
+from typing import Any, Final, Self
 
 import httpx
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, model_validator
 
 import invio
-from invio.config.settings import Settings, get_settings
+from invio.config.settings import (
+    HttpBytes,
+    HttpContact,
+    HttpCount,
+    HttpSeconds,
+    Settings,
+    check_http_timeouts,
+    get_settings,
+)
 from invio.sources.errors import BlockedError, BlockReason, FetchError, TooLargeError
 from invio.sources.netguard import (
     GuardedTarget,
@@ -43,7 +55,7 @@ from invio.sources.netguard import (
 )
 from invio.sources.ratelimit import HostRateLimiter, effective_interval
 from invio.sources.robots import ROBOTS_MAX_BYTES, RobotsCache
-from invio.sources.urls import redact, redact_url
+from invio.sources.urls import redact_url, without_query
 
 __all__ = [
     "BlockReason",
@@ -54,7 +66,6 @@ __all__ = [
     "NotModified",
     "SafeHttpClient",
     "TooLargeError",
-    "redact",
 ]
 
 _log = logging.getLogger("invio.sources.http")
@@ -70,6 +81,13 @@ _CROSS_ORIGIN_HEADERS: Final = re.compile(
 )
 _ENCODINGS: Final = {"gzip": "gzip", "x-gzip": "gzip", "deflate": "deflate"}
 _CHARSET: Final = re.compile(r"charset\s*=\s*[\"']?([^\s;\"']+)", re.IGNORECASE)
+# Conditional-GET validators kept per client; the least recently used are dropped beyond this.
+_MAX_VALIDATORS: Final = 10_000
+
+
+def _setting_default(name: str) -> Any:
+    """The default of setting ``name``: :class:`Settings` is the one place defaults live."""
+    return Settings.model_fields[name].default
 
 
 class HttpClientConfig(BaseModel):
@@ -77,27 +95,23 @@ class HttpClientConfig(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    contact: str = Field(default="admin@example.invalid", min_length=1)
-    max_response_bytes: int = Field(default=10_485_760, gt=0)
-    max_redirects: int = Field(default=5, ge=0)
-    connect_timeout: float = Field(default=10.0, gt=0, allow_inf_nan=False)
-    read_timeout: float = Field(default=30.0, gt=0, allow_inf_nan=False)
-    total_timeout: float = Field(default=60.0, gt=0, allow_inf_nan=False)
-    host_interval: float = Field(default=1.0, gt=0, allow_inf_nan=False)
-    respect_robots: bool = True
-
-    @field_validator("contact")
-    @classmethod
-    def _validate_contact(cls, value: str) -> str:
-        # The contact ends up in the User-Agent header; a line break would allow header injection.
-        if not value.isascii() or any(ord(char) < 32 or ord(char) == 127 for char in value):
-            raise ValueError("must be ASCII without control characters")
-        return value
+    contact: HttpContact = _setting_default("http_contact")
+    max_response_bytes: HttpBytes = _setting_default("http_max_response_bytes")
+    max_redirects: HttpCount = _setting_default("http_max_redirects")
+    connect_timeout: HttpSeconds = _setting_default("http_connect_timeout_seconds")
+    read_timeout: HttpSeconds = _setting_default("http_read_timeout_seconds")
+    total_timeout: HttpSeconds = _setting_default("http_total_timeout_seconds")
+    host_interval: HttpSeconds = _setting_default("http_host_interval_seconds")
+    respect_robots: bool = _setting_default("http_respect_robots")
 
     @model_validator(mode="after")
     def _validate_timeouts(self) -> Self:
-        if self.total_timeout < self.read_timeout:
-            raise ValueError("total_timeout must be >= read_timeout")
+        check_http_timeouts(
+            self.read_timeout,
+            self.total_timeout,
+            read_name="read_timeout",
+            total_name="total_timeout",
+        )
         return self
 
     @classmethod
@@ -170,32 +184,49 @@ class _Hop:
 
 
 class _Decoder:
-    """Incremental body decoder whose output per call is bounded (identity, gzip, deflate)."""
+    """Incremental body decoder whose output per call is bounded (identity, gzip, deflate).
+
+    A gzip body may consist of several members, which are decoded one after the other; NUL
+    padding after the last member is ignored. Any other data after the end of the compressed
+    stream is a malformed response.
+    """
 
     def __init__(self, encoding: str | None, url: httpx.URL) -> None:
-        self._encoding = encoding
+        self.encoding = encoding
         self._url = url
         self._inflater: zlib._Decompress | None = None
-        self.finished = encoding is None  # True once the compressed stream ended cleanly
+        # True while the body so far is complete: no compressed stream has been started, or
+        # the last one ended cleanly. An empty body is complete whatever its encoding.
+        self.finished = True
 
     def feed(self, data: bytes, max_length: int) -> bytes:
         """Decode ``data``, returning at most ``max_length`` bytes (callers pass limit + 1)."""
-        if self._encoding is None:
+        if self.encoding is None:
             return data
-        if self._inflater is None:
-            self._inflater = zlib.decompressobj(self._wbits(data))
         out = bytearray()
         try:
-            while data and not self._inflater.eof and len(out) < max_length:
+            while data and len(out) < max_length:
+                if self._inflater is not None and self._inflater.eof:
+                    if not data.strip(b"\0"):
+                        break
+                    if self.encoding != "gzip":
+                        raise FetchError("invalid_response", url=str(self._url))
+                    self._inflater = None  # the next gzip member starts here
+                if self._inflater is None:
+                    self._inflater = zlib.decompressobj(self._wbits(data))
                 out += self._inflater.decompress(data, max_length - len(out))
-                data = self._inflater.unconsumed_tail
+                data = (
+                    self._inflater.unused_data
+                    if self._inflater.eof
+                    else self._inflater.unconsumed_tail
+                )
         except zlib.error:
             raise FetchError("invalid_response", url=str(self._url)) from None
-        self.finished = self._inflater.eof
+        self.finished = self._inflater is None or self._inflater.eof
         return bytes(out)
 
     def _wbits(self, first: bytes) -> int:
-        if self._encoding == "gzip":
+        if self.encoding == "gzip":
             return 16 + zlib.MAX_WBITS
         # "deflate" should be zlib-wrapped, but some servers send a raw deflate stream.
         looks_zlib = (
@@ -243,9 +274,15 @@ class SafeHttpClient:
     Always use it as ``async with``, or call :meth:`aclose`. ``allow_networks``, ``resolver``
     and ``transport`` exist for tests only.
 
-    ``total_timeout`` bounds one :meth:`get` including all redirect hops, measured from the
-    first send (the robots.txt fetch has its own budget). URL userinfo (``user:password@``)
-    is never sent and never appears in results, errors or logs.
+    ``total_timeout`` bounds the sending and reading of one :meth:`get` including all
+    redirect hops, measured from the first send. It is not a wall-clock limit on :meth:`get`:
+    the DNS check of each hop (up to ``connect_timeout``), the wait for a rate-limit slot (up
+    to ``max(host_interval, Crawl-delay)``, Crawl-delay capped at 30 s) and the first
+    robots.txt fetch of an origin (with its own ``total_timeout``) come on top.
+
+    URL userinfo (``user:password@``) is never sent and never appears in results, errors or
+    logs; query strings and fragments are left out of error messages and logs. Cookies are
+    never stored, so ``Set-Cookie`` of one response never reaches another request.
     """
 
     def __init__(
@@ -261,13 +298,17 @@ class SafeHttpClient:
         self._resolver: Resolver = resolver if resolver is not None else SystemResolver()
         self._robots = RobotsCache(self._fetch_robots)
         self._limiter = HostRateLimiter()
-        self._validators: dict[str, _Validators] = {}  # by requested URL, never persisted
+        # By normalised requested URL, least recently used first; never persisted.
+        self._validators: OrderedDict[str, _Validators] = OrderedDict()
         # Redirects are followed by ``_fetch`` so each hop is checked; no proxies from the
         # environment; no idle connections, so a pinned connection is never reused for another
-        # host name.
+        # host name. No cookies (an empty allow list refuses every domain): requests are pinned
+        # to an IP address, so a jar would key cookies on the address and hand one site's
+        # cookies to another site on the same (shared hosting) address.
         self._client = httpx.AsyncClient(
             follow_redirects=False,
             trust_env=False,
+            cookies=CookieJar(policy=DefaultCookiePolicy(allowed_domains=[])),
             transport=transport,
             timeout=httpx.Timeout(
                 connect=self._config.connect_timeout,
@@ -297,7 +338,8 @@ class SafeHttpClient:
         fetch is logged exactly once.
         """
         requested_url = redact_url(url)
-        sent = self._with_validators(requested_url, headers or {})
+        cache_key = self._cache_key(requested_url)
+        sent = self._with_validators(cache_key, headers or {})
         try:
             hop = await self._fetch(
                 url,
@@ -306,7 +348,7 @@ class SafeHttpClient:
                 max_bytes=self._config.max_response_bytes,
                 truncate=False,
             )
-            return self._classify(hop, requested_url=requested_url, sent=sent)
+            return self._classify(hop, requested_url=requested_url, cache_key=cache_key, sent=sent)
         except FetchError as error:
             self._log_failure(error)
             raise
@@ -356,12 +398,12 @@ class SafeHttpClient:
 
     @staticmethod
     def _log_failure(error: FetchError) -> None:
-        """Log a refused or failed fetch, with the URL stripped of credentials."""
+        """Log a refused or failed fetch; the URL carries no credentials, query or fragment."""
         try:
             host = httpx.URL(error.url).host
         except (httpx.InvalidURL, ValueError):  # error.url is the unparsable input
             host = ""
-        extra = {"url": error.url, "host": host, "reason": str(error.reason)}
+        extra = {"url": without_query(error.url), "host": host, "reason": str(error.reason)}
         if isinstance(error, BlockedError):
             _log.warning("http_blocked", extra=extra)
         else:
@@ -410,12 +452,11 @@ class SafeHttpClient:
         if check_robots:
             await self._check_robots(target)  # before the slot: slots are not re-entrant
         async with self._slot(target):
-            request = self._build_request(target, extra_headers)
             if budget.deadline is None:
                 budget.deadline = asyncio.get_running_loop().time() + self._config.total_timeout
             try:
                 async with asyncio.timeout_at(budget.deadline):
-                    response = await self._send(request)
+                    response = await self._send_pinned(target, extra_headers)
                     try:
                         body = b""
                         if 200 <= response.status_code < 300:
@@ -479,9 +520,12 @@ class SafeHttpClient:
             yield
 
     def _build_request(
-        self, target: GuardedTarget, extra_headers: Mapping[str, str]
+        self,
+        target: GuardedTarget,
+        address: IPv4Address | IPv6Address,
+        extra_headers: Mapping[str, str],
     ) -> httpx.Request:
-        """Build the GET request pinned to the validated address.
+        """Build the GET request pinned to ``address``, one of the target's validated addresses.
 
         The client owns User-Agent, Host and Accept-Encoding. The URL carries the IP; ``Host``
         and, for https, the TLS server name stay the original host name.
@@ -497,8 +541,25 @@ class SafeHttpClient:
         extensions: dict[str, str] = {}
         if target.origin.scheme == "https":
             extensions["sni_hostname"] = target.origin.host
-        pinned = target.url.copy_with(host=str(target.address))
+        pinned = target.url.copy_with(host=str(address))
         return self._client.build_request("GET", pinned, headers=headers, extensions=extensions)
+
+    async def _send_pinned(
+        self, target: GuardedTarget, extra_headers: Mapping[str, str]
+    ) -> httpx.Response:
+        """Send to the validated addresses in resolver order; return once headers arrived.
+
+        Only a connection that cannot be made moves on to the next address (a dual-stack host
+        on a machine without an IPv6 route, say); nothing has been sent at that point. The last
+        address's error is the one that is raised.
+        """
+        *others, last = target.addresses
+        for address in others:
+            try:
+                return await self._send(self._build_request(target, address, extra_headers))
+            except (httpx.ConnectError, httpx.ConnectTimeout):
+                continue
+        return await self._send(self._build_request(target, last, extra_headers))
 
     async def _send(self, request: httpx.Request) -> httpx.Response:
         """Send ``request`` and return as soon as the headers have arrived."""
@@ -508,19 +569,22 @@ class SafeHttpClient:
         self, response: httpx.Response, url: httpx.URL, *, max_bytes: int, truncate: bool
     ) -> bytes:
         """Read the decoded body; more than ``max_bytes`` raises, or is cut off if ``truncate``."""
-        announced = response.headers.get("content-length", "")
-        if not truncate and announced.isdigit() and int(announced) > max_bytes:
-            raise TooLargeError(url=str(url), limit=max_bytes)
         # The raw stream is decoded here, never by httpx: a single network chunk can inflate to
         # hundreds of MiB, so decoding must stop at the size limit.
-        # A response that was read already (``MockTransport``) is decoded by httpx.
-        decoder = (
-            _Decoder(None, url)
-            if response.is_stream_consumed
-            else _decoder_for(response.headers, url)
-        )
+        decoder = _decoder_for(response.headers, url)
+        # Content-Length counts the encoded bytes, so it only predicts the size when the body
+        # is not compressed; a compressed body is judged by its decoded size below.
+        announced = response.headers.get("content-length", "")
+        if (
+            not truncate
+            and decoder.encoding is None
+            and announced.isascii()
+            and announced.isdigit()
+            and int(announced) > max_bytes
+        ):
+            raise TooLargeError(url=str(url), limit=max_bytes)
         body = bytearray()
-        async for chunk in self._raw_chunks(response):
+        async for chunk in response.aiter_raw():
             body += decoder.feed(chunk, max_bytes - len(body) + 1)
             if len(body) > max_bytes:
                 if truncate:
@@ -531,20 +595,19 @@ class SafeHttpClient:
         return bytes(body)
 
     @staticmethod
-    async def _raw_chunks(response: httpx.Response) -> AsyncIterator[bytes]:
-        """The undecoded body; a response that was already read (``MockTransport``) is
-        yielded as a whole instead, and httpx has decoded it by then."""
-        if response.is_stream_consumed:
-            yield response.content
-            return
-        async for chunk in response.aiter_raw():
-            yield chunk
+    def _cache_key(requested_url: str) -> str:
+        """The validator cache key: case, default port and fragment do not make a new URL."""
+        try:
+            return str(httpx.URL(requested_url).copy_with(fragment=None))
+        except (httpx.InvalidURL, ValueError):
+            return requested_url  # the fetch fails with invalid_url; nothing gets cached
 
-    def _with_validators(self, requested_url: str, headers: Mapping[str, str]) -> Mapping[str, str]:
+    def _with_validators(self, cache_key: str, headers: Mapping[str, str]) -> Mapping[str, str]:
         """Add cached validators as conditional headers unless the caller set them."""
-        cached = self._validators.get(requested_url)
+        cached = self._validators.get(cache_key)
         if cached is None:
             return headers
+        self._validators.move_to_end(cache_key)
         names = {name.lower() for name in headers}
         merged = dict(headers)
         if cached.etag and "if-none-match" not in names:
@@ -554,21 +617,27 @@ class SafeHttpClient:
         return merged
 
     def _classify(
-        self, hop: _Hop, *, requested_url: str, sent: Mapping[str, str]
+        self, hop: _Hop, *, requested_url: str, cache_key: str, sent: Mapping[str, str]
     ) -> FetchResult | NotModified:
-        """Map a final (non-redirect) hop to a result, ``NotModified`` or an error."""
+        """Map a final (non-redirect) hop to a result, ``NotModified`` or an error.
+
+        A 304 only means "unchanged" as the answer to a conditional request; to a plain GET it
+        is an error, since the caller has no copy that could be unchanged.
+        """
         if hop.status == 304:
             lowered = {name.lower(): value for name, value in sent.items()}
-            return NotModified(
-                url=requested_url,
-                etag=lowered.get("if-none-match"),
-                last_modified=lowered.get("if-modified-since"),
-            )
+            etag, last_modified = lowered.get("if-none-match"), lowered.get("if-modified-since")
+            if etag is None and last_modified is None:
+                raise FetchError("http_status", url=str(hop.url), status=hop.status)
+            return NotModified(url=requested_url, etag=etag, last_modified=last_modified)
         if not 200 <= hop.status < 300:
             raise FetchError("http_status", url=str(hop.url), status=hop.status)
         etag, last_modified = hop.headers.get("etag"), hop.headers.get("last-modified")
         if etag or last_modified:
-            self._validators[requested_url] = _Validators(etag, last_modified)
+            self._validators[cache_key] = _Validators(etag, last_modified)
+            self._validators.move_to_end(cache_key)
+            if len(self._validators) > _MAX_VALIDATORS:
+                self._validators.popitem(last=False)
         return FetchResult(
             url=str(hop.url),
             requested_url=requested_url,

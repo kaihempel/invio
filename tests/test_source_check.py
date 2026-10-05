@@ -16,6 +16,7 @@ import pytest
 import invio
 from invio.cli import source_check
 from invio.cli.source_check import HttpSourceChecker, is_feed_document
+from invio.sources.urls import redact
 
 RSS = b'<?xml version="1.0"?><rss version="2.0"><channel><title>t</title></channel></rss>'
 RDF = b'<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"></rdf:RDF>'
@@ -338,4 +339,4 @@ def test_total_deadline_stops_slow_drip(monkeypatch: pytest.MonkeyPatch) -> None
     ],
 )
 def test_redact(text: str, expected: str) -> None:
-    assert source_check.redact(text) == expected
+    assert redact(text) == expected

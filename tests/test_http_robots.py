@@ -305,14 +305,145 @@ async def test_concurrent_first_lookups_share_one_robots_fetch() -> None:
     assert len(calls) == 1
 
 
-@pytest.mark.parametrize("raw", ["abc", "nan", "-1", None])
-def test_unusable_crawl_delay_values_are_ignored(
-    monkeypatch: pytest.MonkeyPatch, raw: object
-) -> None:
-    from urllib.robotparser import RobotFileParser
+@pytest.mark.parametrize("raw", ["abc", "nan", "inf", "-1", ""])
+def test_unusable_crawl_delay_values_are_ignored(raw: str) -> None:
+    from invio.sources.robots import parse_robots
 
-    from invio.sources.robots import _crawl_delay
+    assert parse_robots(f"User-agent: *\nCrawl-delay: {raw}\n").crawl_delay is None
 
-    monkeypatch.setattr(RobotFileParser, "crawl_delay", lambda self, agent: raw)
 
-    assert _crawl_delay(RobotFileParser()) is None
+# --- RFC 9309 matching (the same on every supported Python version) --------------------------
+
+WILDCARD_ROBOTS = """\
+User-agent: *
+Disallow: /*.pdf
+Disallow: /private*
+Disallow: /exact$
+Disallow: /shop/
+Allow: /shop/open
+Allow: /tie
+Disallow: /tie
+Disallow: /q?session=
+"""
+
+
+@pytest.mark.parametrize(
+    ("path", "allowed"),
+    [
+        ("/docs/a.pdf", False),  # "*" matches any characters
+        ("/docs/a.pdf?x=1", False),  # an unanchored pattern is a prefix
+        ("/privatestuff", False),
+        ("/exact", False),  # "$" anchors the end
+        ("/exact/more", True),
+        ("/shop/basket", False),
+        ("/shop/open/now", True),  # the longest match (Allow) wins
+        ("/tie", True),  # equal length: Allow wins
+        ("/q?session=1", False),  # the query is part of the matched path
+        ("/q", True),
+        ("/robots.txt", True),
+        ("/", True),
+    ],
+)
+def test_rules_follow_rfc_9309(path: str, allowed: bool) -> None:
+    from invio.sources.robots import parse_robots
+
+    assert parse_robots(WILDCARD_ROBOTS).allows(f"https://h{path}") is allowed
+
+
+def test_robots_txt_itself_is_always_allowed() -> None:
+    from invio.sources.robots import parse_robots
+
+    assert parse_robots("User-agent: *\nDisallow: /\n").allows("https://h/robots.txt")
+
+
+def test_groups_for_invio_are_merged_and_matched_case_insensitively() -> None:
+    from invio.sources.robots import parse_robots
+
+    policy = parse_robots(
+        "User-agent: Invio/1.0\nDisallow: /a\n\n"
+        "User-agent: *\nDisallow: /\n\n"
+        "User-agent: other\nUser-agent: INVIO\nDisallow: /b\nCrawl-delay: 3\n"
+    )
+
+    assert not policy.allows("https://h/a")
+    assert not policy.allows("https://h/b")
+    assert policy.allows("https://h/c")
+    assert policy.crawl_delay == 3.0
+
+
+def test_percent_encoding_comments_bom_and_empty_disallow() -> None:
+    from invio.sources.robots import parse_robots
+
+    policy = parse_robots(
+        "\ufeffUser-agent: *  # everyone\nDisallow: /a%7Eb # tilde\nDisallow:\nSitemap: /s.xml\n"
+    )
+
+    assert not policy.allows("https://h/a~b")
+    assert not policy.allows("https://h/a%7eb")
+    assert policy.allows("https://h/other")
+
+
+def test_rules_before_any_user_agent_are_ignored() -> None:
+    from invio.sources.robots import parse_robots
+
+    assert parse_robots("Disallow: /\nUser-agent: *\nDisallow: /x\n").allows("https://h/y")
+
+
+# --- retrying robots.txt after a transient failure -------------------------------------------
+
+
+@pytest.mark.parametrize("reason", ["timeout", "connection_failed", "dns_failed"])
+async def test_transient_failure_disallows_until_the_retry_window_ends(reason: str) -> None:
+    from invio.sources.netguard import Origin
+    from invio.sources.robots import ROBOTS_RETRY_AFTER, RobotsCache
+
+    now = [100.0]
+    answers: list[Exception | tuple[int, bytes]] = [
+        FetchError(reason, url="http://h/robots.txt"),
+        (404, b""),
+    ]
+
+    async def fetch(url: object) -> tuple[int, bytes]:
+        answer = answers.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    cache = RobotsCache(fetch, clock=lambda: now[0])  # type: ignore[arg-type]
+    origin = Origin("http", "h", 80)
+
+    first = await cache.policy(origin)
+    now[0] += ROBOTS_RETRY_AFTER - 1
+    assert await cache.policy(origin) is first
+    assert first.mode == "disallow_all"
+    now[0] += 1
+    assert (await cache.policy(origin)).mode == "allow_all"
+    assert answers == []
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        FetchError("invalid_response", url="http://h/robots.txt"),
+        FetchError("too_many_redirects", url="http://h/robots.txt"),
+        BlockedError(BlockReason.NON_PUBLIC_ADDRESS, url="http://h/robots.txt"),
+    ],
+)
+async def test_permanent_failure_disallows_for_the_whole_run(error: FetchError) -> None:
+    from invio.sources.netguard import Origin
+    from invio.sources.robots import RobotsCache
+
+    calls: list[object] = []
+
+    async def fetch(url: object) -> tuple[int, bytes]:
+        calls.append(url)
+        raise error
+
+    cache = RobotsCache(fetch, clock=lambda: 1e9 if calls else 0.0)  # type: ignore[arg-type]
+    origin = Origin("http", "h", 80)
+
+    policy = await cache.policy(origin)
+
+    assert (policy.mode, policy.expires_at) == ("disallow_all", None)
+    assert await cache.policy(origin) is policy
+    assert len(calls) == 1

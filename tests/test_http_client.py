@@ -1,5 +1,7 @@
 """Foundation tests for ``SafeHttpClient``: result mapping, errors, redirects and lifecycle."""
 
+from collections.abc import Callable
+
 import httpx
 import pytest
 from pydantic import ValidationError
@@ -275,7 +277,6 @@ def test_public_names() -> None:
         "NotModified",
         "SafeHttpClient",
         "TooLargeError",
-        "redact",
     }
 
 
@@ -362,3 +363,111 @@ def test_non_public_allowance_is_not_configurable() -> None:
     with pytest.raises(ValidationError):
         HttpClientConfig.model_validate({"allow_networks": ["127.0.0.0/8"]})
     assert not [name for name in Settings.model_fields if "allow" in name or "network" in name]
+
+
+# --- several resolved addresses --------------------------------------------------------------
+
+
+def dual_stack_client(
+    handler: Callable[[httpx.Request], httpx.Response],
+) -> tuple[SafeHttpClient, RecordingTransport]:
+    transport = RecordingTransport(handler)
+    client = SafeHttpClient(
+        HttpClientConfig(respect_robots=False, host_interval=0.01),
+        resolver=FakeResolver({"example.org": ["2606:4700::1111", "93.184.216.34"]}),
+        transport=transport,
+    )
+    return client, transport
+
+
+@pytest.mark.parametrize("error", [httpx.ConnectError, httpx.ConnectTimeout])
+async def test_unreachable_first_address_falls_back_to_the_next(
+    error: type[httpx.TransportError],
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "2606:4700::1111":
+            raise error("no route to host")
+        return httpx.Response(200, content=b"ok")
+
+    client, transport = dual_stack_client(handler)
+    async with client:
+        result = await client.get("https://example.org/feed")
+
+    assert isinstance(result, FetchResult)
+    assert [r.url.host for r in transport.requests] == ["2606:4700::1111", "93.184.216.34"]
+    assert all(r.headers["host"] == "example.org" for r in transport.requests)
+    assert all(r.extensions["sni_hostname"] == "example.org" for r in transport.requests)
+
+
+async def test_every_address_unreachable_is_connection_failed() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("no route to host")
+
+    client, transport = dual_stack_client(handler)
+    async with client:
+        with pytest.raises(FetchError) as info:
+            await client.get("https://example.org/feed")
+
+    assert info.value.reason == "connection_failed"
+    assert len(transport.requests) == 2
+
+
+async def test_failure_after_connecting_is_not_retried_on_another_address() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadError("connection reset")
+
+    client, transport = dual_stack_client(handler)
+    async with client:
+        with pytest.raises(FetchError) as info:
+            await client.get("https://example.org/feed")
+
+    assert info.value.reason == "connection_failed"
+    assert len(transport.requests) == 1
+
+
+# --- cookies and query strings ---------------------------------------------------------------
+
+
+async def test_cookies_are_never_stored_or_sent(server: LoopbackServer) -> None:
+    server.routes["/login"] = Route(headers={"Set-Cookie": "session=abc; Path=/"}, body=b"x")
+    server.routes["/next"] = Route(body=b"y")
+
+    async with make_client() as client:
+        await client.get(f"{server.base_url}/login")
+        await client.get(f"{server.base_url}/next")
+
+    assert "cookie" not in server.requests[1].headers
+
+
+async def test_cookies_do_not_cross_between_hosts_on_one_address() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, headers={"Set-Cookie": "session=abc"}, content=b"x")
+
+    transport = RecordingTransport(handler)
+    shared = ["93.184.216.34"]
+    client = SafeHttpClient(
+        HttpClientConfig(respect_robots=False, host_interval=0.01),
+        resolver=FakeResolver({"a.example": shared, "b.example": shared}),
+        transport=transport,
+    )
+    async with client:
+        await client.get("http://a.example/")
+        await client.get("http://b.example/")
+
+    assert "cookie" not in transport.requests[1].headers
+
+
+async def test_query_and_fragment_stay_out_of_messages_and_logs(
+    server: LoopbackServer, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level("DEBUG", logger="invio.sources.http")
+    url = f"{server.base_url}/feed?token=s3cret#frag"
+
+    async with make_client() as client:
+        with pytest.raises(FetchError) as info:
+            await client.get(url)
+
+    assert info.value.url == url  # kept for the caller, only redacted of userinfo
+    assert str(info.value) == f"http_status: {server.base_url}/feed (HTTP 404)"  # no route: 404
+    assert caplog.records[0].__dict__["url"] == f"{server.base_url}/feed"
+    assert "s3cret" not in caplog.text

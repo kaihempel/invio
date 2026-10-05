@@ -15,7 +15,7 @@ import typer
 from pydantic import BaseModel, StrictInt, TypeAdapter, ValidationError
 
 from invio.cli.prompts import Prompter, Validator
-from invio.cli.source_check import SourceChecker, redact
+from invio.cli.source_check import SourceChecker
 from invio.config.job import (
     TIME_PATTERN,
     Frequency,
@@ -34,6 +34,7 @@ from invio.config.job import (
 from invio.llm.base import ModelRegistryError
 from invio.llm.registry import ModelRegistry
 from invio.services.jobs import JobNameError, check_job_name
+from invio.sources.urls import redact
 
 __all__ = [
     "OTHER",

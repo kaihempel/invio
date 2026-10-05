@@ -11,7 +11,7 @@ import sys
 import threading
 import time
 from collections import deque
-from collections.abc import Callable, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 from dataclasses import dataclass, field
 from ipaddress import IPv4Network, IPv6Network, ip_network
 
@@ -227,8 +227,23 @@ class FakeResolver:
         return list(queue.popleft() if len(queue) > 1 else queue[0])
 
 
+class _RawStream(httpx.AsyncByteStream):
+    """An unread body, delivered in network-sized chunks like a real connection."""
+
+    def __init__(self, body: bytes) -> None:
+        self._body = body
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        for start in range(0, len(self._body), 16_384):
+            yield self._body[start : start + 16_384]
+
+
 class RecordingTransport(httpx.AsyncBaseTransport):
-    """``httpx.MockTransport`` that also logs every request it is asked to send."""
+    """``httpx.MockTransport`` that also logs every request it is asked to send.
+
+    A response built with ``content=`` is read (and decoded) by httpx on creation; it is handed
+    on as an unread raw stream instead, so the client decodes it as it would a network body.
+    """
 
     def __init__(self, handler: Callable[[httpx.Request], httpx.Response]) -> None:
         self.requests: list[httpx.Request] = []
@@ -236,7 +251,17 @@ class RecordingTransport(httpx.AsyncBaseTransport):
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
-        return await self._inner.handle_async_request(request)
+        response = await self._inner.handle_async_request(request)
+        if not isinstance(response.stream, httpx.ByteStream):
+            return response
+        raw = b"".join([chunk async for chunk in response.stream])
+        return httpx.Response(
+            response.status_code,
+            headers=response.headers,
+            stream=_RawStream(raw),
+            extensions=response.extensions,
+            request=request,
+        )
 
     async def aclose(self) -> None:
         await self._inner.aclose()

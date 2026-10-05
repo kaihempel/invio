@@ -108,12 +108,12 @@ async def test_guard_rejects_when_any_address_is_private() -> None:
     assert info.value.reason is BlockReason.NON_PUBLIC_ADDRESS
 
 
-async def test_guard_returns_first_validated_address() -> None:
-    resolver = FakeResolver({"ok.example": ["93.184.216.34", "2606:4700::1111"]})
+async def test_guard_returns_all_validated_addresses_in_resolver_order() -> None:
+    resolver = FakeResolver({"ok.example": ["2606:4700::1111", "93.184.216.34"]})
 
     target = await guard_url(httpx.URL("https://ok.example/p"), resolver, ())
 
-    assert target.address == ip_address("93.184.216.34")
+    assert target.addresses == (ip_address("2606:4700::1111"), ip_address("93.184.216.34"))
     assert target.origin == Origin("https", "ok.example", 443)
     assert str(target.url) == "https://ok.example/p"
     assert resolver.calls == [("ok.example", 443)]
@@ -141,7 +141,7 @@ async def test_allow_networks_only_exempts_listed_networks() -> None:
     with pytest.raises(BlockedError):
         await guard_url(httpx.URL("http://lan.example/"), resolver, LOOPBACK)
 
-    assert target.address == ip_address("127.0.0.1")
+    assert target.addresses == (ip_address("127.0.0.1"),)
 
 
 async def test_allow_networks_accepts_other_network_objects() -> None:
@@ -149,7 +149,7 @@ async def test_allow_networks_accepts_other_network_objects() -> None:
 
     target = await guard_url(httpx.URL("http://lan.example/"), resolver, [ip_network("10.0.0.0/8")])
 
-    assert target.address == ip_address("10.0.0.5")
+    assert target.addresses == (ip_address("10.0.0.5"),)
 
 
 @pytest.mark.parametrize(
@@ -178,7 +178,7 @@ async def test_public_ip_literal_is_not_resolved() -> None:
 
     target = await guard_url(httpx.URL("http://93.184.216.34/"), resolver, ())
 
-    assert target.address == ip_address("93.184.216.34")
+    assert target.addresses == (ip_address("93.184.216.34"),)
     assert resolver.calls == []
 
 

@@ -4,7 +4,9 @@ import gzip
 import random
 import re
 import time
+import zlib
 
+import httpx
 import pytest
 
 from invio.sources.http import (
@@ -14,7 +16,14 @@ from invio.sources.http import (
     SafeHttpClient,
     TooLargeError,
 )
-from tests.http_helpers import LOOPBACK, LoopbackServer, Route, server  # noqa: F401
+from tests.http_helpers import (  # noqa: F401
+    LOOPBACK,
+    FakeResolver,
+    LoopbackServer,
+    RecordingTransport,
+    Route,
+    server,
+)
 
 LIMIT = 1024
 
@@ -263,3 +272,87 @@ async def test_gzip_body_split_over_many_chunks_is_decoded(server: LoopbackServe
 
     assert isinstance(result, FetchResult)
     assert result.content == payload
+
+
+async def test_compressed_content_length_above_the_limit_is_judged_by_decoded_size(
+    server: LoopbackServer,
+) -> None:
+    payload = random.Random(1).randbytes(LIMIT)  # incompressible: gzip adds a few bytes
+    compressed = gzip.compress(payload)
+    assert len(compressed) > LIMIT
+    server.routes["/g"] = Route(headers={"Content-Encoding": "gzip"}, body=compressed)
+
+    async with make_client() as client:
+        result = await client.get(f"{server.base_url}/g")
+
+    assert isinstance(result, FetchResult)
+    assert result.content == payload
+
+
+@pytest.mark.parametrize("raw", [b"\xb2", b"1e9", b"-5", b" "])
+async def test_unusable_content_length_does_not_escape_as_a_bare_exception(raw: bytes) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, headers=[(b"Content-Length", raw)], content=b"ok")
+
+    client = SafeHttpClient(
+        HttpClientConfig(respect_robots=False, host_interval=0.01),
+        resolver=FakeResolver({"example.org": ["93.184.216.34"]}),
+        transport=RecordingTransport(handler),
+    )
+    async with client:
+        result = await client.get("http://example.org/")
+
+    assert isinstance(result, FetchResult)
+    assert result.content == b"ok"
+
+
+async def test_every_gzip_member_is_decoded(server: LoopbackServer) -> None:
+    server.routes["/m"] = Route(
+        headers={"Content-Encoding": "gzip"},
+        body=gzip.compress(b"first,") + gzip.compress(b"second") + b"\0\0\0",
+    )
+
+    async with make_client() as client:
+        result = await client.get(f"{server.base_url}/m")
+
+    assert isinstance(result, FetchResult)
+    assert result.content == b"first,second"
+
+
+async def test_gzip_members_together_are_held_to_the_limit(server: LoopbackServer) -> None:
+    member = gzip.compress(b"a" * (LIMIT // 2 + 1))
+    server.routes["/m"] = Route(headers={"Content-Encoding": "gzip"}, body=member + member)
+
+    async with make_client() as client:
+        with pytest.raises(TooLargeError):
+            await client.get(f"{server.base_url}/m")
+
+
+@pytest.mark.parametrize(
+    ("encoding", "body"),
+    [
+        ("deflate", zlib.compress(b"hello") + b"trailing"),
+        ("gzip", gzip.compress(b"hello") + b"garbage!"),
+        ("gzip", gzip.compress(b"hello") + gzip.compress(b"cut off")[:-4]),
+    ],
+)
+async def test_data_after_the_compressed_stream_is_invalid_response(
+    server: LoopbackServer, encoding: str, body: bytes
+) -> None:
+    server.routes["/t"] = Route(headers={"Content-Encoding": encoding}, body=body)
+
+    async with make_client() as client:
+        with pytest.raises(FetchError) as info:
+            await client.get(f"{server.base_url}/t")
+
+    assert info.value.reason == "invalid_response"
+
+
+async def test_empty_body_with_a_content_encoding_is_empty(server: LoopbackServer) -> None:
+    server.routes["/e"] = Route(headers={"Content-Encoding": "gzip"}, body=b"")
+
+    async with make_client() as client:
+        result = await client.get(f"{server.base_url}/e")
+
+    assert isinstance(result, FetchResult)
+    assert result.content == b""

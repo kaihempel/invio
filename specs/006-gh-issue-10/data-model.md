@@ -18,7 +18,9 @@ Frozen Pydantic model, `extra="forbid"`. Built from `Settings` via `from_setting
 | `host_interval` | `float` | `1.0` | `> 0`, finite | `INVIO_HTTP_HOST_INTERVAL_SECONDS` |
 | `respect_robots` | `bool` | `True` | — | `INVIO_HTTP_RESPECT_ROBOTS` |
 
-`total_timeout` is the deadline of one `get()` including all redirect hops, measured from the first send (see research R9); the robots.txt fetch has its own.
+`total_timeout` is the deadline for sending and reading within one `get()` including all redirect hops, measured from the first send (see research R9). DNS checks, rate-limit waits and the robots.txt fetch (its own budget) come on top.
+
+Constraints (`HttpContact`, `HttpBytes`, `HttpCount`, `HttpSeconds`, `check_http_timeouts`) are shared with `Settings`; defaults are read from the `Settings` fields.
 
 Derived: `user_agent` = `invio/<version> (+https://github.com/kaihempel/invio; contact: <contact>)`.
 
@@ -38,7 +40,7 @@ Result of a successful guard check for one hop.
 |-------|------|---------|
 | `url` | `httpx.URL` | logical URL (original hostname) |
 | `origin` | `Origin` | key for policies |
-| `address` | `IPv4Address \| IPv6Address` | validated address the connection is pinned to |
+| `addresses` | `tuple[IPv4Address \| IPv6Address, ...]` | validated addresses in resolver order; the connection is pinned to the first reachable one |
 
 ## FetchResult (`http.py`)
 
@@ -79,16 +81,18 @@ FetchError(Exception)            url: str (redacted), status: int | None, reason
 
 ## RobotsPolicy (`robots.py`)
 
-Per origin, cached for the client's lifetime.
+Per origin, cached for the client's lifetime (a transient failure for 5 minutes).
 
 | Field | Type | Meaning |
 |-------|------|---------|
 | `mode` | `Literal["parsed","allow_all","disallow_all"]` | from robots.txt fetch outcome |
-| `parser` | `RobotFileParser \| None` | set when `mode == "parsed"` |
-| `crawl_delay` | `float \| None` | `parser.crawl_delay("invio")`, ignored if negative/invalid |
+| `rules` | `tuple[_Rule, ...]` | RFC 9309 rules of the selected groups (`invio`, else `*`) |
+| `crawl_delay` | `float \| None` | first valid `Crawl-delay` of the selected groups, ignored if negative/invalid |
+| `expires_at` | `float \| None` | monotonic time a transient-failure policy expires |
 
 State transition (per origin): `unknown → fetching → {parsed | allow_all | disallow_all}`;
-terminal for the run, never re-fetched (FR-014, FR-016).
+terminal for the run, never re-fetched (FR-014, FR-016), except that a `disallow_all` caused
+by a timeout, connection or DNS failure expires after 5 minutes (`ROBOTS_RETRY_AFTER`).
 
 | robots.txt outcome | mode |
 |--------------------|------|
