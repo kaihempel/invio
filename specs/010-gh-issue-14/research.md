@@ -56,28 +56,31 @@ after `/speckit-clarify`. The decisions below fix the open design points.
 
 - **Decision**: Sort key `(published_at is None, -published_at, origin, source_index,
   position_or_id)`: dated before undated, newer first; ties: reported candidates before
-  stored waiting items, then source order and position; stored waiting items by item id.
+  stored pending items, then source order and position; stored pending items by item id
+  (the same order `list_pending` uses in SQL).
 - **Rationale**: FR-014 and the tie-break edge case; fully deterministic (FR-015).
   `published_at` is aware UTC on both sides (`UTCDateTime`), so values compare directly.
 
 ## R7 — Order of the pipeline inside the node
 
-- **Decision**:
-  1. flatten + in-input dedupe → 2. batch lookup → 3. classify → 4. baseline (only if no
-  successful run; per source, over that source's eligible reported candidates; rejects are
-  stored as `skipped_irrelevant` / `last_error="baseline"`) → 5. add stored waiting items that
-  no source reported (not subject to baseline) → 6. sort, take `max_items_per_run` →
-  7. persist (insert unknown; reset changed; selected → `run_id`, `attempts + 1`; cut → left /
-  inserted as `new`, 0 attempts, `run_id=None`) → 8. log + return.
-  Changed versions are reset immediately after classification (before step 4), so a
-  baseline skip of a changed item is applied on top of the reset and never undone.
+- **Decision** (revised after PR review #53):
+  1. flatten + in-input dedupe → 2. batch lookup (`find_many`) → 3. classify; reset changed
+  versions and backfill missing fingerprints (one flush each) → 4. bulk-insert unknown
+  candidates (`add_new`); rows another writer inserted meanwhile are dropped *before*
+  baseline, so they never take a baseline slot → 5. baseline (only if no successful run; per
+  source, over that source's **new** entries only; rejects get status `skipped_baseline`) →
+  6. load the newest `max_items_per_run` stored pending items (waiting and retryable) that no
+  source reported, plus their total counts (`list_pending` / `count_pending`; not subject to
+  baseline) → 7. sort, take `max_items_per_run`; selected → `run_id`, `attempts + 1` →
+  8. log + return.
 - **Rationale**: Matches spec order (dedupe → baseline → run limit) and Q1 (cut new/changed
-  items become waiting work, FR-012). All reported eligible candidates take part in baseline;
-  stored-only waiting items skip it (spec assumption).
+  items become waiting work, FR-012). Baseline only limits new items so known work is never
+  discarded while a job has no successful run. Loading pending items in SQL with a limit keeps
+  a large backlog from being loaded on every run.
 - **Cut items that are known**: a cut retry/changed item keeps its stored state except that a
   changed item is still reset (new hash stored, status `new`, attempts 0) so it becomes
-  waiting work; a cut retry item stays `failed`/`new` with its attempts and is retried when
-  reported again.
+  waiting work; a cut retry item stays `failed`/`new` with its attempts and is retried by a
+  later run from storage, whether or not a source reports it again.
 
 ## R8 — Concurrent runs of the same job
 

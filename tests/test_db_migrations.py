@@ -62,17 +62,17 @@ def _tables(engine: Engine) -> set[str]:
 
 
 def test_upgrade_creates_all_tables_and_reports_revision(migration_engine: Engine) -> None:
-    assert _upgrade(migration_engine) == "0002"
+    assert _upgrade(migration_engine) == "0003"
 
     assert _tables(migration_engine) == APP_TABLES | {"alembic_version"}
     with migration_engine.begin() as conn:
-        assert current_revision(conn) == "0002"
+        assert current_revision(conn) == "0003"
 
 
 def test_second_upgrade_is_a_noop(migration_engine: Engine) -> None:
     _upgrade(migration_engine)
 
-    assert _upgrade(migration_engine) == "0002"
+    assert _upgrade(migration_engine) == "0003"
     assert _tables(migration_engine) == APP_TABLES | {"alembic_version"}
 
 
@@ -99,6 +99,70 @@ def test_upgrade_leaves_foreign_tables_untouched(migration_engine: Engine) -> No
     finally:
         with migration_engine.begin() as conn:
             conn.execute(text("DROP TABLE IF EXISTS other"))
+
+
+def _item_rows(engine: Engine) -> list[tuple[str, str, str | None, int, str | None]]:
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text("SELECT url_hash, status, last_error, attempts, run_id FROM items ORDER BY id")
+        )
+        return [(r[0], r[1], r[2], r[3], None if r[4] is None else str(r[4])) for r in rows]
+
+
+def test_0003_moves_baseline_items_to_own_status_and_back(migration_engine: Engine) -> None:
+    _upgrade(migration_engine, "0002")
+    now = "2026-10-05 10:00:00"
+    with migration_engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO jobs (id, name, enabled, created_at, updated_at)"
+                " VALUES (1, 'j', 1, :now, :now)"
+            ),
+            {"now": now},
+        )
+        conn.execute(
+            text(
+                "INSERT INTO runs (id, job_id, status, started_at) VALUES (7, 1, 'succeeded', :now)"
+            ),
+            {"now": now},
+        )
+        for n, status, error in (
+            (1, "skipped_irrelevant", "baseline"),
+            (2, "skipped_irrelevant", None),
+            (3, "failed", "baseline"),
+        ):
+            conn.execute(
+                text(
+                    "INSERT INTO items (job_id, run_id, url, url_hash, type, title, status,"
+                    " attempts, last_error, created_at, updated_at)"
+                    " VALUES (1, 7, :url, :hash, 'article', 't', :status, 2, :error, :now, :now)"
+                ),
+                {
+                    "url": f"https://e.com/{n}",
+                    "hash": str(n) * 64,
+                    "status": status,
+                    "error": error,
+                    "now": now,
+                },
+            )
+    before = _item_rows(migration_engine)
+
+    _upgrade(migration_engine)
+
+    assert _item_rows(migration_engine) == [
+        ("1" * 64, "skipped_baseline", None, 2, "7"),
+        ("2" * 64, "skipped_irrelevant", None, 2, "7"),
+        ("3" * 64, "failed", "baseline", 2, "7"),
+    ]
+    _downgrade(migration_engine, "0002")
+    assert _item_rows(migration_engine) == before
+    assert _db_enum_values(migration_engine, "items", "status") == (
+        {s.value for s in ItemStatus} - {"skipped_baseline"}
+    )
+    with migration_engine.begin() as conn:
+        conn.execute(text("DELETE FROM items"))
+        conn.execute(text("DELETE FROM runs"))
+        conn.execute(text("DELETE FROM jobs"))
 
 
 def _is_reflection_noise(diff: object) -> bool:
@@ -202,8 +266,8 @@ def test_upgrade_to_unknown_revision_fails(migration_engine: Engine) -> None:
 def test_upgrade_with_url_creates_its_own_engine(tmp_path: Path) -> None:
     url = f"sqlite:///{tmp_path}/own.sqlite"
 
-    assert upgrade(alembic_config(url=url)) == "0002"
-    assert upgrade(alembic_config(url=url)) == "0002"
+    assert upgrade(alembic_config(url=url)) == "0003"
+    assert upgrade(alembic_config(url=url)) == "0003"
     downgrade(alembic_config(url=url))
 
     engine = create_db_engine(url)

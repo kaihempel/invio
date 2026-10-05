@@ -15,7 +15,9 @@
 - Q: When a run hits `max_items_per_run`, what should happen to the eligible items that didn't fit? → A: Save them as new with 0 attempts; later runs take them from storage (newest first) together with fresh candidates, even if the source no longer lists them.
 - Q: Which earlier runs should count as "successful", so that a job leaves baseline mode? → A: Runs that ended as `succeeded` or `partial`; `failed` and still-running runs do not count.
 - Q: An item can be taken into a run that then crashes or gets interrupted before the item is finished, leaving it with status new and 1 or more attempts. What should later runs do with it? → A: Retry it like a failed item while it has fewer than 3 attempts.
-- Q: Where should the reason "baseline" be stored for items that baseline mode skips? → A: In the item's existing error/reason text field, as the fixed value `baseline`; no schema change.
+- Q: Where should the reason "baseline" be stored for items that baseline mode skips? → A: ~~In the item's existing error/reason text field, as the fixed value `baseline`; no schema change.~~ Revised after PR review (#53): as its own item status `skipped_baseline` (migration 0003), so the error field only ever holds errors.
+- Q (PR review #53): Should baseline mode also skip known work (retries, changed pages, waiting items) of a job whose runs all failed so far? → A: No. Baseline only limits new items; known work is never discarded by it.
+- Q (PR review #53): What happens to an interrupted or failed item that no source reports anymore? → A: It is loaded from storage like a waiting item and retried while it has fewer than 3 attempts.
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -113,22 +115,22 @@ fourth on.
 
 A newly created job may point at feeds or pages with hundreds of older entries. If the job
 has never completed a successful run, the step keeps only the newest `baseline_items`
-(default 10) candidates of each source for processing. The older candidates are stored as
-skipped with the reason "baseline", so later runs treat them as known and never process them.
+(default 10) candidates of each source for processing. The older candidates are stored
+with status `skipped_baseline`, so later runs treat them as known and never process them.
 
 **Why this priority**: Without a baseline, the first run would fetch, rate and summarize the
 entire archive of every source — slow, expensive and useless to the operator.
 
 **Independent Test**: For a job without a successful run, pass 25 candidates from source A
 and 5 from source B with baseline 10. The step returns the 10 newest from A and all 5 from B;
-the 15 older items of A are stored as skipped with reason "baseline". A second run with the
+the 15 older items of A are stored with status `skipped_baseline`. A second run with the
 same candidates returns nothing.
 
 **Acceptance Scenarios**:
 
 1. **Given** a job without a successful run and a source with more than `baseline_items`
    candidates, **When** the step runs, **Then** only the newest `baseline_items` of that
-   source are returned and the rest are stored as skipped with reason "baseline".
+   source are returned and the rest are stored with status `skipped_baseline`.
 2. **Given** a job without a successful run and a source with at most `baseline_items`
    candidates, **When** the step runs, **Then** all of that source's new candidates are
    returned.
@@ -178,8 +180,8 @@ publish dates, the step returns exactly the 5 newest.
   candidates).
 - Two concurrent runs of the same job report the same new item: it is stored once; the
   existing storage-level duplicate protection applies.
-- A retried failed item or a changed web page during the first run counts toward the
-  baseline of its source like any other eligible candidate.
+- A retried failed item, a changed web page or a reported waiting item during the first run
+  does not count toward the baseline of its source and is never skipped by it.
 - An item changed (new fingerprint) whose stored status is failed with 3 attempts: the new
   version is a fresh start, so it is returned and its attempt count restarts.
 - A job with a disabled source: candidates are only those reported by enabled sources;
@@ -210,18 +212,18 @@ publish dates, the step returns exactly the 5 newest.
 - **FR-008**: Duplicate candidates within the same input MUST be returned at most once.
 - **FR-009**: If the job has no previous successful run (an earlier run that ended as
   `succeeded` or `partial`), the step MUST keep only the newest
-  `baseline_items` eligible candidates per source and store the others with status
-  skipped-irrelevant and the fixed value `baseline` in their existing error/reason field
-  (no new status value and no schema change).
+  `baseline_items` new candidates per source and store the other new candidates with status
+  `skipped_baseline` (migration 0003). Changed, retried and waiting items are exempt.
 - **FR-010**: `baseline_items` MUST be configurable per job with a default of 10 and accept
   only positive whole numbers.
 - **FR-011**: After baseline mode, the step MUST keep at most `max_items_per_run` items,
   choosing the newest by publish date.
 - **FR-012**: New and changed items cut by the run limit MUST be stored with status new and
   0 attempts (waiting), not linked to the run; cut retry items MUST keep their stored status
-  and attempt count. At the start of each step, the job's stored waiting items (status new,
-  0 attempts) MUST be loaded and considered together with the fresh candidates for the run
-  limit, newest first, whether or not a source still reports them.
+  and attempt count. At the start of each step, the job's stored pending items (waiting: status new, 0
+  attempts; retryable: failed, or new after an interrupted run, with fewer than 3 attempts)
+  MUST be considered together with the fresh candidates for the run limit, newest first,
+  whether or not a source still reports them.
 - **FR-013**: Each item taken into the run MUST have its attempt count incremented by one and
   be linked to the current run.
 - **FR-014**: Ordering by "newest" MUST use the publish date, with undated items treated as
@@ -267,9 +269,9 @@ publish dates, the step returns exactly the 5 newest.
   default 10, minimum 1; existing job files stay valid.
 - Candidates are grouped by source when they reach the step (the pipeline state carries the
   source of each candidate), so baseline can be counted per source.
-- Baseline mode filters the eligible candidates reported by the sources of a job without a
-  successful run (new, changed, retried and reported waiting items alike); waiting items
-  loaded only from storage (not reported in this run) are exempt from baseline.
+- Baseline mode filters only the new candidates reported by the sources of a job without a
+  successful run; changed, retried and waiting items (reported or loaded from storage) are
+  exempt from baseline.
 - Only the content fingerprint decides whether a known page changed; title or teaser changes
   alone do not create a new version.
 - Item status transitions after the run (e.g. setting failed, summarized) are handled by

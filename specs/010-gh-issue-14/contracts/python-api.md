@@ -25,18 +25,30 @@ class ItemRepository:
     def find_many(self, job_id: int, url_hashes: Collection[str]) -> dict[str, Item]:
         """Return the job's stored items for ``url_hashes``, keyed by url_hash (batched IN)."""
 
-    def list_waiting(self, job_id: int) -> list[Item]:
-        """Return the job's items with status ``new`` and 0 attempts, ordered by id."""
+    def add_new(self, job_id: int, candidates: Sequence[Candidate]) -> list[tuple[Item, bool]]:
+        """Bulk-insert candidates found absent; ``(item, created)`` in input order. Falls back
+        to ``add`` per candidate if another writer inserted one meanwhile."""
 
-    def reset_version(self, item: Item, candidate: Candidate) -> Item:
-        """Store a new content version: content_hash/title/teaser/published_at from
-        ``candidate``; status ``new``, attempts 0, last_error ``None``, run_id ``None``."""
+    def list_pending(
+        self, job_id: int, *, run_id: int, max_attempts: int, limit: int
+    ) -> list[Item]:
+        """Up to ``limit`` waiting or retryable items not taken by ``run_id``, newest first."""
+
+    def count_pending(self, job_id: int, *, run_id: int, max_attempts: int) -> tuple[int, int]:
+        """``(waiting, retryable)`` counts of the items ``list_pending`` selects from."""
+
+    def reset_versions(self, changes: Iterable[tuple[Item, Candidate]]) -> None:
+        """Store new content versions (url/type/title/teaser/published_at/content_hash);
+        status ``new``, attempts 0, last_error ``None``, run_id ``None``. One flush."""
+
+    def set_content_hashes(self, updates: Iterable[tuple[Item, str]]) -> None:
+        """Backfill fingerprints of items that had none. One flush."""
 
     def mark_taken(self, items: Iterable[Item], run_id: int) -> None:
         """Link ``items`` to ``run_id`` and increment each item's attempts by one."""
 
-    def mark_skipped(self, item: Item, status: ItemStatus, *, reason: str) -> Item:
-        """Set ``status`` and store ``reason`` in ``last_error``."""
+    def mark_status(self, items: Iterable[Item], status: ItemStatus) -> None:
+        """Set ``status`` on ``items``. One flush."""
 
 
 class RunRepository:
@@ -50,7 +62,6 @@ All write methods flush and never commit (existing repository convention).
 
 ```python
 MAX_ATTEMPTS: Final = 3
-BASELINE_REASON: Final = "baseline"
 
 SelectReason = Literal["new", "changed", "retry", "waiting"]
 
@@ -100,8 +111,8 @@ def deduplicate(
     """Select the items this run processes and record the outcome for the job.
 
     Per-job dedupe, changed-version detection, retries (< MAX_ATTEMPTS), baseline mode
-    (no succeeded/partial run → newest ``limits.baseline_items`` per source key), waiting
-    backlog, ``limits.max_items_per_run`` newest-first. Flushes, never commits. Logs one
+    (no succeeded/partial run → newest ``limits.baseline_items`` new items per source key, the
+    rest ``skipped_baseline``), pending backlog (waiting and retryable items), ``limits.max_items_per_run`` newest-first. Flushes, never commits. Logs one
     structured ``deduplicated`` line with the counts of ``DedupStats``.
     """
 ```
@@ -111,5 +122,7 @@ def deduplicate(
 - Same stored state + same input → same result (deterministic ordering, see data-model).
 - Calling twice with identical candidates and no cut items: second call returns `[]`.
 - No item appears twice in `items`; `len(items) <= limits.max_items_per_run`.
-- Never raises for empty input; returns stored waiting items (if any) up to the limit.
+- Never raises for empty input; returns stored pending items (if any) up to the limit.
+- Statement count does not grow with the number of candidates (batched lookup, bulk insert,
+  one flush per write kind; `find_many` adds one query per 500 hashes).
 - Database errors propagate unchanged (caller's unit of work rolls back).

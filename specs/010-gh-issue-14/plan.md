@@ -13,11 +13,12 @@ receives the candidates grouped by source, looks up the job's stored items in on
 query, classifies each candidate (new / changed version / retry / waiting / drop), applies
 baseline mode when the job has no `succeeded` or `partial` run, merges the job's waiting
 backlog from storage, applies `max_items_per_run` newest-first, and persists the outcome
-through `ItemRepository`: unknown items inserted, changed versions reset, baseline rejects
-stored as `skipped_irrelevant` with `last_error = "baseline"`, items cut by the run limit
+through `ItemRepository`: unknown items inserted, changed versions reset, baseline rejects (new items only)
+stored as `skipped_baseline`, items cut by the run limit
 stored as waiting (`new`, 0 attempts), selected items linked to the run with `attempts + 1`.
 It returns plain frozen records (no ORM objects) plus counts and logs one structured summary
-line. LangGraph wiring stays with #21; this issue adds no new dependency and no migration.
+line. LangGraph wiring stays with #21; this issue adds no new dependency; migration 0003 adds the `skipped_baseline` status
+(PR review #53).
 `LimitsConfig` gains `baseline_items` (default 10, ≥ 1), mirrored in the JSON schema, example
 job file and creation wizard.
 
@@ -29,7 +30,8 @@ job file and creation wizard.
 dev dependencies (LangGraph arrives with #21; the node is a plain function it can wrap).
 
 **Storage**: Existing schema from #4 (`items.attempts`, `items.content_hash`,
-`items.last_error`, `items.run_id`, unique `(job_id, url_hash)`); no migration
+`items.last_error`, `items.run_id`, unique `(job_id, url_hash)`); migration 0003 adds
+the `skipped_baseline` item status
 
 **Testing**: pytest with the `db` marker and `db_session` fixture (in-memory SQLite by
 default, MariaDB opt-in via `INVIO_TEST_DATABASE_URL`); factories in `tests/db_helpers.py`
@@ -96,8 +98,9 @@ src/invio/
 ├── cli/
 │   └── wizard.py              # _LIMIT_QUESTIONS: + ("baseline_items", "Baseline items per source")
 ├── db/
-│   └── repositories.py        # ItemRepository.find_many / list_waiting / reset_version /
-│                              #   mark_taken / mark_skipped; RunRepository.has_successful_run
+│   └── repositories.py        # ItemRepository.find_many / add_new / list_pending /
+│                              #   count_pending / reset_versions / set_content_hashes /
+│                              #   mark_taken / mark_status; RunRepository.has_successful_run
 └── graph/
     └── nodes/
         ├── __init__.py        # new package

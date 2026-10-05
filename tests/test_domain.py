@@ -93,6 +93,7 @@ def test_import_loads_no_heavy_dependencies() -> None:
                 "extracted",
                 "skipped_keyword",
                 "skipped_irrelevant",
+                "skipped_baseline",
                 "relevant",
                 "summarized",
                 "failed",

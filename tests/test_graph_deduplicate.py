@@ -6,6 +6,8 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
+from sqlalchemy import event
+from sqlalchemy.exc import StatementError
 from sqlalchemy.orm import Session
 
 from invio.config.job import LimitsConfig
@@ -13,7 +15,6 @@ from invio.db.models import Item, Job, Run
 from invio.db.repositories import ItemRepository, RunRepository
 from invio.domain import Candidate, ItemStatus, RunStatus
 from invio.graph.nodes.deduplicate import (
-    BASELINE_REASON,
     MAX_ATTEMPTS,
     DedupResult,
     deduplicate,
@@ -87,9 +88,9 @@ def _finish(session: Session, result: DedupResult) -> None:
     session.flush()
 
 
-def _check_invariants(result: DedupResult, stored_only_waiting: int = 0) -> None:
+def _check_invariants(result: DedupResult, stored_only: int = 0) -> None:
     s = result.stats
-    assert s.new + s.changed + s.retried + s.waiting + s.dropped == s.found + stored_only_waiting
+    assert s.new + s.changed + s.retried + s.waiting + s.dropped == s.found + stored_only
     assert s.selected + s.limit_cut + s.baseline_skipped == (
         s.new + s.changed + s.retried + s.waiting
     )
@@ -204,13 +205,87 @@ def test_concurrent_insert_during_baseline_is_not_skipped(
 ) -> None:
     job = make_job(db_session)
     winner = make_item(db_session, job, "https://example.com/1", status=ItemStatus.SUMMARIZED)
-    monkeypatch.setattr(ItemRepository, "add", lambda self, job_id, c, **kw: (winner, False))
+    monkeypatch.setattr(
+        ItemRepository, "add_new", lambda self, job_id, cs: [(winner, False) for _ in cs]
+    )
     monkeypatch.setattr(ItemRepository, "find_many", lambda self, job_id, hashes: {})
 
     result = _run(db_session, job, {"s": [_cand(1)]})
 
     assert result.items == [] and result.stats.dropped == 1
+    assert result.stats.baseline_skipped == 0
     assert winner.status == ItemStatus.SUMMARIZED and winner.last_error is None
+    _check_invariants(result)
+
+
+def test_concurrent_insert_does_not_use_a_baseline_slot(
+    db_session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    job = make_job(db_session)
+    winner = make_item(db_session, job, "https://example.com/3", status=ItemStatus.SUMMARIZED)
+    real_find_many = ItemRepository.find_many
+    calls: list[int] = []
+
+    def find_many(self: ItemRepository, job_id: int, hashes: Any) -> dict[str, Item]:
+        # the first lookup misses the row another writer is committing; the batch insert then
+        # hits the unique constraint and falls back to per-item ``add``
+        calls.append(1)
+        found = real_find_many(self, job_id, hashes)
+        return found if len(calls) > 1 else {}
+
+    monkeypatch.setattr(ItemRepository, "find_many", find_many)
+
+    # the concurrently inserted 3 is the newest; it must not push 2 out of the baseline
+    result = _run(db_session, job, {"s": [_cand(1), _cand(2), _cand(3)]}, _limits(baseline_items=1))
+
+    assert _urls(result) == ["2"]
+    assert (result.stats.dropped, result.stats.baseline_skipped) == (1, 1)
+    assert (winner.status, winner.run_id) == (ItemStatus.SUMMARIZED, None)
+    _check_invariants(result)
+
+
+def test_naive_published_at_fails_loudly(db_session: Session) -> None:
+    job = make_job(db_session)
+    naive = make_candidate("https://example.com/1", published_at=datetime(2026, 1, 1))
+
+    with pytest.raises(StatementError, match="naive datetime"):
+        _run(db_session, job, {"s": [naive]})
+
+
+def test_missing_stored_hash_is_backfilled(db_session: Session) -> None:
+    job = _job_with_success(db_session)
+    make_item(db_session, job, "https://example.com/1", status=ItemStatus.SUMMARIZED)
+
+    assert _run(db_session, job, {"s": [_cand(1, content_hash="x" * 64)]}).items == []
+    assert _stored(db_session, job, 1).content_hash == "x" * 64
+
+    result = _run(db_session, job, {"s": [_cand(1, content_hash="y" * 64)]})
+    assert [i.reason for i in result.items] == ["changed"]
+
+
+def _statements(session: Session, job: Job, candidates: Mapping[str, Sequence[Candidate]]) -> int:
+    run = _current_run(session, job)
+    statements: list[str] = []
+
+    def record(conn: object, cursor: object, statement: str, *args: object) -> None:
+        statements.append(statement)
+
+    engine = session.get_bind()
+    event.listen(engine, "before_cursor_execute", record)
+    try:
+        _run(session, job, candidates, _limits(baseline_items=1), run=run)
+    finally:
+        event.remove(engine, "before_cursor_execute", record)
+    return len(statements)
+
+
+def test_statement_count_is_independent_of_candidate_count(db_session: Session) -> None:
+    few = _statements(db_session, make_job(db_session, "a"), {"s": [_cand(1), _cand(2)]})
+    many = _statements(
+        db_session, make_job(db_session, "b"), {"s": [_cand(n) for n in range(100, 160)]}
+    )
+
+    assert many == few
 
 
 def test_summary_log_line(db_session: Session, caplog: pytest.LogCaptureFixture) -> None:
@@ -242,10 +317,10 @@ def test_baseline_keeps_newest_per_source(db_session: Session) -> None:
     kept_b = {str(100 + n) for n in range(5)}
     assert set(_urls(result)) == kept_a | kept_b
     assert result.stats.baseline is True and result.stats.baseline_skipped == 15
-    skipped = ItemRepository(db_session).list_for_job(job.id, status=ItemStatus.SKIPPED_IRRELEVANT)
+    skipped = ItemRepository(db_session).list_for_job(job.id, status=ItemStatus.SKIPPED_BASELINE)
     assert len(skipped) == 15
     for item in skipped:
-        assert (item.last_error, item.attempts, item.run_id) == (BASELINE_REASON, 0, None)
+        assert (item.last_error, item.attempts, item.run_id) == (None, 0, None)
     _finish(db_session, result)
     assert _run(db_session, job, batch, _limits(baseline_items=10)).items == []
 
@@ -290,30 +365,49 @@ def test_baseline_undated_lose_and_ties_keep_source_order(db_session: Session) -
     result = _run(db_session, job, batch, _limits(baseline_items=3))
 
     assert _urls(result) == ["2", "3", "4"]
-    assert _stored(db_session, job, 1).status == ItemStatus.SKIPPED_IRRELEVANT
+    assert _stored(db_session, job, 1).status == ItemStatus.SKIPPED_BASELINE
 
 
-def test_baseline_skips_known_eligible_items_incl_failed(db_session: Session) -> None:
+def test_baseline_never_skips_known_work(db_session: Session) -> None:
     job = make_job(db_session)
-    # A reported retry item outside the baseline cut becomes skipped_irrelevant (data-model.md,
-    # "any eligible known -> baseline reject"); attempts stay unchanged.
+    make_run(db_session, job, status=RunStatus.FAILED)
+    # Known work (retry, changed, reported waiting) is exempt from baseline: only new items
+    # compete for the baseline slots, even when they are newer.
     failed = make_item(
-        db_session, job, "https://example.com/1", status=ItemStatus.FAILED, attempts=1
-    )
-    result = _run(
         db_session,
         job,
-        {"s": [_cand(1, day=1), _cand(2, day=2)]},
-        _limits(baseline_items=1),
+        "https://example.com/1",
+        status=ItemStatus.FAILED,
+        attempts=1,
+        published_at=DAY0 + timedelta(days=1),
     )
+    make_item(
+        db_session,
+        job,
+        "https://example.com/2",
+        content_hash="x" * 64,
+        status=ItemStatus.SUMMARIZED,
+        published_at=DAY0 + timedelta(days=2),
+    )
+    make_item(db_session, job, "https://example.com/3", published_at=DAY0 + timedelta(days=3))
+    batch = {
+        "s": [
+            _cand(1, day=1),
+            _cand(2, day=2, content_hash="y" * 64),
+            _cand(3, day=3),
+            _cand(4, day=4),
+            _cand(5, day=5),
+        ]
+    }
 
-    assert _urls(result) == ["2"]
-    assert (failed.status, failed.last_error, failed.attempts) == (
-        ItemStatus.SKIPPED_IRRELEVANT,
-        BASELINE_REASON,
-        1,
-    )
+    result = _run(db_session, job, batch, _limits(baseline_items=1))
+
+    assert _urls(result) == ["5", "3", "2", "1"]
+    assert [i.reason for i in result.items] == ["new", "waiting", "changed", "retry"]
+    assert (failed.status, failed.last_error, failed.attempts) == (ItemStatus.FAILED, None, 2)
+    assert _stored(db_session, job, 4).status == ItemStatus.SKIPPED_BASELINE
     assert result.stats.baseline_skipped == 1
+    _check_invariants(result)
 
 
 # --- US2 -----------------------------------------------------------------------------------
@@ -375,7 +469,7 @@ def test_changed_failed_item_with_max_attempts_starts_fresh(db_session: Session)
     assert result.items[0].attempts == 1
 
 
-def test_changed_item_rejected_by_baseline_stays_skipped(db_session: Session) -> None:
+def test_changed_item_is_exempt_from_baseline(db_session: Session) -> None:
     job = make_job(db_session)
     make_item(
         db_session,
@@ -392,11 +486,10 @@ def test_changed_item_rejected_by_baseline_stays_skipped(db_session: Session) ->
         _limits(baseline_items=1),
     )
 
-    assert _urls(result) == ["2"]
+    assert _urls(result) == ["2", "1"]
     stored = _stored(db_session, job, 1)
-    assert stored.status == ItemStatus.SKIPPED_IRRELEVANT
-    assert stored.last_error == BASELINE_REASON
-    assert stored.content_hash == "y" * 64
+    assert (stored.status, stored.content_hash, stored.attempts) == (ItemStatus.NEW, "y" * 64, 1)
+    assert result.stats.baseline_skipped == 0
 
 
 # --- US3 -----------------------------------------------------------------------------------
@@ -479,7 +572,7 @@ def test_under_limit_selects_all(db_session: Session) -> None:
 def test_cut_items_are_picked_up_later(db_session: Session) -> None:
     job = _job_with_success(db_session)
     limits = _limits(max_items_per_run=5)
-    _run(db_session, job, {"s": [_cand(n) for n in range(1, 9)]}, limits)
+    _finish(db_session, _run(db_session, job, {"s": [_cand(n) for n in range(1, 9)]}, limits))
 
     later = _run(db_session, job, {}, limits)
 
@@ -487,25 +580,70 @@ def test_cut_items_are_picked_up_later(db_session: Session) -> None:
     assert {i.reason for i in later.items} == {"waiting"}
     assert later.stats.waiting == 3 and later.stats.found == 0
     assert all(i.attempts == 1 for i in later.items)
+    _finish(db_session, later)
     assert _run(db_session, job, {}, limits).items == []
 
 
 def test_waiting_compete_with_fresh_candidates_by_date(db_session: Session) -> None:
     job = _job_with_success(db_session)
     limits = _limits(max_items_per_run=2)
-    _run(db_session, job, {"s": [_cand(1), _cand(2), _cand(3), _cand(4)]}, limits)  # 1, 2 wait
+    first = _run(db_session, job, {"s": [_cand(1), _cand(2), _cand(3), _cand(4)]}, limits)
+    _finish(db_session, first)  # 1, 2 wait
 
     result = _run(db_session, job, {"s": [_cand(10, day=1)]}, limits)
 
     # waiting 2 (day 2) and new 10 (day 1) beat waiting 1 (day 1) by date/origin
     assert _urls(result) == ["2", "10"]
-    _check_invariants(result, stored_only_waiting=2)
+    _check_invariants(result, stored_only=2)
+
+
+def test_unreported_interrupted_and_failed_items_retried_from_storage(
+    db_session: Session,
+) -> None:
+    job = _job_with_success(db_session)
+    first = _run(db_session, job, {"s": [_cand(1), _cand(2), _cand(3)]})
+    _stored(db_session, job, 2).status = ItemStatus.FAILED
+    _stored(db_session, job, 3).attempts = MAX_ATTEMPTS
+    db_session.flush()
+    assert len(first.items) == 3
+
+    # no source reports them anymore; 1 was interrupted, 2 failed, 3 is out of attempts
+    result = _run(db_session, job, {})
+
+    assert _urls(result) == ["2", "1"]
+    assert [(i.reason, i.attempts) for i in result.items] == [("retry", 2), ("retry", 2)]
+    assert (result.stats.retried, result.stats.waiting) == (2, 0)
+    _check_invariants(result, stored_only=2)
+
+
+def test_stored_pending_beyond_limit_counted(db_session: Session) -> None:
+    job = _job_with_success(db_session)
+    for n in range(1, 6):
+        make_item(db_session, job, f"https://example.com/{n}", published_at=DAY0 + timedelta(n))
+    for n in range(6, 9):
+        make_item(
+            db_session,
+            job,
+            f"https://example.com/{n}",
+            status=ItemStatus.FAILED,
+            attempts=1,
+            published_at=DAY0 + timedelta(n),
+        )
+
+    result = _run(
+        db_session, job, {"s": [_cand(5, day=5), _cand(9, day=9)]}, _limits(max_items_per_run=3)
+    )
+
+    assert _urls(result) == ["9", "8", "7"]
+    s = result.stats
+    assert (s.found, s.new, s.waiting, s.retried, s.limit_cut) == (2, 1, 5, 3, 6)
+    _check_invariants(result, stored_only=7)
 
 
 def test_reported_waiting_item_counted_once(db_session: Session) -> None:
     job = _job_with_success(db_session)
     limits = _limits(max_items_per_run=1)
-    _run(db_session, job, {"s": [_cand(1), _cand(2)]}, limits)  # 1 waits
+    _finish(db_session, _run(db_session, job, {"s": [_cand(1), _cand(2)]}, limits))  # 1 waits
 
     result = _run(db_session, job, {"s": [_cand(1)]}, limits)
 
@@ -620,10 +758,7 @@ def test_baseline_then_run_limit_across_sources(
     _check_invariants(result)
     for n in (1, 2, 3, 11):
         skipped = _stored(db_session, job, n)
-        assert (skipped.status, skipped.last_error) == (
-            ItemStatus.SKIPPED_IRRELEVANT,
-            BASELINE_REASON,
-        )
+        assert (skipped.status, skipped.last_error) == (ItemStatus.SKIPPED_BASELINE, None)
     for n in (4, 12):
         cut = _stored(db_session, job, n)
         assert (cut.status, cut.attempts, cut.run_id) == (ItemStatus.NEW, 0, None)
@@ -647,6 +782,7 @@ def test_baseline_then_run_limit_across_sources(
     }
 
     # still no successful run: stored waiting items are exempt from baseline
+    _finish(db_session, result)
     later = _run(db_session, job, {}, limits)
     assert _urls(later) == ["4", "12"] and later.stats.baseline is True
     assert later.stats.baseline_skipped == 0
@@ -678,7 +814,7 @@ def test_waiting_backlog_drains_newest_first_across_runs(db_session: Session) ->
     assert _urls(second) == ["20", "5", "4"]
     assert [i.reason for i in second.items] == ["new", "waiting", "waiting"]
     assert second.stats.limit_cut == 4
-    _check_invariants(second, stored_only_waiting=5)
+    _check_invariants(second, stored_only=5)
     taken += _urls(second)
     _finish(db_session, second)
 
@@ -709,7 +845,8 @@ def test_empty_input_returns_waiting_up_to_limit_in_storage_order(db_session: Se
 
     assert _urls(result) == ["3", "1", "2"]
     assert result.stats.waiting == 5 and result.stats.limit_cut == 2
-    _check_invariants(result, stored_only_waiting=5)
+    _check_invariants(result, stored_only=5)
+    _finish(db_session, result)
     assert _urls(_run(db_session, job, {}, limits)) == ["5", "4"]
 
 

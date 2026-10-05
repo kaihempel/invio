@@ -33,7 +33,7 @@ API: [contracts/python-api.md](./contracts/python-api.md); states:
 | 4 | US2 AS1–3, SC-002 | stored web item hash X; candidate hash Y, then Y again; feed item without hash | Y → `reason="changed"`, stored hash Y; Y again → dropped; no hash → dropped |
 | 5 | US3, SC-003 | item marked `failed` after each run | selected in 3 runs total, dropped from 4th |
 | 6 | US3 AS4 | item `new` with attempts 1 (interrupted) | retried; with attempts 3 → dropped |
-| 7 | US4 AS1–2, SC-004 | no successful run; source A 25, source B 5, `baseline_items=10` | 10 newest of A + 5 of B; 15 of A `skipped_irrelevant`, `last_error="baseline"`; rerun → `[]` |
+| 7 | US4 AS1–2, SC-004 | no successful run; source A 25, source B 5, `baseline_items=10` | 10 newest of A + 5 of B; 15 of A `skipped_baseline`; rerun → `[]` |
 | 8 | US4 AS3–4 | only `failed` earlier runs → baseline; a `partial` run → no baseline | as stated |
 | 9 | US5 AS1–2, SC-005 | `max_items_per_run=5`, 8 new candidates | 5 newest, `limit_cut=3` |
 | 10 | US5 AS3–4 | cut items, next call with empty input | cut items stored `new`/0 attempts/`run_id=None`; returned next call |

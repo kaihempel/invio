@@ -9,10 +9,10 @@ No schema change. Existing tables from #4 are used as-is; new types are in-memor
 | Field | Use in this feature |
 |-------|---------------------|
 | `job_id`, `url_hash` | identity; unique per job (FR-002) |
-| `content_hash` | change detection for web pages (FR-004); `None` for feed entries |
-| `status` (`ItemStatus`) | `new`, `failed`, `skipped_irrelevant`, … (classification input/output) |
+| `content_hash` | change detection for web pages (FR-004); `None` for feed entries; a stored `None` is backfilled from a reported fingerprint |
+| `status` (`ItemStatus`) | `new`, `failed`, `skipped_baseline` (new, migration 0003), … (classification input/output) |
 | `attempts` (≥ 0) | retry limit (`MAX_ATTEMPTS = 3`); `+1` when selected (FR-013) |
-| `last_error` | holds the fixed reason `baseline` for baseline skips; cleared on reset |
+| `last_error` | cleared on reset; no longer used for baseline skips |
 | `run_id` | set to the current run when selected |
 | `published_at` | "newest" ordering (aware UTC, nullable) |
 
@@ -45,18 +45,18 @@ Source key → that source's candidates in source order. Mapping order = source 
 where `SelectReason = Literal["new", "changed", "retry", "waiting"]`.
 
 Values are always taken from the stored item after persistence. Changed items already carry
-the candidate's values (via `reset_version`); retry/waiting items keep their stored
+the candidate's values (via `reset_versions`); retry/waiting items keep their stored
 title/teaser.
 
 ### `DedupStats` (frozen, kw-only; all `int` ≥ 0)
 
-`found` (unique reported candidates), `new`, `changed`, `retried`, `waiting` (eligible
-waiting items, reported or from storage), `dropped`, `baseline_skipped`, `limit_cut`,
+`found` (unique reported candidates), `new`, `changed`, `retried`, `retried` and `waiting` (eligible
+retry/waiting items, reported or from storage), `dropped`, `baseline_skipped`, `limit_cut`,
 `selected`; plus `baseline: bool` (baseline mode active).
 
 Invariant: `new + changed + retried + waiting + dropped = found + stored_only`, where
-`stored_only` is the number of stored waiting items no source reported (they are part of
-`waiting` but not of `found`);
+`stored_only` is the number of stored pending items no source reported (they are part of
+`waiting`/`retried` but not of `found`);
 `selected + limit_cut + baseline_skipped = new + changed + retried + waiting`.
 
 ### `DedupResult` (frozen, kw-only)
@@ -74,20 +74,23 @@ Invariant: `new + changed + retried + waiting + dropped = found + stored_only`, 
 | exists | `attempts < 3` and (`status = failed` or (`status = new` and `attempts ≥ 1`)) | `retry` |
 | exists | anything else | `drop` |
 
-Rows are checked top to bottom; the first match wins.
+Rows are checked top to bottom; the first match wins. Stored items no source reported are
+classified by the last four rows (`ItemRepository.list_pending` / `count_pending` mirror them
+in SQL, newest first, limited to `max_items_per_run`).
+
+Baseline mode ranks only `new` entries per source; changed, retry and waiting items are
+never rejected by it.
 
 ## Item state transitions caused by this step
 
 ```text
 (unknown) ──selected────────────────▶ new, attempts=1, run_id=run
 (unknown) ──cut by run limit────────▶ new, attempts=0, run_id=NULL        (waiting)
-(unknown) ──baseline reject─────────▶ skipped_irrelevant, last_error="baseline", attempts=0
+(unknown) ──baseline reject─────────▶ skipped_baseline, attempts=0
 (known)   ──changed version─────────▶ new, attempts=0, last_error=NULL, content_hash=new
                                        then selected (attempts=1, run_id=run) or left waiting
 waiting   ──selected────────────────▶ new, attempts=1, run_id=run
 failed / interrupted (attempts<3) ──selected──▶ status unchanged, attempts+1, run_id=run
-any eligible known ──baseline reject─▶ skipped_irrelevant, last_error="baseline"
-                                       (attempts unchanged)
 dropped   ──────────────────────────▶ unchanged
 ```
 

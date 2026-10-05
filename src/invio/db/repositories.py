@@ -5,13 +5,13 @@ errors surface immediately, and never commit or roll back (see ``session_scope``
 """
 
 import builtins
-from collections.abc import Collection, Iterable
+from collections.abc import Collection, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import Select, exists, func, select
+from sqlalchemy import ColumnElement, Select, and_, case, exists, func, insert, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -159,17 +159,7 @@ class ItemRepository:
         existing = self._find(job_id, candidate.url_hash)
         if existing is not None:
             return existing, False
-        item = Item(
-            job_id=job_id,
-            run_id=run_id,
-            url=candidate.url,
-            url_hash=candidate.url_hash,
-            type=candidate.type,
-            title=candidate.title,
-            published_at=candidate.published_at,
-            teaser=candidate.teaser,
-            content_hash=candidate.content_hash,
-        )
+        item = Item(**_item_values(job_id, candidate, run_id=run_id))
         try:
             with self._session.begin_nested():
                 self._session.add(item)
@@ -182,6 +172,28 @@ class ItemRepository:
                 raise
             return winner, False
         return item, True
+
+    def add_new(
+        self, job_id: int, candidates: Sequence[Candidate]
+    ) -> builtins.list[tuple[Item, bool]]:
+        """Insert candidates the caller found absent (``find_many``) in one bulk statement.
+
+        Returns ``(item, created)`` per candidate in input order; ids follow the input order.
+        If another writer inserted one of them meanwhile, the batch savepoint is rolled back
+        and each candidate goes through :meth:`add`, which reports the concurrent rows as
+        ``created=False``.
+        """
+        if not candidates:
+            return []
+        try:
+            with self._session.begin_nested():
+                self._session.execute(
+                    insert(Item), [_item_values(job_id, candidate) for candidate in candidates]
+                )
+        except IntegrityError:
+            return [self.add(job_id, candidate) for candidate in candidates]
+        stored = self.find_many(job_id, [candidate.url_hash for candidate in candidates])
+        return [(stored[candidate.url_hash], True) for candidate in candidates]
 
     def get(self, item_id: int) -> Item | None:
         """Return the item with ``item_id`` or ``None``."""
@@ -209,31 +221,56 @@ class ItemRepository:
                 found[item.url_hash] = item
         return found
 
-    def list_waiting(self, job_id: int) -> builtins.list[Item]:
-        """Return the job's items with status ``new`` and 0 attempts, ordered by id."""
+    def list_pending(
+        self, job_id: int, *, run_id: int, max_attempts: int, limit: int
+    ) -> builtins.list[Item]:
+        """Return up to ``limit`` of the job's pending items, newest first.
+
+        Pending means waiting (status ``new``, 0 attempts) or retryable (``failed``, or ``new``
+        after an interrupted run, with fewer than ``max_attempts`` attempts), and not taken by
+        ``run_id``. Order: dated before undated, newer first, then id.
+        """
         stmt = (
             select(Item)
-            .where(Item.job_id == job_id, Item.status == ItemStatus.NEW, Item.attempts == 0)
-            .order_by(Item.id)
+            .where(*_pending(job_id, run_id, max_attempts))
+            .order_by(Item.published_at.is_(None), Item.published_at.desc(), Item.id)
+            .limit(limit)
         )
         return _all(self._session, stmt)
 
-    def reset_version(self, item: Item, candidate: Candidate) -> Item:
-        """Store a new content version and restart processing.
+    def count_pending(self, job_id: int, *, run_id: int, max_attempts: int) -> tuple[int, int]:
+        """Return ``(waiting, retryable)`` counts of the items :meth:`list_pending` selects from."""
+        waiting = case((_waiting(), 1), else_=0)
+        stmt = select(func.count(), func.coalesce(func.sum(waiting), 0)).where(
+            *_pending(job_id, run_id, max_attempts)
+        )
+        total, waiting_count = self._session.execute(stmt).one()
+        return int(waiting_count), int(total) - int(waiting_count)
 
-        Sets content_hash/title/teaser/published_at from ``candidate``; status ``new``,
-        attempts 0, last_error ``None``, run_id ``None``.
+    def reset_versions(self, changes: Iterable[tuple[Item, Candidate]]) -> None:
+        """Store a new content version per ``(item, candidate)`` and restart processing.
+
+        Sets url/type/title/teaser/published_at/content_hash from the candidate; status
+        ``new``, attempts 0, last_error ``None``, run_id ``None``. One flush.
         """
-        item.content_hash = candidate.content_hash
-        item.title = candidate.title
-        item.teaser = candidate.teaser
-        item.published_at = candidate.published_at
-        item.status = ItemStatus.NEW
-        item.attempts = 0
-        item.last_error = None
-        item.run_id = None
+        for item, candidate in changes:
+            item.url = candidate.url
+            item.type = candidate.type
+            item.content_hash = candidate.content_hash
+            item.title = candidate.title
+            item.teaser = candidate.teaser
+            item.published_at = candidate.published_at
+            item.status = ItemStatus.NEW
+            item.attempts = 0
+            item.last_error = None
+            item.run_id = None
         self._session.flush()
-        return item
+
+    def set_content_hashes(self, updates: Iterable[tuple[Item, str]]) -> None:
+        """Store the content fingerprint of items that had none yet. One flush."""
+        for item, content_hash in updates:
+            item.content_hash = content_hash
+        self._session.flush()
 
     def mark_taken(self, items: Iterable[Item], run_id: int) -> None:
         """Link ``items`` to ``run_id`` and increment each item's attempts by one.
@@ -246,12 +283,45 @@ class ItemRepository:
             item.attempts += 1
         self._session.flush()
 
-    def mark_skipped(self, item: Item, status: ItemStatus, *, reason: str) -> Item:
-        """Set ``status`` and store ``reason`` in ``last_error``."""
-        item.status = status
-        item.last_error = reason
+    def mark_status(self, items: Iterable[Item], status: ItemStatus) -> None:
+        """Set ``status`` on ``items``. One flush."""
+        for item in items:
+            item.status = status
         self._session.flush()
-        return item
+
+
+def _item_values(job_id: int, candidate: Candidate, *, run_id: int | None = None) -> dict[str, Any]:
+    return {
+        "job_id": job_id,
+        "run_id": run_id,
+        "url": candidate.url,
+        "url_hash": candidate.url_hash,
+        "type": candidate.type,
+        "title": candidate.title,
+        "published_at": candidate.published_at,
+        "teaser": candidate.teaser,
+        "content_hash": candidate.content_hash,
+    }
+
+
+def _pending(job_id: int, run_id: int, max_attempts: int) -> tuple[ColumnElement[bool], ...]:
+    """Filter of waiting or retryable items not taken by ``run_id`` (see ``list_pending``)."""
+    retryable = and_(
+        Item.attempts < max_attempts,
+        or_(
+            Item.status == ItemStatus.FAILED,
+            and_(Item.status == ItemStatus.NEW, Item.attempts >= 1),
+        ),
+    )
+    return (
+        Item.job_id == job_id,
+        or_(Item.run_id.is_(None), Item.run_id != run_id),
+        or_(_waiting(), retryable),
+    )
+
+
+def _waiting() -> ColumnElement[bool]:
+    return and_(Item.status == ItemStatus.NEW, Item.attempts == 0)
 
 
 class DigestRepository:
