@@ -19,8 +19,11 @@ uv run pre-commit install    # optional: run checks on every commit
 uv run ruff check
 uv run ruff format --check   # `uv run ruff format` to fix
 uv run mypy src
-uv run pytest
+uv run pytest                # `-m browser` for the headless-Chromium tests only
 ```
+
+The `browser` tests need Chromium (`uv run playwright install chromium`); they are skipped when
+it cannot be launched. CI installs it.
 
 ### Adding a CLI command
 
@@ -123,6 +126,67 @@ async with SafeHttpClient(HttpClientConfig.from_settings()) as client:
 | `INVIO_HTTP_TOTAL_TIMEOUT_SECONDS` | `60` (must be >= the read timeout) |
 | `INVIO_HTTP_HOST_INTERVAL_SECONDS` | `1` |
 | `INVIO_HTTP_RESPECT_ROBOTS` | `true` |
+
+### Web page sources
+
+A `web` source tracks a page that has no feed (`invio.sources.web.WebPageSource`). It fetches the
+page through the safe client above, takes the readable text of the page (script, style, noscript,
+template and comments dropped, whitespace collapsed, Unicode NFC) and reports it as one candidate
+whose `content_hash` is the SHA-256 of that text. The same text always gives the same hash, so
+the pipeline can tell whether the page changed.
+
+```yaml
+sources:
+  # Page mode (default): one item for the page, new when the text of the region changes.
+  - type: web
+    url: https://example.org/news
+    selector: "main .post-list"   # optional CSS selector; default is the whole <body>
+
+  # Links mode: one item per article linked from an index page.
+  - type: web
+    url: https://example.org/blog
+    mode: links
+    selector: "main"
+    url_pattern: "/blog/\\d{4}/"   # regex searched in the absolute URL, any host
+```
+
+| Key | Meaning |
+|-----|---------|
+| `selector` | Only the matching elements count (all matches, in page order). A selector that matches nothing fails the fetch with `selector_not_found`; there is no fallback to the whole page. |
+| `mode` | `page` (default) or `links`. Without `url_pattern`, links mode keeps only links on the page's own host (`www.` is a different host). |
+| `url_pattern` | Python regular expression for `mode: links`. |
+| `render` | `static` (default) or `js`, see below. |
+| `wait_for` | Plain CSS selector to wait for with `render: js` (no Playwright-only selector syntax; a selector the browser cannot parse fails with `invalid_wait_for`). |
+
+Invalid selectors and patterns, and `url_pattern` without `mode: links` or `wait_for` without
+`render: js`, are rejected when the job file is loaded. Other failures: `not_html` (a PDF or JSON
+response), and the client's errors (blocked, robots.txt, size, timeout, HTTP status).
+
+**JavaScript pages (`render: js`)** are loaded in headless Chromium, which is an optional
+dependency that is imported only for such sources:
+
+```bash
+uv sync --extra render                 # Playwright
+uv run playwright install chromium     # the browser (development: `uv sync` already has Playwright)
+```
+
+Without them a `render: js` fetch fails with `render_unavailable`; other sources are not
+affected. A render waits until the network has been quiet for 0.5 s (and `wait_for` matches),
+for at most 30 s (`timeout`). The page URL goes through the client's address guard, robots.txt
+check and rate limit, and every request the page makes (including WebSockets) is checked by the
+same address guard and aborted if it fails; the page still renders without it. Redirects are
+followed by invio so each hop is checked (credentials and cookies are not forwarded to another
+origin), and the page keeps seeing the URL it asked for. Service
+workers, downloads and proxies are off and every render starts with empty cookies and storage.
+
+Limits of `render: js`: the browser resolves a host name again when it connects, so a DNS answer
+that changes between the check and the connection (DNS rebinding) is not caught, unlike with the
+static client, which pins the connection to the checked address. Every response, the main
+document included, is capped at `INVIO_HTTP_MAX_RESPONSE_BYTES` (an oversized document fails
+with `too_large`, an oversized sub-resource is dropped); Playwright buffers a body before it can
+be measured, so the cap is not a memory bound against a hostile server. robots.txt is checked for
+the page URL only. Use it for
+sites you trust to some degree.
 
 ## Job files
 
@@ -363,7 +427,8 @@ src/invio/
   db/           models, engine/session helpers, repositories.py, migrations/ (Alembic)
   services/     jobs.py (JobService: job CRUD, YAML import/export)
   graph/        LangGraph pipelines
-  sources/      source adapters; http.py (SafeHttpClient) with netguard, robots, ratelimit
+  sources/      source adapters (rss.py, web.py; browser.py is the only Playwright user, loaded
+                lazily); http.py (SafeHttpClient) with netguard, robots, ratelimit; text.py, urls.py
   llm/          base, registry, factory, fake, models.d/ (LLM layer)
   notify/       notifications
   scheduling/   next-run calculation (next_run.py)

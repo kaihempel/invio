@@ -275,6 +275,7 @@ def test_public_names() -> None:
         "FetchResult",
         "HttpClientConfig",
         "NotModified",
+        "RenderUnavailableError",
         "SafeHttpClient",
         "TooLargeError",
     }

@@ -343,7 +343,7 @@
     },
     "WebSource": {
       "additionalProperties": false,
-      "description": "A web page.",
+      "description": "A web page tracked for changes, or an index page whose article links are collected.\n\n``selector`` limits the tracked text (``mode: page``) or the collected links\n(``mode: links``) to the matching elements; without it the whole ``<body>`` counts.\n``url_pattern`` (a regular expression searched in the absolute link URL, any host) only\napplies to ``mode: links``; without it only links on the page's own host are kept.\n``render: js`` loads the page in a headless browser first (optional extra), optionally\nwaiting for the element ``wait_for``.",
       "properties": {
         "type": {
           "const": "web",
@@ -374,6 +374,63 @@
           "default": true,
           "title": "Enabled",
           "type": "boolean"
+        },
+        "selector": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Selector"
+        },
+        "mode": {
+          "default": "page",
+          "enum": [
+            "page",
+            "links"
+          ],
+          "title": "Mode",
+          "type": "string"
+        },
+        "url_pattern": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Url Pattern"
+        },
+        "render": {
+          "default": "static",
+          "enum": [
+            "static",
+            "js"
+          ],
+          "title": "Render",
+          "type": "string"
+        },
+        "wait_for": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Wait For"
         }
       },
       "required": [

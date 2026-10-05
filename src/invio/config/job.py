@@ -30,9 +30,11 @@ from pydantic import (
     StrictFloat,
     StrictInt,
     ValidationError,
+    ValidationInfo,
     field_validator,
     model_validator,
 )
+from selectolax.lexbor import LexborHTMLParser
 
 __all__ = [
     "SUPPORTED_SCHEMA_VERSION",
@@ -249,13 +251,71 @@ class RssSource(_StrictModel):
     max_age_days: StrictInt | None = Field(default=None, ge=1)
 
 
+_OptionalText = Annotated[str | None, Field(min_length=1)]
+
+
+def _check_css_selector(value: str | None) -> str | None:
+    """Reject a CSS selector the page parser cannot parse (``None`` passes).
+
+    Validated with the same engine that evaluates it on a page. Any parser error becomes a
+    stable message, so the text does not depend on the library version.
+    """
+    if value is None:
+        return None
+    try:
+        LexborHTMLParser("<html></html>").css(value)
+    except Exception:  # the library's error types are not part of its contract
+        raise ValueError("invalid CSS selector") from None
+    return value
+
+
 class WebSource(_StrictModel):
-    """A web page."""
+    """A web page tracked for changes, or an index page whose article links are collected.
+
+    ``selector`` limits the tracked text (``mode: page``) or the collected links
+    (``mode: links``) to the matching elements; without it the whole ``<body>`` counts.
+    ``url_pattern`` (a regular expression searched in the absolute link URL, any host) only
+    applies to ``mode: links``; without it only links on the page's own host are kept.
+    ``render: js`` loads the page in a headless browser first (optional extra), optionally
+    waiting for the element ``wait_for``.
+    """
 
     type: Literal["web"]
     url: HttpUrl
     name: _SourceName = None
     enabled: StrictBool = True
+    selector: _OptionalText = None
+    mode: Literal["page", "links"] = "page"
+    url_pattern: _OptionalText = None
+    render: Literal["static", "js"] = "static"
+    wait_for: _OptionalText = None
+
+    @field_validator("selector", "wait_for")
+    @classmethod
+    def _valid_selector(cls, value: str | None) -> str | None:
+        return _check_css_selector(value)
+
+    @field_validator("url_pattern")
+    @classmethod
+    def _valid_pattern(cls, value: str | None, info: ValidationInfo) -> str | None:
+        if value is None:
+            return None
+        try:
+            re.compile(value)
+        except re.error as exc:
+            raise ValueError(f"invalid regular expression: {exc}") from None
+        # ``mode`` is missing from ``info.data`` when it failed validation: that error is
+        # reported on its own.
+        if info.data.get("mode", "links") != "links":
+            raise ValueError("only allowed with mode: links")
+        return value
+
+    @field_validator("wait_for")
+    @classmethod
+    def _wait_for_needs_js(cls, value: str | None, info: ValidationInfo) -> str | None:
+        if value is not None and info.data.get("render", "js") != "js":
+            raise ValueError("only allowed with render: js")
+        return value
 
 
 class SitemapSource(_StrictModel):

@@ -44,6 +44,9 @@ class Route:
     delay: float = 0.0  # seconds to wait before answering
     stall: bool = False  # send the headers, then never finish the body
     drip: float = 0.0  # send the body one byte per this many seconds
+    # Answer only once the test sets this event (or the server stops): timing driven by the
+    # test instead of a clock. A route whose event is never set never answers.
+    gate: threading.Event | None = None
     # Answer 304 when If-None-Match equals the route's ETag or If-Modified-Since its Last-Modified.
     conditional: bool = False
 
@@ -132,6 +135,9 @@ class LoopbackServer:
         route = self._conditional(self.routes.get(handler.path, Route(status=404)), headers)
         if route.delay:
             self._release.wait(route.delay)
+        if route.gate is not None:
+            while not route.gate.is_set() and not self._release.wait(0.02):
+                pass
         handler.send_response(route.status)
         handler.send_header("Connection", "close")  # one request per connection
         handler.close_connection = True

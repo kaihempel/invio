@@ -8,7 +8,7 @@ from enum import StrEnum
 
 from invio.sources.urls import redact_url, without_query
 
-__all__ = ["BlockReason", "BlockedError", "FetchError", "TooLargeError"]
+__all__ = ["BlockReason", "BlockedError", "FetchError", "RenderUnavailableError", "TooLargeError"]
 
 
 class BlockReason(StrEnum):
@@ -51,3 +51,17 @@ class TooLargeError(FetchError):
     def __init__(self, *, url: str, limit: int) -> None:
         super().__init__("too_large", url=url)
         self.limit = limit
+
+
+class RenderUnavailableError(FetchError):
+    """``render: js`` was requested, but the optional browser support cannot be used.
+
+    Either the ``render`` extra is not installed or Chromium is missing; the message says how
+    to install both.
+    """
+
+    INSTALL_HINT = "install it with: uv sync --extra render && uv run playwright install chromium"
+
+    def __init__(self, *, url: str = "") -> None:
+        super().__init__("render_unavailable", url=url)
+        self.args = (f"{self.args[0].rstrip(': ')} ({self.INSTALL_HINT})",)

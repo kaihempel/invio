@@ -2,9 +2,9 @@
 
 import re
 from typing import Final
-from urllib.parse import unquote, urlsplit, urlunsplit
+from urllib.parse import unquote, urljoin, urlsplit, urlunsplit
 
-__all__ = ["canonical_url", "redact", "redact_url", "without_query"]
+__all__ = ["canonical_url", "http_url_or_none", "redact", "redact_url", "without_query"]
 
 # Greedy up to the last "@" before the path, so a password containing "@" is removed too. The
 # userinfo ends at "/", "?" or "#", so an "@" in a query string or fragment is left alone.
@@ -13,6 +13,7 @@ _LEADING_USERINFO: Final = re.compile(r"^[^/?#\s]*@")
 _USERINFO: Final = re.compile(r"(?<=//)[^/?#\s]*@")
 _QUERY: Final = re.compile(r"[?#].*", re.DOTALL)
 _DEFAULT_PORTS: Final = {"http": 80, "https": 443}
+_WEB_SCHEMES: Final = frozenset(_DEFAULT_PORTS)
 # Click and campaign identifiers that do not change the page; ``utm_*`` is matched by prefix.
 _TRACKING_PARAMS: Final = frozenset(
     {"fbclid", "gclid", "dclid", "gbraid", "wbraid", "msclkid", "yclid", "igshid"}
@@ -57,6 +58,25 @@ def canonical_url(url: str) -> str:
     path = parts.path or ("/" if scheme in _DEFAULT_PORTS and host else "")
     query = "&".join(param for param in parts.query.split("&") if param and not _is_tracking(param))
     return urlunsplit((scheme, host, path, query, ""))
+
+
+def http_url_or_none(raw: str, base: str) -> str | None:
+    """``raw`` resolved against ``base`` and canonicalized, if it is a usable http(s) URL.
+
+    ``None`` for another scheme (``mailto:``, ``javascript:``, ...), a URL without a host and
+    one that cannot be parsed (an unclosed IPv6 bracket, an invalid port). Used for links
+    found in untrusted feeds and pages.
+    """
+    try:
+        url = canonical_url(urljoin(base, raw.strip()))
+        parts = urlsplit(url)
+        # ``hostname`` (unlike ``netloc``) is empty for "http://user@" and "http://:80"; an
+        # invalid port raises ``ValueError``.
+        if parts.scheme not in _WEB_SCHEMES or not parts.hostname or parts.port == 0:
+            return None
+    except ValueError:  # e.g. an unclosed IPv6 bracket or an invalid port
+        return None
+    return url
 
 
 def _is_tracking(param: str) -> bool:

@@ -10,7 +10,8 @@ from invio.config.job import RssSource
 from invio.domain import Candidate, url_hash
 from invio.sources.base import Source
 from invio.sources.http import FetchError, HttpClientConfig, SafeHttpClient
-from invio.sources.rss import TEASER_MAX_CHARS, RssFeedSource, _entry_date, _html_to_text
+from invio.sources.rss import TEASER_MAX_CHARS, RssFeedSource, _entry_date
+from invio.sources.text import html_to_text
 from tests.http_helpers import LOOPBACK, LoopbackServer, Route, server  # noqa: F401
 
 FEEDS = Path(__file__).parent / "fixtures" / "feeds"
@@ -468,6 +469,17 @@ async def test_script_and_style_content_stays_out_of_the_teaser(
     assert candidate.teaser == "Hi there"
 
 
+async def test_noscript_content_stays_out_of_the_teaser(
+    server: LoopbackServer, client: SafeHttpClient
+) -> None:
+    summary = "Hi&lt;noscript&gt;enable javascript&lt;/noscript&gt; there"
+    serve(server, rss(f"<link>https://e.com/a</link><description>{summary}</description>"))
+
+    [candidate] = await fetch(client, feed_config(server))
+
+    assert candidate.teaser == "Hi there"
+
+
 @pytest.mark.parametrize(
     ("html", "expected"),
     [
@@ -484,7 +496,7 @@ async def test_script_and_style_content_stays_out_of_the_teaser(
     ],
 )
 def test_html_to_text(html: str, expected: str) -> None:
-    assert _html_to_text(html) == expected
+    assert html_to_text(html) == expected
 
 
 @pytest.mark.parametrize(

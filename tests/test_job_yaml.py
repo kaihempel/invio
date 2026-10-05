@@ -201,6 +201,27 @@ def test_roundtrip_monthly_and_daily(job_data: dict[str, Any], tmp_path: Path) -
         assert _roundtrip(job, tmp_path) == job
 
 
+def test_roundtrip_web_source_with_all_keys(job_data: dict[str, Any], tmp_path: Path) -> None:
+    job_data["sources"] = [
+        {
+            "type": "web",
+            "url": "https://example.org/news",
+            "name": "News",
+            "selector": "main .post-list > li:not(.ad)",
+            "mode": "links",
+            "url_pattern": r"^https://example\.org/news/\d{4}/",
+            "render": "js",
+            "wait_for": ".post-list li",
+        }
+    ]
+    job = JobConfig.model_validate(job_data)
+
+    assert _roundtrip(job, tmp_path) == job
+    text = dump_yaml(job)
+    for key in ("selector:", "mode: links", "url_pattern:", "render: js", "wait_for:"):
+        assert key in text
+
+
 def test_roundtrip_tricky_keywords(job_data: dict[str, Any], tmp_path: Path) -> None:
     job_data["search"]["keywords"] = {
         "any": ["1e3", "tRuE", "07", "on", "2026-10-04", "null"],
@@ -554,7 +575,7 @@ def test_dump_nested_key_order() -> None:
     assert list(dumped["notification"]) == ["to", "subject", "send_if_empty"]
     assert [list(s) for s in dumped["sources"]] == [
         ["type", "url", "name", "enabled", "max_age_days"],
-        ["type", "url", "name", "enabled"],
+        ["type", "url", "name", "enabled", "selector", "mode", "url_pattern", "render", "wait_for"],
         ["type", "url", "name", "enabled"],
         ["type", "channel_id", "name", "enabled"],
         ["type", "playlist_id", "name", "enabled"],
