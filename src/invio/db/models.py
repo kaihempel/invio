@@ -170,6 +170,7 @@ class Item(Base):
     teaser: Mapped[str | None] = mapped_column(Text, default=None)
     content_hash: Mapped[str | None] = mapped_column(CHAR(64), default=None)
     raw_content: Mapped[str | None] = mapped_column(LONG_TEXT, default=None)
+    # ItemSummary JSON, written by ItemRepository.set_summary
     summary: Mapped[str | None] = mapped_column(Text, default=None)
     status: Mapped[ItemStatus] = mapped_column(
         _enum(ItemStatus, "item_status"),

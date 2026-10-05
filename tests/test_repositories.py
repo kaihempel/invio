@@ -486,3 +486,14 @@ def test_usage_totals_exact_decimal(db_session: Session, costs: list[str], expec
 def test_usage_totals_empty_has_six_places(db_session: Session) -> None:
     totals = UsageRepository(db_session).totals_for_job(make_job(db_session).id)
     assert str(totals.cost_usd) == "0.000000"
+
+
+def test_item_set_summary_stores_status_and_clears_error(db_session: Session) -> None:
+    job = make_job(db_session)
+    item = make_item(db_session, job, status=ItemStatus.RELEVANT, last_error="boom")
+    repo = ItemRepository(db_session)
+    repo.set_summary(item, '{"headline": "h"}')
+    db_session.expire_all()
+    assert item.summary == '{"headline": "h"}'
+    assert item.status == ItemStatus.SUMMARIZED
+    assert item.last_error is None

@@ -1,0 +1,3 @@
+Teams running LLM agents in production report that the hardest problems are operational rather than model related: retries, budgets and observability.
+
+A recent survey of fifty teams found that most keep a human in the loop for high-risk actions and cap token spend per run.

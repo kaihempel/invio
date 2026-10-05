@@ -545,6 +545,13 @@
       "title": "Schema Version",
       "type": "integer"
     },
+    "language": {
+      "default": "en",
+      "description": "Language summaries are written in (ISO 639-1 code)",
+      "pattern": "^[a-z]{2}$",
+      "title": "Language",
+      "type": "string"
+    },
     "schedule": {
       "$ref": "#/$defs/ScheduleConfig"
     },

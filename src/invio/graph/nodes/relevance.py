@@ -11,11 +11,11 @@ backstop: even a successful injection can only yield a valid 0..1 score.
 
 Each call records one ``llm_usage`` row, also when the answer stays invalid. Per-item LLM
 failures mark the item ``failed`` and scoring continues; credential and configuration errors
-stop the step. Persistence is flush-only (the caller commits).
+stop the step. Persistence is flush-only (the caller commits). Delimiter neutralisation is the
+shared :func:`invio.graph.nodes.prompting.neutralise`.
 """
 
 import logging
-import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal
@@ -28,6 +28,7 @@ from invio.db.models import Item
 from invio.db.repositories import ItemRepository, UsageRepository
 from invio.domain import ItemStatus
 from invio.graph.nodes.keyword_filter import item_text
+from invio.graph.nodes.prompting import neutralise
 from invio.llm.base import (
     LLMInvalidOutputError,
     LLMInvalidRequestError,
@@ -96,23 +97,6 @@ class ScoringContext:
     usage: UsageRepository
 
 
-_OPEN: Final = chr(0x2039)  # single left angle quote, replaces "<" in neutralised tags
-_CLOSE: Final = chr(0x203A)  # single right angle quote, replaces ">" in neutralised tags
-# Any opening or closing delimiter tag, also with attributes, spaces around the slash or
-# trailing text, and also unterminated (no ">"), which the template's own tag would complete.
-# Each whitespace run has its own anchor ("<" or "/"): two adjacent runs would backtrack
-# quadratically on "<" followed by a long run of spaces.
-_DELIMITER = re.compile(r"<\s*(?:/\s*)?(?:document|title|content)\b[^<>]*>?", re.IGNORECASE)
-
-
-def _neutralise(text: str) -> str:
-    """Swap the angle brackets of delimiter tags for single angle quotes (U+2039, U+203A).
-
-    The text stays readable, but it can no longer open or close a delimiter.
-    """
-    return _DELIMITER.sub(lambda m: m[0].replace("<", _OPEN).replace(">", _CLOSE), text)
-
-
 _SYSTEM_TEMPLATE = """\
 You rate how relevant a document is to a research interest.
 
@@ -139,13 +123,11 @@ def build_messages(
     Delimiter tags in title and body are neutralised (before the cut, so it never lands inside
     a real tag).
     """
-    body = _neutralise(item_text(None, teaser, text))
+    body = neutralise(item_text(None, teaser, text))
     if len(body) > MAX_DOCUMENT_CHARS:
         body = f"{body[:MAX_DOCUMENT_CHARS]}\n[truncated]"
     system = _SYSTEM_TEMPLATE.format(interest=semantic_description)
-    user = (
-        f"<document>\n<title>{_neutralise(title)}</title>\n<content>{body}</content>\n</document>"
-    )
+    user = f"<document>\n<title>{neutralise(title)}</title>\n<content>{body}</content>\n</document>"
     return system, user
 
 

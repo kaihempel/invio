@@ -36,6 +36,8 @@ from pydantic import (
 )
 from selectolax.lexbor import LexborHTMLParser
 
+from invio.config.languages import ISO_639_1
+
 __all__ = [
     "SUPPORTED_SCHEMA_VERSION",
     "TIME_PATTERN",
@@ -358,6 +360,11 @@ class JobConfig(_StrictModel):
     schema_version: StrictInt = Field(
         default=1, ge=1, json_schema_extra={"maximum": SUPPORTED_SCHEMA_VERSION}
     )
+    language: str = Field(
+        default="en",
+        pattern=r"^[a-z]{2}$",
+        description="Language summaries are written in (ISO 639-1 code)",
+    )
     schedule: ScheduleConfig
     notification: NotificationConfig
     sources: list[SourceConfig] = Field(min_length=1)
@@ -372,6 +379,13 @@ class JobConfig(_StrictModel):
             raise ValueError(
                 f"schema_version {value} is not supported (max {SUPPORTED_SCHEMA_VERSION})"
             )
+        return value
+
+    @field_validator("language")
+    @classmethod
+    def _known_language(cls, value: str) -> str:
+        if value not in ISO_639_1:
+            raise ValueError(f"unknown ISO 639-1 language code '{value}'")
         return value
 
 

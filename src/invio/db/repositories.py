@@ -189,6 +189,13 @@ class ItemRepository:
         item.last_error = None
         self._session.flush()
 
+    def set_summary(self, item: Item, summary: str) -> None:
+        """Store the summary JSON, set status SUMMARIZED, clear last_error, flush."""
+        item.summary = summary
+        item.status = ItemStatus.SUMMARIZED
+        item.last_error = None
+        self._session.flush()
+
     def mark_failed(self, item: Item, error: str) -> None:
         """Set status FAILED and last_error, flush (relevance unchanged)."""
         item.status = ItemStatus.FAILED
