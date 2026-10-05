@@ -61,12 +61,16 @@ All Technical Context unknowns are resolved below. Each entry: **Decision**, **R
 ## R5 — What counts as HTML (FR-006)
 
 - **Decision**: Accept `text/html` and `application/xhtml+xml`. Without a `Content-Type`, accept
-  the body if, after an optional BOM and whitespace, it starts with `<!doctype html` or `<html`
-  (case-insensitive). Anything else → `FetchError("not_html")`.
+  the body if, after an optional BOM (UTF-8 or UTF-16) and whitespace, it starts like HTML by the
+  MIME Sniffing standard's `text/html` patterns: `<!doctype html`, a comment `<!--`, or one of
+  `<html`, `<head`, `<body`, `<script`, `<iframe`, `<h1`, `<div`, `<font`, `<table`, `<a`,
+  `<style`, `<title`, `<b`, `<br`, `<p` followed by whitespace or `>` (case-insensitive).
+  Anything else → `FetchError("not_html")`.
 - **Rationale**: Rejects PDFs, JSON and images, which would otherwise produce a meaningless but
   stable hash; tolerates misconfigured servers that omit the header.
-- **Alternatives considered**: Full MIME sniffing (overkill); accepting everything (silently
-  tracks binary data).
+- **Alternatives considered**: Only `<!doctype html`/`<html` (rejected: misses pages that start
+  with a comment or `<head>`, and UTF-16 pages); the rest of MIME sniffing (binary signatures,
+  feed detection) is not needed; accepting everything (silently tracks binary data).
 
 ## R6 — Link discovery (FR-014–FR-016)
 
@@ -109,6 +113,13 @@ All Technical Context unknowns are resolved below. Each entry: **Decision**, **R
     nor fulfilling a 3xx makes Chromium route the redirect hop, so a hop checked only by the
     handler would let a second hop through. Redirected POSTs are aborted. The render reports the
     final URL of the main document; the page itself keeps seeing the URL it asked for.)
+  - Credentials: from the first hop that leaves the requested origin on, every hop is fetched
+    with the request headers minus `Authorization`, `Proxy-Authorization` and `Cookie`.
+    Passing `headers=None` to `route.fetch` would resend the original headers, so it is only
+    used while the chain stays on the requested origin.
+  - A refused main-frame navigation (blocked target or redirect, too many redirects, an
+    oversized document) is recorded and fails the render with that error, also when it happens
+    after the page has loaded, so Chromium's error page is never hashed.
   - WebSockets: `context.route_web_socket("**/*", …)` with the same check, closing blocked
     connections. Service workers blocked (`service_workers="block"`, they bypass routing);
     downloads off; WebRTC limited to proxied UDP via the Chromium flag
@@ -120,7 +131,10 @@ All Technical Context unknowns are resolved below. Each entry: **Decision**, **R
   resolves it again (no address pinning as in `SafeHttpClient`), so DNS rebinding between the
   two lookups remains possible. Accepted for an opt-in feature and documented in the README.
   Closing it would mean proxying all browser traffic through `SafeHttpClient`, which is out of
-  scope.
+  scope. CORS preflight requests (`OPTIONS`) are sent by Chromium's network stack without being
+  routed, so they can reach a refused host (no body, the answer never reaches the page).
+  Playwright decompresses and buffers a body before its size can be checked, so the size cap
+  does not bound memory; at most four renders run at a time.
 - **Alternatives considered**: Checking the page URL only (rejected in clarification Q1);
   a local filtering HTTP proxy (closes the rebinding gap, but much more code and TLS
   complexity).
@@ -144,7 +158,8 @@ All Technical Context unknowns are resolved below. Each entry: **Decision**, **R
 - **Decision**: One Chromium instance per `WebPageSource`, launched on the first `render: js`
   fetch and closed by `WebPageSource.aclose()` (`async with` supported). Each fetch uses a new,
   isolated browser context (no shared cookies or storage) with the client's User-Agent.
-  Concurrent renders share the browser.
+  Concurrent renders share the browser; at most four run at a time. A missing Playwright
+  package or Chromium is remembered by the source, so later `render: js` fetches fail at once.
 - **Rationale**: Launching Chromium costs ~1 s; one per run is enough. A fresh context per
   page keeps sites from seeing each other's state, like the cookie-free `SafeHttpClient`.
 - **Alternatives considered**: A browser per fetch (slow); a persistent profile (leaks state

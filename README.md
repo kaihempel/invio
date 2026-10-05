@@ -153,7 +153,7 @@ sources:
 | Key | Meaning |
 |-----|---------|
 | `selector` | Only the matching elements count (all matches, in page order). A selector that matches nothing fails the fetch with `selector_not_found`; there is no fallback to the whole page. |
-| `mode` | `page` (default) or `links`. Without `url_pattern`, links mode keeps only links on the page's own host (`www.` is a different host). |
+| `mode` | `page` (default) or `links`. Without `url_pattern`, links mode keeps only links on the page's own host (`www.` is a different host). Fragments are dropped from link URLs, except single-page-app routes (`#/post/1`, `#!/post/1`), which count as separate articles. |
 | `url_pattern` | Python regular expression for `mode: links`. |
 | `render` | `static` (default) or `js`, see below. |
 | `wait_for` | Plain CSS selector to wait for with `render: js` (no Playwright-only selector syntax; a selector the browser cannot parse fails with `invalid_wait_for`). |
@@ -161,6 +161,11 @@ sources:
 Invalid selectors and patterns, and `url_pattern` without `mode: links` or `wait_for` without
 `render: js`, are rejected when the job file is loaded. Other failures: `not_html` (a PDF or JSON
 response), and the client's errors (blocked, robots.txt, size, timeout, HTTP status).
+
+The page is decoded like a browser does (BOM, then the `Content-Type` charset, then `<meta
+charset>`, with the WHATWG labels, so `gb2312` is read as GBK and `latin1` as windows-1252).
+The `content_hash` is computed from the text of the parsed page; an upgrade of the HTML parser
+(selectolax) that parses a page differently can change the hash of an unchanged page once.
 
 **JavaScript pages (`render: js`)** are loaded in headless Chromium, which is an optional
 dependency that is imported only for such sources:
@@ -175,18 +180,21 @@ affected. A render waits until the network has been quiet for 0.5 s (and `wait_f
 for at most 30 s (`timeout`). The page URL goes through the client's address guard, robots.txt
 check and rate limit, and every request the page makes (including WebSockets) is checked by the
 same address guard and aborted if it fails; the page still renders without it. Redirects are
-followed by invio so each hop is checked (credentials and cookies are not forwarded to another
-origin), and the page keeps seeing the URL it asked for. Service
-workers, downloads and proxies are off and every render starts with empty cookies and storage.
+followed by invio so each hop is checked (once a redirect leaves the requested origin, no later
+hop gets the page's credentials or cookies), and the page keeps seeing the URL it asked for. A
+main-frame navigation that is refused fails the render instead of returning the browser's error
+page. Service workers, downloads and proxies are off and every render starts with empty cookies
+and storage. At most four renders run at a time.
 
 Limits of `render: js`: the browser resolves a host name again when it connects, so a DNS answer
 that changes between the check and the connection (DNS rebinding) is not caught, unlike with the
 static client, which pins the connection to the checked address. Every response, the main
 document included, is capped at `INVIO_HTTP_MAX_RESPONSE_BYTES` (an oversized document fails
 with `too_large`, an oversized sub-resource is dropped); Playwright buffers a body before it can
-be measured, so the cap is not a memory bound against a hostile server. robots.txt is checked for
-the page URL only. Use it for
-sites you trust to some degree.
+be measured, and a compressed body is decompressed first, so the cap is not a memory bound
+against a hostile server. CORS preflight requests (`OPTIONS`) are sent by the browser without
+passing the guard; they carry no body and the page never sees their answer. robots.txt is
+checked for the page URL only. Use it for sites you trust to some degree.
 
 ## Job files
 

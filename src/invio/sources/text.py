@@ -3,26 +3,27 @@
 Feed summaries and web pages are untrusted HTML. These helpers reduce a fragment to plain
 text with one set of rules, so a feed and a page give the same text for the same markup:
 comments and the content of ``script``/``style``/``noscript``/``template`` are dropped,
-character references are decoded and block elements separate words.
+character references are decoded and block elements separate words. The web page source reads
+its parsed tree directly with the same :data:`NON_TEXT_TAGS` and :data:`BLOCK_TAGS`.
 """
 
 from html.parser import HTMLParser
 from typing import Final
 
-__all__ = ["TEASER_MAX_CHARS", "collapse", "html_to_text", "teaser"]
+__all__ = ["BLOCK_TAGS", "NON_TEXT_TAGS", "TEASER_MAX_CHARS", "collapse", "html_to_text", "teaser"]
 
 TEASER_MAX_CHARS: Final = 500
 """Longest teaser kept from a summary or a page text, ellipsis included."""
 
 _ELLIPSIS: Final = "…"
-# Elements whose content is code or fallback markup, not text.
-_NON_TEXT_TAGS: Final = frozenset({"script", "style", "noscript", "template"})
-# Elements that separate words: "<p>a</p><p>b</p>" reads "a b", while "wo<b>rd</b>" stays "word".
-_BLOCK_TAGS: Final = frozenset(
+NON_TEXT_TAGS: Final = frozenset({"script", "style", "noscript", "template"})
+"""Elements whose content is code or fallback markup, not text."""
+BLOCK_TAGS: Final = frozenset(
     {"address", "article", "aside", "blockquote", "br", "dd", "div", "dl", "dt", "figcaption"}
     | {"figure", "footer", "h1", "h2", "h3", "h4", "h5", "h6", "header", "hr", "li", "ol", "p"}
     | {"pre", "section", "table", "td", "th", "tr", "ul"}
 )
+"""Elements that separate words: ``<p>a</p><p>b</p>`` reads "a b", ``wo<b>rd</b>`` "word"."""
 
 
 def collapse(text: str) -> str:
@@ -62,7 +63,7 @@ class _TextExtractor(HTMLParser):
             self.parts.append(data)
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag in _NON_TEXT_TAGS:
+        if tag in NON_TEXT_TAGS:
             self._non_text_depth += 1
         else:
             self._separate(tag)
@@ -71,13 +72,13 @@ class _TextExtractor(HTMLParser):
         self._separate(tag)  # "<br/>"; a self-closed "<script/>" opens nothing
 
     def handle_endtag(self, tag: str) -> None:
-        if tag in _NON_TEXT_TAGS:
+        if tag in NON_TEXT_TAGS:
             self._non_text_depth = max(self._non_text_depth - 1, 0)
         else:
             self._separate(tag)
 
     def _separate(self, tag: str) -> None:
-        if tag in _BLOCK_TAGS and not self._non_text_depth:
+        if tag in BLOCK_TAGS and not self._non_text_depth:
             self.parts.append(" ")
 
 

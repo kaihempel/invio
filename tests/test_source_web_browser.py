@@ -14,6 +14,7 @@ import logging
 import os
 import socket
 import socketserver
+import sys
 import threading
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
@@ -33,9 +34,16 @@ from invio.sources.http import (
     SafeHttpClient,
 )
 from invio.sources.web import WebPageSource
-from tests.http_helpers import LOOPBACK, LoopbackServer, Route, server  # noqa: F401
+from tests.http_helpers import (  # noqa: F401
+    HTML,
+    LOOPBACK,
+    LoopbackServer,
+    Route,
+    second_server,
+    server,
+    web_source,
+)
 
-HTML = {"Content-Type": "text/html; charset=utf-8"}
 TEXT = {"Content-Type": "text/plain"}
 PRIVATE = "10.255.255.1"
 MARK = (
@@ -100,7 +108,7 @@ def page(server: LoopbackServer, body: str, path: str = "/page") -> str:
 
 
 def config(url: str, **fields: object) -> WebSource:
-    return WebSource.model_validate({"type": "web", "url": url, "render": "js"} | fields)
+    return web_source(url, render="js", **fields)
 
 
 async def request_seen(server: LoopbackServer, path: str) -> None:
@@ -356,6 +364,68 @@ async def test_sub_requests_to_private_addresses_are_aborted(
     assert all(r.levelno == logging.DEBUG for r in messages)
     assert "hunter2" not in caplog.text
     assert "secret" not in caplog.text  # host only
+
+
+async def test_credentials_never_reach_another_origin_on_a_later_same_origin_hop(
+    server: LoopbackServer, second_server: LoopbackServer, renderer: PlaywrightRenderer
+) -> None:
+    # A -> B/p1 -> B/p2: the second hop is same-origin with the first, but not with A.
+    other = second_server.base_url
+    server.routes["/start"] = Route(status=302, headers={"Location": f"{other}/p1"})
+    second_server.routes["/p1"] = Route(status=302, headers={"Location": "/p2"})
+    second_server.routes["/p2"] = Route(headers=TEXT, body=b"done")
+    url = page(
+        server,
+        f"<script>{MARK}"
+        'fetch("/start", {headers: {Authorization: "Bearer hunter2"}})'
+        '.then(() => mark("fetched"))</script>',
+    )
+
+    rendered = await renderer.render(url, wait_for=".fetched")
+
+    assert "fetched" in rendered.html
+    start = next(r for r in server.requests if r.path == "/start")
+    assert start.headers["authorization"] == "Bearer hunter2"  # its own origin gets it
+    assert [r.path for r in second_server.requests] == ["/p1", "/p2"]
+    assert all("authorization" not in r.headers for r in second_server.requests)
+
+
+async def test_a_document_redirected_to_a_private_address_is_blocked(
+    server: LoopbackServer, renderer: PlaywrightRenderer
+) -> None:
+    server.routes["/hop"] = Route(status=302, headers={"Location": f"http://{PRIVATE}/inside"})
+
+    with pytest.raises(BlockedError) as info:
+        await renderer.render(f"{server.base_url}/hop", wait_for=None)
+
+    assert info.value.reason is BlockReason.NON_PUBLIC_ADDRESS
+    assert renderer._browser.contexts == []
+
+
+async def test_a_later_navigation_to_a_refused_url_fails_the_render(
+    server: LoopbackServer, renderer: PlaywrightRenderer
+) -> None:
+    # Without the check the render would return Chromium's error page as the page's content.
+    url = page(server, f'<p>first</p><script>location.href = "http://{PRIVATE}/"</script>')
+
+    with pytest.raises(BlockedError) as info:
+        await renderer.render(url, wait_for=None)
+
+    assert info.value.reason is BlockReason.NON_PUBLIC_ADDRESS
+
+
+async def test_a_navigation_to_a_refused_url_while_waiting_fails_with_the_refusal(
+    server: LoopbackServer, renderer: PlaywrightRenderer, short_timeout: float
+) -> None:
+    # The error page never matches ``wait_for``: the refusal, not a timeout, is the reason.
+    url = page(
+        server, f'<script>setTimeout(() => location.href = "http://{PRIVATE}/", 600)</script>'
+    )
+
+    with pytest.raises(BlockedError) as info:
+        await renderer.render(url, wait_for=".never")
+
+    assert info.value.reason is BlockReason.NON_PUBLIC_ADDRESS
 
 
 async def test_a_redirect_to_a_private_address_is_aborted_at_the_hop(
@@ -679,6 +749,8 @@ async def test_the_driver_is_stopped_when_the_launch_fails_for_another_reason(
     stopped: list[bool] = []
 
     class FakeChromium:
+        executable_path = sys.executable  # any file that exists
+
         async def launch(self, **kwargs: object) -> None:
             raise RuntimeError("boom")
 
@@ -703,11 +775,18 @@ async def test_the_driver_is_stopped_when_the_launch_fails_for_another_reason(
 class _FakeStarter:
     """Stands in for ``async_playwright()``: ``start`` and ``launch`` fail as told."""
 
-    def __init__(self, start_error: Exception | None, launch_error: Exception | None) -> None:
+    def __init__(
+        self,
+        start_error: Exception | None,
+        launch_error: Exception | None,
+        chromium_path: str = sys.executable,
+    ) -> None:
         self.stopped = False
         starter = self
 
         class Chromium:
+            executable_path = chromium_path
+
             async def launch(self, **kwargs: object) -> None:
                 assert launch_error is not None
                 raise launch_error
@@ -731,21 +810,25 @@ class _FakeStarter:
 
 
 @pytest.mark.parametrize(
-    ("start_error", "launch_error", "expected"),
+    ("start_error", "launch_error", "executable", "expected"),
     [
-        (OSError("driver missing"), None, "render_unavailable"),
-        (PlaywrightError("driver crashed"), None, "render_failed"),
-        (None, PlaywrightError("Executable doesn't exist at /x"), "render_unavailable"),
-        (None, PlaywrightError("Browser closed unexpectedly"), "render_failed"),
+        (OSError("driver missing"), None, True, "render_unavailable"),
+        (PlaywrightError("driver crashed"), None, True, "render_failed"),
+        (None, None, False, "render_unavailable"),  # Chromium not downloaded, whatever the text
+        (None, PlaywrightError("Executable doesn't exist at /x"), True, "render_failed"),
+        (None, PlaywrightError("Browser closed unexpectedly"), True, "render_failed"),
     ],
 )
 async def test_start_failures_map_to_the_right_reason(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
     start_error: Exception | None,
     launch_error: Exception | None,
+    executable: bool,
     expected: str,
 ) -> None:
-    starter = _FakeStarter(start_error, launch_error)
+    path = sys.executable if executable else str(tmp_path / "missing" / "chrome")
+    starter = _FakeStarter(start_error, launch_error, path)
     monkeypatch.setattr(browser, "async_playwright", starter)
 
     async with SafeHttpClient(HttpClientConfig()) as client:

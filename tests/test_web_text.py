@@ -344,14 +344,30 @@ def test_other_content_types_are_rejected_even_if_the_body_looks_like_html(
         b"  \n\t<HTML lang=en>",
         b"\xef\xbb\xbf<html>",
         b"\xef\xbb\xbf \n<!DocType html>",
+        b"<!-- generated --><html>",
+        b"<head><title>T</title>",
+        b"<p>fragment</p>",
+        b"<BODY\n>",
+        "\ufeff<!doctype html>".encode("utf-16-le"),
+        "\ufeff\n<html>".encode("utf-16-be"),
     ],
 )
-def test_missing_content_type_sniffs_for_a_doctype_or_html_tag(body: bytes) -> None:
+def test_missing_content_type_sniffs_for_an_html_start(body: bytes) -> None:
     assert _is_html({}, body)
 
 
 @pytest.mark.parametrize(
-    "body", [b"", b"%PDF-1.7", b'{"a": 1}', b"\x89PNG\r\n", b"<p>fragment</p>", b"<?xml?><rss/>"]
+    "body",
+    [
+        b"",
+        b"%PDF-1.7",
+        b'{"a": 1}',
+        b"\x89PNG\r\n",
+        b"<?xml?><rss/>",
+        b"<pre>text</pre>",  # a listed tag name must end there
+        b"<html",  # nor may the start be cut off
+        "<html>".encode("utf-16-le"),  # UTF-16 without a BOM is not recognised
+    ],
 )
 def test_missing_content_type_rejects_other_bodies(body: bytes) -> None:
     assert not _is_html({}, body)
@@ -384,6 +400,36 @@ def test_web_encodings_are_honoured(label: str, text: str) -> None:
     content = f"<p>{text}</p>".encode(label)
 
     assert text in _decode(result(content, f"text/html; charset={label}"))
+
+
+@pytest.mark.parametrize(
+    ("label", "codec", "text"),
+    [
+        ("gb2312", "gbk", "中文"),
+        ("GB2312", "gbk", "中文"),
+        ("x-gbk", "gbk", "中文"),
+        ("chinese", "gbk", "中文"),
+        ("ks_c_5601-1987", "cp949", "한국어"),
+        ("windows-949", "cp949", "똠방각하"),  # outside EUC-KR
+        ("euc-kr", "cp949", "똠방각하"),
+        ("windows-31j", "cp932", "①日本"),
+        ("shift_jis", "cp932", "①日本"),  # NEC extension, outside plain Shift_JIS
+        ("x-sjis", "cp932", "日本"),
+        ("tis-620", "cp874", "ภาษาไทย"),
+        ("iso-8859-11", "cp874", "ภาษาไทย"),
+        ("windows-874", "cp874", "ภาษาไทย"),
+        ("ibm866", "cp866", "Привет"),
+        ("x-mac-cyrillic", "mac-cyrillic", "Привет"),
+        ("macintosh", "mac-roman", "café"),
+        ("x-x-big5", "big5hkscs", "中文"),
+    ],
+)
+def test_legacy_labels_are_read_as_browsers_read_them(label: str, codec: str, text: str) -> None:
+    content = f"<p>{text}</p>".encode(codec)
+
+    assert text in _decode(result(content, f"text/html; charset={label}"))
+    meta = f'<meta charset="{label}">'.encode() + content
+    assert text in _decode(result(meta, "text/html"))
 
 
 @pytest.mark.parametrize("label", ["iso-8859-1", "latin1", "l1", "ascii", "us-ascii"])

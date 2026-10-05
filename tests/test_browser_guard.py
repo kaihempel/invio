@@ -12,7 +12,7 @@ from typing import Any
 import pytest
 
 from invio.sources.browser import RENDER_TIMEOUT_SECONDS, _RequestGuard
-from invio.sources.errors import TooLargeError
+from invio.sources.errors import BlockedError, BlockReason, TooLargeError
 from invio.sources.http import HttpClientConfig, SafeHttpClient
 from tests.http_helpers import FakeResolver
 
@@ -322,6 +322,16 @@ async def test_too_many_redirects_are_aborted(guard: _RequestGuard) -> None:
     assert len(route.fetches) == 11  # the request plus ten hops
 
 
+async def test_ten_redirects_are_followed(guard: _RequestGuard) -> None:
+    final = FakeResponse()
+    route = FakeRoute("https://a.example/x", [*(FakeResponse(302, "/x") for _ in range(10)), final])
+
+    await guard.route(route)  # type: ignore[arg-type]
+
+    assert route.fulfilled is final
+    assert len(route.fetches) == 11
+
+
 # --- the main document's final URL -----------------------------------------------------------
 
 
@@ -437,6 +447,80 @@ async def test_the_same_origin_keeps_the_headers(guard: _RequestGuard, target: s
     await guard.route(route)  # type: ignore[arg-type]
 
     assert route.fetches[1]["headers"] is None
+
+
+@pytest.mark.parametrize(
+    "hops",
+    [
+        ["https://b.example/1", "https://b.example/2"],  # a same-origin hop on the other origin
+        ["https://b.example/1", "https://a.example/back"],  # back to the requested origin
+        ["/same", "https://b.example/1", "/again"],
+    ],
+)
+async def test_credentials_stay_dropped_after_a_hop_to_another_origin(
+    guard: _RequestGuard, hops: list[str]
+) -> None:
+    responses = [FakeResponse(302, hop) for hop in hops] + [FakeResponse()]
+    route = FakeRoute("https://a.example/x", responses, headers=SENSITIVE)
+
+    await guard.route(route)  # type: ignore[arg-type]
+
+    crossed = next(i for i, hop in enumerate(hops) if "b.example" in hop) + 1
+    assert [fetch.get("headers") for fetch in route.fetches[1:crossed]] == [None] * (crossed - 1)
+    assert all(fetch["headers"] == {"Accept": "*/*"} for fetch in route.fetches[crossed:])
+
+
+# --- refused main-frame navigations fail the render ------------------------------------------
+
+
+async def test_a_main_navigation_redirected_to_a_blocked_host_records_the_refusal(
+    guard: _RequestGuard,
+) -> None:
+    route = FakeRoute(
+        "https://a.example/", [FakeResponse(302, "http://internal.example/")], navigation=True
+    )
+
+    await guard.route(route)  # type: ignore[arg-type]
+
+    assert route.aborted == "blockedbyclient"
+    assert isinstance(guard.failure, BlockedError)
+    assert guard.failure.reason is BlockReason.NON_PUBLIC_ADDRESS
+    assert guard.failure.url == "http://internal.example/"
+
+
+@pytest.mark.parametrize(
+    ("url", "responses", "reason"),
+    [
+        ("https://internal.example/", [FakeResponse()], "non_public_address"),
+        ("ftp://a.example/", [FakeResponse()], "unsupported_scheme"),
+        ("https://a.example/", [FakeResponse(302, "/")], "too_many_redirects"),
+        ("https://a.example/", [RuntimeError("connection reset")], "render_failed"),
+    ],
+)
+async def test_a_refused_main_navigation_records_why(
+    guard: _RequestGuard, url: str, responses: list[Any], reason: str
+) -> None:
+    route = FakeRoute(url, responses, navigation=True)
+
+    await guard.route(route)  # type: ignore[arg-type]
+
+    assert guard.failure is not None
+    assert guard.failure.reason == reason
+
+
+async def test_a_refused_sub_request_does_not_fail_the_render(guard: _RequestGuard) -> None:
+    await guard.route(FakeRoute("https://internal.example/x.js"))  # type: ignore[arg-type]
+    await guard.route(FakeRoute("https://internal.example/f", main_frame=False, navigation=True))  # type: ignore[arg-type]
+
+    assert guard.failure is None
+
+
+async def test_the_first_main_frame_failure_is_kept(guard: _RequestGuard) -> None:
+    await guard.route(FakeRoute("https://internal.example/", navigation=True))  # type: ignore[arg-type]
+    await guard.route(FakeRoute("ftp://a.example/", navigation=True))  # type: ignore[arg-type]
+
+    assert guard.failure is not None
+    assert guard.failure.reason == "non_public_address"
 
 
 # --- size cap --------------------------------------------------------------------------------

@@ -18,7 +18,10 @@ from ipaddress import IPv4Network, IPv6Network, ip_network
 import httpx2
 import pytest
 
+from invio.config.job import WebSource
+
 __all__ = [
+    "HTML",
     "LOOPBACK",
     "FakeResolver",
     "LoopbackServer",
@@ -28,9 +31,17 @@ __all__ = [
     "loopback_server",
     "second_server",
     "server",
+    "web_source",
 ]
 
 LOOPBACK: tuple[IPv4Network | IPv6Network, ...] = (ip_network("127.0.0.0/8"),)
+HTML: dict[str, str] = {"Content-Type": "text/html; charset=utf-8"}
+"""Response headers of an HTML page."""
+
+
+def web_source(url: str, **fields: object) -> WebSource:
+    """A validated ``type: web`` source config for ``url``."""
+    return WebSource.model_validate({"type": "web", "url": url} | fields)
 
 
 @dataclass

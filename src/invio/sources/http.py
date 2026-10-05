@@ -77,6 +77,7 @@ __all__ = [
     "RenderUnavailableError",
     "SafeHttpClient",
     "TooLargeError",
+    "charset_label",
 ]
 
 _log = logging.getLogger("invio.sources.http")
@@ -94,6 +95,12 @@ _ENCODINGS: Final = {"gzip": "gzip", "x-gzip": "gzip", "deflate": "deflate"}
 _CHARSET: Final = re.compile(r"charset\s*=\s*[\"']?([^\s;\"']+)", re.IGNORECASE)
 # Conditional-GET validators kept per client; the least recently used are dropped beyond this.
 _MAX_VALIDATORS: Final = 10_000
+
+
+def charset_label(content_type: str) -> str | None:
+    """The ``charset`` parameter of a ``Content-Type`` value as written, if there is one."""
+    match = _CHARSET.search(content_type)
+    return match.group(1) if match is not None else None
 
 
 def _setting_default(name: str) -> Any:
@@ -163,10 +170,10 @@ class FetchResult:
         return self.content.decode(encoding or self._header_charset(), errors="replace")
 
     def _header_charset(self) -> str:
-        match = _CHARSET.search(self.headers.get("content-type", ""))
-        if match is not None:
+        label = charset_label(self.headers.get("content-type", ""))
+        if label is not None:
             try:
-                return codecs.lookup(match.group(1)).name
+                return codecs.lookup(label).name
             except LookupError:
                 pass
         return "utf-8"

@@ -257,8 +257,11 @@ _OptionalText = Annotated[str | None, Field(min_length=1)]
 def _check_css_selector(value: str | None) -> str | None:
     """Reject a CSS selector the page parser cannot parse (``None`` passes).
 
-    Validated with the same engine that evaluates it on a page. Any parser error becomes a
-    stable message, so the text does not depend on the library version.
+    Validated with the engine that evaluates ``selector`` on a page. ``wait_for`` is evaluated by
+    the browser (Playwright's ``css=`` engine), which accepts more; checking it here limits it to
+    plain CSS, and a selector the browser still refuses fails the render with
+    ``invalid_wait_for``. Any parser error becomes a stable message, so the text does not
+    depend on the library version.
     """
     if value is None:
         return None

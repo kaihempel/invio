@@ -2,6 +2,7 @@
 
 import asyncio
 import importlib
+import importlib.abc
 import subprocess
 import sys
 import textwrap
@@ -19,11 +20,17 @@ from invio.sources.http import (
     TooLargeError,
 )
 from invio.sources.web import PageRenderer, RenderedPage, WebPageSource
-from tests.http_helpers import LOOPBACK, LoopbackServer, Route, server  # noqa: F401
+from tests.http_helpers import (  # noqa: F401
+    HTML,
+    LOOPBACK,
+    LoopbackServer,
+    Route,
+    server,
+    web_source,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 PAGE_URL = "https://example.org/dir/page"
-HTML = {"Content-Type": "text/html; charset=utf-8"}
 
 
 class FakeRenderer:
@@ -51,7 +58,7 @@ async def client() -> AsyncIterator[SafeHttpClient]:
 
 
 def js_config(url: str = PAGE_URL, **fields: object) -> WebSource:
-    return WebSource.model_validate({"type": "web", "url": url, "render": "js"} | fields)
+    return web_source(url, render="js", **fields)
 
 
 def doc(body: str, head: str = "") -> str:
@@ -124,10 +131,20 @@ def test_static_use_never_loads_playwright() -> None:
 # --- the engine is missing -------------------------------------------------------------------
 
 
+class _NoPlaywright(importlib.abc.MetaPathFinder):
+    """Finds no ``playwright`` package, like an installation without the ``render`` extra."""
+
+    def find_spec(self, name: str, path: object, target: object = None) -> None:
+        if name == "playwright":
+            raise ModuleNotFoundError(f"No module named {name!r}", name=name)
+
+
 @pytest.fixture
 def no_playwright(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setitem(sys.modules, "playwright", None)
-    monkeypatch.setitem(sys.modules, "playwright.async_api", None)
+    # As if the package were not installed: any import of it fails on the name "playwright".
+    for name in [name for name in sys.modules if name.partition(".")[0] == "playwright"]:
+        monkeypatch.delitem(sys.modules, name)
+    monkeypatch.setattr(sys, "meta_path", [_NoPlaywright(), *sys.meta_path])
     # A module imported by an earlier test would hide the missing engine.
     monkeypatch.delitem(sys.modules, "invio.sources.browser", raising=False)
 
@@ -157,10 +174,48 @@ async def test_render_unavailable_does_not_stop_static_fetches(
         with pytest.raises(RenderUnavailableError):
             await source.fetch(js_config())
         [candidate] = await source.fetch(static)
-        with pytest.raises(RenderUnavailableError):  # not remembered as "started"
+        with pytest.raises(RenderUnavailableError):  # remembered, but not as "started"
             await source.fetch(js_config())
 
     assert candidate.teaser == "Static"
+
+
+async def test_a_missing_engine_is_not_looked_for_again(
+    monkeypatch: pytest.MonkeyPatch, client: SafeHttpClient
+) -> None:
+    browser = importlib.import_module("invio.sources.browser")
+    attempts: list[int] = []
+
+    async def start(client: SafeHttpClient) -> FakeRenderer:
+        attempts.append(1)
+        raise RenderUnavailableError()  # Chromium is not downloaded
+
+    monkeypatch.setattr(browser.PlaywrightRenderer, "start", start)
+
+    async with WebPageSource(client) as source:
+        for _ in range(3):
+            with pytest.raises(RenderUnavailableError) as info:
+                await source.fetch(js_config())
+            assert info.value.url == PAGE_URL
+
+    assert len(attempts) == 1
+
+
+async def test_a_broken_playwright_installation_is_not_reported_as_missing(
+    monkeypatch: pytest.MonkeyPatch, client: SafeHttpClient
+) -> None:
+    real_import = importlib.import_module
+
+    def broken(name: str, package: str | None = None) -> object:
+        if name == "invio.sources.browser":
+            raise ModuleNotFoundError("No module named 'playwright._impl'", name="playwright._impl")
+        return real_import(name, package)
+
+    monkeypatch.setattr(importlib, "import_module", broken)
+
+    async with WebPageSource(client) as source:
+        with pytest.raises(ModuleNotFoundError, match=r"playwright\._impl"):
+            await source.fetch(js_config())
 
 
 async def test_unrelated_import_errors_are_not_swallowed(
@@ -461,13 +516,13 @@ async def test_a_failed_start_is_retried_on_the_next_fetch(
     async def start(client: SafeHttpClient) -> FakeRenderer:
         attempts.append(1)
         if len(attempts) == 1:
-            raise RenderUnavailableError(url=PAGE_URL)
+            raise FetchError("render_failed", url=PAGE_URL)  # e.g. a crash during the launch
         return fake
 
     monkeypatch.setattr(browser.PlaywrightRenderer, "start", start)
 
     async with WebPageSource(client) as source:
-        with pytest.raises(RenderUnavailableError):
+        with pytest.raises(FetchError, match="render_failed"):
             await source.fetch(js_config())
         [candidate] = await source.fetch(js_config())
 

@@ -20,9 +20,14 @@ from invio.sources.http import (
 from invio.sources.text import TEASER_MAX_CHARS
 from invio.sources.urls import canonical_url
 from invio.sources.web import WebPageSource
-from tests.http_helpers import LOOPBACK, LoopbackServer, Route, server  # noqa: F401
-
-HTML = {"Content-Type": "text/html; charset=utf-8"}
+from tests.http_helpers import (  # noqa: F401
+    HTML,
+    LOOPBACK,
+    LoopbackServer,
+    Route,
+    server,
+    web_source,
+)
 
 
 @pytest.fixture
@@ -33,7 +38,7 @@ async def client() -> AsyncIterator[SafeHttpClient]:
 
 
 def web_config(server: LoopbackServer, path: str = "/page", **fields: object) -> WebSource:
-    return WebSource.model_validate({"type": "web", "url": f"{server.base_url}{path}"} | fields)
+    return web_source(f"{server.base_url}{path}", **fields)
 
 
 def serve(server: LoopbackServer, body: str | bytes, path: str = "/page", **route: object) -> None:
@@ -728,3 +733,28 @@ async def test_link_title_ignores_scripts_and_styles_inside_the_anchor(
     [candidate] = await links(server, html)
 
     assert candidate.title == "Read more"
+
+
+async def test_link_title_is_nfc(server: LoopbackServer) -> None:
+    html = index('<a href="/a">Cafe\u0301 news</a>')  # "e" + combining acute accent
+
+    [candidate] = await links(server, html)
+
+    assert candidate.title == "Caf\u00e9 news"
+
+
+async def test_single_page_app_routes_are_separate_links(server: LoopbackServer) -> None:
+    html = index(anchors("#/post/1", "#!/post/2", "/page#/post/1", "#section", "/other#top"))
+
+    result = await links(server, html)
+
+    base = f"{server.base_url}/page"
+    assert urls(result) == [f"{base}#/post/1", f"{base}#!/post/2", f"{server.base_url}/other"]
+
+
+async def test_a_route_fragment_is_matched_by_url_pattern(server: LoopbackServer) -> None:
+    html = index(anchors("#/post/1", "#/about"))
+
+    result = await links(server, html, url_pattern="#/post/")
+
+    assert urls(result) == [f"{server.base_url}/page#/post/1"]
