@@ -242,6 +242,16 @@ def test_item_seen_get_and_list(db_session: Session) -> None:
     assert repo.list_for_job(job.id, status=ItemStatus.FAILED) == [two]
 
 
+def test_item_set_status_updates_and_flushes(db_session: Session) -> None:
+    job = make_job(db_session)
+    repo = ItemRepository(db_session)
+    item, _ = repo.add(job.id, make_candidate())
+    repo.set_status(item, ItemStatus.SKIPPED_KEYWORD)
+    db_session.expire_all()
+    assert repo.list_for_job(job.id, status=ItemStatus.SKIPPED_KEYWORD) == [item]
+    assert item.status == ItemStatus.SKIPPED_KEYWORD
+
+
 # --- DigestRepository ----------------------------------------------------------------------
 
 
