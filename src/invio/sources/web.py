@@ -27,7 +27,8 @@ from invio.config.job import WebSource
 from invio.domain import Candidate, url_hash
 from invio.sources.errors import FetchError, RenderUnavailableError, TooLargeError
 from invio.sources.http import FetchResult, NotModified, SafeHttpClient, charset_label
-from invio.sources.text import BLOCK_TAGS, NON_TEXT_TAGS, collapse, teaser
+from invio.sources.text import collapse, node_text, teaser
+from invio.sources.text import parse_html as _parse  # the tests use the old name
 from invio.sources.urls import canonical_url, http_url_or_none
 
 __all__ = ["PageRenderer", "RenderedPage", "WebPageSource"]
@@ -305,13 +306,6 @@ def _is_html(headers: Mapping[str, str], content: bytes) -> bool:
     return _HTML_START.match(head.lstrip(_WHITESPACE)) is not None
 
 
-def _parse(html: str) -> LexborHTMLParser:
-    """Parse ``html`` (HTML5 tree building) and remove the elements that hold no text."""
-    tree = LexborHTMLParser(html)
-    tree.strip_tags(sorted(NON_TEXT_TAGS))
-    return tree
-
-
 def _regions(tree: LexborHTMLParser, selector: str | None, *, url: str) -> Sequence[LexborNode]:
     """The nodes whose text counts, in document order.
 
@@ -334,37 +328,12 @@ def _region_text(nodes: Sequence[LexborNode]) -> str:
 
     The nodes are joined by a space.
     """
-    return _readable(" ".join(_node_text(node) for node in nodes))
+    return _readable(" ".join(node_text(node) for node in nodes))
 
 
 def _readable(text: str) -> str:
     """``text`` in NFC with its whitespace collapsed: the form that is hashed and shown."""
     return collapse(unicodedata.normalize("NFC", text))
-
-
-def _node_text(root: LexborNode) -> str:
-    """The text nodes under ``root`` in document order; block elements leave a space.
-
-    Read from the parsed tree itself (comments carry no text, and :func:`_parse` has removed
-    the non-text elements), with the block elements of the RSS source
-    (:data:`~invio.sources.text.BLOCK_TAGS`). selectolax's own ``text()`` either merges
-    paragraphs or splits inline words. Iterative, so a deeply nested page cannot exhaust the
-    stack.
-    """
-    parts: list[str] = []
-    pending: list[tuple[LexborNode, bool]] = [(root, False)]  # (node, its end was reached)
-    while pending:
-        node, closing = pending.pop()
-        if node.is_text_node:
-            parts.append(node.text_content or "")
-            continue
-        if node.tag in BLOCK_TAGS:
-            parts.append(" ")
-        if closing or not (node.is_element_node or node is root):
-            continue
-        pending.append((node, True))
-        pending.extend((child, False) for child in reversed(list(node.iter(include_text=True))))
-    return "".join(parts)
 
 
 def _content_hash(text: str) -> str:
@@ -410,7 +379,7 @@ def _links(
         seen.add(url)  # a repeated URL gets the same verdict, so the first one decides
         if not (pattern.search(url) if pattern is not None else urlsplit(url).hostname == host):
             continue
-        title = _readable(_node_text(anchor))
+        title = _readable(node_text(anchor))
         candidates.append(
             Candidate(
                 url=url,

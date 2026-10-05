@@ -196,6 +196,28 @@ against a hostile server. CORS preflight requests (`OPTIONS`) are sent by the br
 passing the guard; they carry no body and the page never sees their answer. robots.txt is
 checked for the page URL only. Use it for sites you trust to some degree.
 
+### Article text extraction
+
+`invio.sources.extract.extract_text(html, url)` turns the HTML of an article page that was
+already fetched into its main text for summaries, without navigation, cookie banners, sidebars
+or footers. It never touches the network.
+
+```python
+from invio.sources.extract import ExtractionError, extract_text
+
+article = extract_text(html, url)  # max_chars=200_000, min_chars=200 by default
+article.title, article.published_at, article.language, article.truncated
+print(article.text)  # one paragraph per line, whitespace collapsed, NFC
+```
+
+The text comes from [trafilatura](https://trafilatura.readthedocs.io/) in precision mode. When
+it finds nothing (or fails on hostile input), the plain text of `<body>` is used instead, with
+the text rules of web page sources. The title is trafilatura's, else `og:title`, else `<title>`;
+`published_at` is the publish day at midnight UTC (trafilatura dates have no time); `language`
+is the primary subtag (`de` for `de-DE`) from trafilatura, else `<html lang>`. Text longer than
+`max_chars` is cut at a word boundary with `truncated=True`; text shorter than `min_chars`
+raises `ExtractionError` with `reason == "too_short"` and the redacted URL.
+
 ## Job files
 
 A job file is a YAML description of one research job: schedule, notification, sources, search,
@@ -436,7 +458,8 @@ src/invio/
   services/     jobs.py (JobService: job CRUD, YAML import/export)
   graph/        LangGraph pipelines
   sources/      source adapters (rss.py, web.py; browser.py is the only Playwright user, loaded
-                lazily); http.py (SafeHttpClient) with netguard, robots, ratelimit; text.py, urls.py
+                lazily); http.py (SafeHttpClient) with netguard, robots, ratelimit;
+                extract.py (article text); text.py, urls.py
   llm/          base, registry, factory, fake, models.d/ (LLM layer)
   notify/       notifications
   scheduling/   next-run calculation (next_run.py)
