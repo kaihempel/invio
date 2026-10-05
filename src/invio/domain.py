@@ -23,6 +23,7 @@ class ItemStatus(StrEnum):
     EXTRACTED = "extracted"
     SKIPPED_KEYWORD = "skipped_keyword"
     SKIPPED_IRRELEVANT = "skipped_irrelevant"
+    SKIPPED_BASELINE = "skipped_baseline"
     RELEVANT = "relevant"
     SUMMARIZED = "summarized"
     FAILED = "failed"

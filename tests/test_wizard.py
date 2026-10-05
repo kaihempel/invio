@@ -216,7 +216,7 @@ def test_inline_rejections(
 
 @pytest.mark.parametrize("bad", ["0", "abc", "-3", "1.5"])
 def test_limit_rejections(bad: str) -> None:
-    result, prompter, _ = run(script(limits=[False, bad, "5", "", "", ""]))
+    result, prompter, _ = run(script(limits=[False, bad, "5", "", "", "", ""]))
 
     assert result is not None
     assert prompter.errors and "whole number" in prompter.errors[0][1]
@@ -230,14 +230,14 @@ def test_limits_default_yes_asks_nothing_more() -> None:
     assert not [q for q in prompter.asked if q.startswith("Max ")]
 
 
-def test_limits_no_asks_four_values_prefilled() -> None:
-    result, prompter, _ = run(script(limits=[False, "", "", "", "7"]))
+def test_limits_no_asks_five_values_prefilled() -> None:
+    result, prompter, _ = run(script(limits=[False, "", "", "", "", "7"]))
 
     assert result is not None
     assert result[1].limits == LimitsConfig(max_llm_tokens_per_run=7)
     limit_questions = [q for q in prompter.asked if q.startswith("Max ")]
-    assert len(limit_questions) == 4
-    assert [prompter.defaults[q] for q in limit_questions] == ["20", "100", "20", "200000"]
+    assert len(limit_questions) == 5
+    assert [prompter.defaults[q] for q in limit_questions] == ["20", "100", "10", "20", "200000"]
 
 
 def test_recipients_first_required_and_duplicates_skipped() -> None:
