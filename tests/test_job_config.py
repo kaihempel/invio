@@ -67,3 +67,28 @@ def test_unknown_keys_rejected(job_data: dict[str, Any], path: str, value: Any) 
 
     with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
         JobConfig.model_validate(job_data)
+
+
+# --- language ------------------------------------------------------------------------------
+
+
+def test_language_defaults_to_english(job_data: dict[str, Any]) -> None:
+    assert JobConfig.model_validate(job_data).language == "en"
+
+
+def test_language_accepts_iso_code(job_data: dict[str, Any]) -> None:
+    job_data["language"] = "de"
+    assert JobConfig.model_validate(job_data).language == "de"
+
+
+@pytest.mark.parametrize("value", ["xx", "DE", "deu", "german", ""])
+def test_language_rejects_invalid(job_data: dict[str, Any], value: str) -> None:
+    job_data["language"] = value
+    with pytest.raises(ValidationError, match="language"):
+        JobConfig.model_validate(job_data)
+
+
+def test_language_unknown_code_message(job_data: dict[str, Any]) -> None:
+    job_data["language"] = "xx"
+    with pytest.raises(ValidationError, match="unknown ISO 639-1 language code 'xx'"):
+        JobConfig.model_validate(job_data)

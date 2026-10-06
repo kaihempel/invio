@@ -58,6 +58,7 @@ def test_quickstart_end_to_end(tmp_path: Path, capsys: pytest.CaptureFixture[str
     saved = yaml.load(text, Loader=JobYamlLoader)
     assert list(saved) == [
         "schema_version",
+        "language",
         "schedule",
         "notification",
         "sources",

@@ -1,4 +1,5 @@
 schema_version: 1
+language: en
 schedule:
   frequency: weekly
   time: 07:30

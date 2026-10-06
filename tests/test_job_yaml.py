@@ -240,6 +240,7 @@ def test_dump_key_order(job_data: dict[str, Any]) -> None:
 
     assert list(dumped) == [
         "schema_version",
+        "language",
         "schedule",
         "notification",
         "sources",
@@ -989,3 +990,42 @@ def test_loads_yaml_source_keeps_file_messages() -> None:
     with pytest.raises(JobConfigError) as info:
         loads_yaml("- a\n", source=Path("x.yaml"))
     assert info.value.errors == ["job file x.yaml must contain a mapping at the top level"]
+
+
+# --- language ------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [("de", "de"), ("'no'", "no"), ("no", "no"), ('"en"', "en")],
+    ids=["de", "no-quoted", "no-bare", "en-double-quoted"],
+)
+def test_language_roundtrip(tmp_path: Path, raw: str, expected: str) -> None:
+    path = tmp_path / "job.yaml"
+    path.write_text(
+        f"language: {raw}\n" + MINIMAL.format(time="07:30", subject="s", keywords="[a]"),
+        encoding="utf-8",
+    )
+    job = load_yaml(path)
+    assert job.language == expected
+
+    reloaded = _roundtrip(job, tmp_path)
+
+    assert reloaded == job
+    assert reloaded.language == expected
+    # YAML 1.1 readers must not see the boolean false in a saved "no"
+    assert yaml.safe_load(dump_yaml(job))["language"] == expected
+
+
+def test_language_omitted_loads_as_en_and_is_written(tmp_path: Path) -> None:
+    job = load_yaml(_write(tmp_path))
+    assert job.language == "en"
+    assert "\nlanguage: en\n" in dump_yaml(job)
+
+
+@pytest.mark.parametrize("raw", ["xx", "DE", "deu", "''", "1", "null", "[de]"])
+def test_language_invalid_in_file_names_the_field(tmp_path: Path, raw: str) -> None:
+    error = _load_text(
+        tmp_path, f"language: {raw}\n" + MINIMAL.format(time="07:30", subject="s", keywords="[a]")
+    )
+    assert any(line.lstrip().startswith("language") for line in str(error).splitlines())

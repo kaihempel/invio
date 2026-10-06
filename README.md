@@ -239,6 +239,9 @@ write_yaml(job, "job.yaml")  # or dump_yaml(job) for a string
 - Unknown keys are errors at every level. Scalars follow YAML 1.2 style: `time: 17:30`, `on`
   and `2026-10-04` stay strings.
 - Comments are not preserved on save, and every field (defaults included) is written.
+- `language` is optional: a lower-case ISO 639-1 code (default `en`) that sets the language of
+  item summaries, e.g. `language: de`. An unknown code is an error:
+  `language: unknown ISO 639-1 language code 'xx'`.
 - `write_yaml` replaces the file atomically, keeps an existing file's mode and follows
   symlinks (the link stays, its target is updated).
 - `weekday` accepts any capitalisation, but the JSON Schema lists the lowercase values only.
