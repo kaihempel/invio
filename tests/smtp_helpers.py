@@ -29,6 +29,7 @@ from invio.db.repositories import DigestRepository, RunRepository
 from invio.db.session import session_factory, session_scope
 from invio.domain import RunStatus
 from invio.notify.payload import DigestStats, NotificationPayload
+from tests.db_helpers import make_notification
 
 DEFAULT_SUBJECT = "invio: {job_name} \u2013 {date}"
 SMTP_USER = "bob@x"
@@ -281,6 +282,8 @@ def add_notification(engine: Engine, digest_id: int, **kw: Any) -> int:
     with session_scope(session_factory(engine)) as session:
         digest = session.get(Digest, digest_id)
         assert digest is not None
+        job = session.get(Job, digest.job_id)
+        assert job is not None
         payload = NotificationPayload(
             job_name="ai-news",
             subject="stored subject",
@@ -289,24 +292,21 @@ def add_notification(engine: Engine, digest_id: int, **kw: Any) -> int:
             stats=DigestStats(items_found=1, items_included=1, duration_seconds=2),
         ).model_dump(mode="json")
         values: dict[str, Any] = {
-            "job_id": digest.job_id,
             "run_id": digest.run_id,
             "digest_id": digest.id,
-            "channel": "email",
             "recipient": "c@example.org",
             "payload": payload,
         }
         values.update(kw)
-        row = Notification(**values)
-        session.add(row)
-        session.flush()
-        return row.id
+        return make_notification(session, job, **values).id
 
 
 def notification_by_id(engine: Engine, notification_id: int) -> Notification:
     """Read one notification in a fresh session."""
-    (row,) = [r for r in rows(engine) if r.id == notification_id]
-    return row
+    with session_scope(session_factory(engine)) as session:
+        row = session.get(Notification, notification_id)
+        assert row is not None
+        return row
 
 
 def parts(message: EmailMessage) -> tuple[str, str]:

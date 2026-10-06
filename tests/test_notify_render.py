@@ -62,13 +62,20 @@ def test_subject_line_breaks_from_the_job_name_are_removed() -> None:
 
     assert "\r" not in subject
     assert "\n" not in subject
-    assert subject == "[x  Bcc: evil@example.org]"
+    assert subject == "[x Bcc: evil@example.org]"
 
 
 def test_subject_strips_line_breaks() -> None:
     subject = render_subject("{job_name}\r\nBcc: x@example.org\n", job_name="a\nb", date=DATE)
 
-    assert subject == "a b  Bcc: x@example.org"
+    assert subject == "a b Bcc: x@example.org"
+
+
+@pytest.mark.parametrize("separator", ["\v", "\f", "\x1c", "\x85", "\u2028", "\u2029"])
+def test_subject_collapses_unicode_line_separators(separator: str) -> None:
+    subject = render_subject("{job_name}", job_name=f"x{separator}Bcc: e@example.org", date=DATE)
+
+    assert subject == "x Bcc: e@example.org"
 
 
 @pytest.mark.parametrize(
@@ -190,6 +197,7 @@ SANITIZER_EXAMPLES: list[tuple[str, list[str], list[str]]] = [
     ('<iframe src="https://e.x"></iframe>', ["<iframe"], []),
     ("# H\n\n- **b** [l](https://e.x)", [], ["<h1>", "<li>", "<strong>", 'href="https://e.x"']),
     ("<em>keep</em>", [], ["<em>keep</em>"]),
+    ("[r](/p) [s](//e.x)", ["href="], ["r", "s"]),
 ]
 
 

@@ -54,13 +54,13 @@ def test_upgrade_creates_every_table_and_is_idempotent(
     second = _upgrade()
 
     assert first.exit_code == 0, first.stderr
-    assert first.stdout == "database at revision 0003\n"
+    assert first.stdout == "database at revision 0004\n"
     assert second.exit_code == 0, second.stderr
-    assert second.stdout == "database at revision 0003\n"
+    assert second.stdout == "database at revision 0004\n"
     assert _app_tables(url) == APP_TABLES | {"alembic_version"}
     engine = create_db_engine(url)
     with engine.connect() as conn:
-        assert current_revision(conn) == "0003"
+        assert current_revision(conn) == "0004"
     engine.dispose()
 
 
@@ -85,7 +85,7 @@ def test_upgrade_logs_start_and_finish_as_json_on_stderr(
     messages = [r["message"] for r in records]
     assert messages[0] == "migration started"
     assert messages[-1] == "migration finished"
-    assert records[-1]["revision"] == "0003"
+    assert records[-1]["revision"] == "0004"
     assert result.stdout.count("\n") == 1
 
 

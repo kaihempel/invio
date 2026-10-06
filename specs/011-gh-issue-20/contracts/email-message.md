@@ -24,7 +24,8 @@ Non-ASCII content is encoded per RFC 2047 (headers) and UTF-8 (bodies).
 2. Replace every literal `{job_name}` with the job name and every `{date}` with the digest date
    (`YYYY-MM-DD`).
 3. Leave every other `{…}`, `{` and `}` verbatim.
-4. Replace each `\r` and `\n` with a space, then strip.
+4. Collapse every run of whitespace (including `\r`, `\n`, `\v`, `\f`, U+0085, U+2028) into one
+   space, then strip.
 
 | Template | Job | Date | Result |
 |----------|-----|------|--------|
@@ -72,3 +73,4 @@ The footer in both templates reads:
 | `<iframe src="https://e.x"></iframe>` | `<iframe` | — |
 | `# H\n\n- **b** [l](https://e.x)` | — | `<h1>`, `<li>`, `<strong>`, `href="https://e.x"` |
 | `<em>keep</em>` | — | `<em>keep</em>` |
+| `[r](/p) [s](//e.x)` | `href=` | `r`, `s` |

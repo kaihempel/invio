@@ -4,7 +4,7 @@
 
 ```bash
 uv sync --locked            # adds aiosmtplib, markdown-it-py, nh3, jinja2; dev: aiosmtpd, trustme
-uv run invio db upgrade     # applies migration 0003 (attempts, last_attempt_at)
+uv run invio db upgrade     # applies migration 0004 (attempts, last_attempt_at)
 ```
 
 ## Automated validation (CI gates)
@@ -48,7 +48,7 @@ uv run pytest               # full suite, coverage ≥ 95 %
 | Edge: duplicate recipients | `test_notify_email::duplicate_recipients_deduped` | 1 row, 1 message |
 | Edge: CRLF in job name / subject | `test_notify_render::subject_strips_line_breaks` | single-line `Subject` header |
 | Edge: non-ASCII | `test_notify_email::unicode_roundtrip` | decoded subject and parts equal input |
-| Migration | `test_db_migrations` (extended) | upgrade/downgrade 0003 on SQLite (and MariaDB if configured) |
+| Migration | `test_db_migrations` (extended) | upgrade/downgrade 0004 on SQLite (and MariaDB if configured) |
 
 ## Manual smoke test (optional, local)
 

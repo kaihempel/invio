@@ -53,7 +53,7 @@ async def retry(engine: Engine, settings: Settings, clock: FakeClock, **kw: Any)
     return await retry_failed(session_factory(engine), settings=settings, clock=clock, **kw)
 
 
-async def failed_rows(engine: Engine, clock: FakeClock, port: int, **seed_kw: Any) -> int:
+async def deliver_while_down(engine: Engine, clock: FakeClock, port: int, **seed_kw: Any) -> int:
     """Deliver a fresh digest while the server is down; return the digest id."""
     digest_id = seed(engine, **seed_kw)
     await deliver(engine, digest_id, smtp_settings(smtp_port=port), clock)
@@ -63,7 +63,7 @@ async def failed_rows(engine: Engine, clock: FakeClock, port: int, **seed_kw: An
 async def test_failed_become_sent(
     db_engine: Engine, closed_port: int, smtp_server: SmtpServer, fake_clock: FakeClock
 ) -> None:
-    await failed_rows(db_engine, fake_clock, closed_port)
+    await deliver_while_down(db_engine, fake_clock, closed_port)
     assert {r.status for r in rows(db_engine)} == {S.FAILED}
 
     outcome = await retry(db_engine, smtp_settings(smtp_server), fake_clock)
@@ -83,7 +83,7 @@ async def test_failed_become_sent(
 async def test_same_subject_and_body(
     db_engine: Engine, closed_port: int, smtp_server: SmtpServer, fake_clock: FakeClock
 ) -> None:
-    digest_id = await failed_rows(db_engine, fake_clock, closed_port, to=["a@example.org"])
+    digest_id = await deliver_while_down(db_engine, fake_clock, closed_port, to=["a@example.org"])
     # Rename the job and change its subject: a retry must still use the first delivery's data.
     with session_scope(session_factory(db_engine)) as session:
         job = session.scalars(select(Job)).one()
@@ -116,7 +116,7 @@ def _count(engine: Engine, model: type) -> int:
 
 
 async def test_still_failing(db_engine: Engine, closed_port: int, fake_clock: FakeClock) -> None:
-    await failed_rows(db_engine, fake_clock, closed_port, to=["a@example.org"])
+    await deliver_while_down(db_engine, fake_clock, closed_port, to=["a@example.org"])
 
     outcome = await retry(db_engine, smtp_settings(smtp_port=closed_port), fake_clock)
 
@@ -210,10 +210,12 @@ async def test_fifth_attempt_gives_up(
 async def test_deleted_digest(
     db_engine: Engine, closed_port: int, smtp_server: SmtpServer, fake_clock: FakeClock
 ) -> None:
-    gone = await failed_rows(
+    gone = await deliver_while_down(
         db_engine, fake_clock, closed_port, job_name="gone", to=["a@example.org"]
     )
-    await failed_rows(db_engine, fake_clock, closed_port, job_name="kept", to=["b@example.org"])
+    await deliver_while_down(
+        db_engine, fake_clock, closed_port, job_name="kept", to=["b@example.org"]
+    )
     with session_scope(session_factory(db_engine)) as session:
         digest = session.get(Digest, gone)
         assert digest is not None
@@ -329,7 +331,7 @@ async def test_failure_under_the_limit_stays_failed(
 async def test_lifecycle_gives_up_after_exactly_five_attempts(
     db_engine: Engine, closed_port: int, fake_clock: FakeClock
 ) -> None:
-    await failed_rows(db_engine, fake_clock, closed_port, to=["a@example.org"])
+    await deliver_while_down(db_engine, fake_clock, closed_port, to=["a@example.org"])
     settings = smtp_settings(smtp_port=closed_port)
     seen: list[tuple[S, int]] = []
 
@@ -595,7 +597,7 @@ async def test_stored_subject_with_line_breaks_never_injects_headers(
 async def test_retry_sends_to_the_stored_recipient(
     db_engine: Engine, closed_port: int, smtp_server: SmtpServer, fake_clock: FakeClock
 ) -> None:
-    await failed_rows(db_engine, fake_clock, closed_port, to=["a@example.org"])
+    await deliver_while_down(db_engine, fake_clock, closed_port, to=["a@example.org"])
     with session_scope(session_factory(db_engine)) as session:
         job = session.scalars(select(Job)).one()
         assert job.config is not None
@@ -615,7 +617,7 @@ async def test_empty_digest_retry_follows_the_stored_payload(
     fake_clock: FakeClock,
     send_if_empty_now: bool,
 ) -> None:
-    await failed_rows(
+    await deliver_while_down(
         db_engine,
         fake_clock,
         closed_port,

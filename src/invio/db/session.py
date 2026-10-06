@@ -124,3 +124,39 @@ def redact(text: str, url: str | URL) -> str:
     for needle in sorted((n for n in needles if n), key=len, reverse=True):
         text = text.replace(needle, "***")
     return text
+
+
+class DatabaseConfigError(ValueError):
+    """The database URL is unparsable, names an unknown dialect or a missing driver.
+
+    The message is already scrubbed of the URL and its password.
+    """
+
+
+def scrub_database_url(text: str, raw: str) -> str:
+    """Mask ``raw`` (the configured database URL) in all its string forms within ``text``."""
+    if not raw:
+        return text
+    text = redact(text, raw)
+    try:
+        return redact(text, normalize_url(raw))
+    except ArgumentError:
+        return text
+
+
+def check_database_url(raw: str) -> URL:
+    """Parse ``raw`` and import its DBAPI module without connecting.
+
+    Raises :class:`DatabaseConfigError` for an unparsable URL or unknown dialect/driver
+    (``ArgumentError``/``NoSuchModuleError``) and for an uninstalled DBAPI (``ImportError``).
+    """
+    try:
+        url = normalize_url(raw)
+        url.get_dialect().import_dbapi()
+    except ArgumentError as exc:
+        message = scrub_database_url(str(exc), raw)
+        raise DatabaseConfigError(f"invalid database URL: {message}") from None
+    except ImportError as exc:
+        message = scrub_database_url(str(exc), raw)
+        raise DatabaseConfigError(f"database driver not installed: {message}") from None
+    return url

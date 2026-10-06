@@ -4,11 +4,11 @@
 ``invio.log``; it never imports the CLI, graph, scheduling or services layers.
 """
 
+from invio.db.session import DatabaseConfigError
 from invio.notify.email import (
     CHANNEL_EMAIL,
     MAX_ATTEMPTS,
     STALE_PENDING_AFTER,
-    DatabaseConfigError,
     DeliveryOutcome,
     RetryOutcome,
     RetryResult,

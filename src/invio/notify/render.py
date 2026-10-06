@@ -71,6 +71,9 @@ class _Markdown(MarkdownIt):
         return True
 
 
+_MARKDOWN = _Markdown("commonmark", {"html": True, "linkify": False}).enable("table")
+
+
 def markdown_to_safe_html(markdown: str) -> str:
     """Render ``markdown`` to HTML and strip everything outside the allowlist.
 
@@ -78,12 +81,12 @@ def markdown_to_safe_html(markdown: str) -> str:
     Markdown renderer, is the security boundary: every byte of the result passes through
     ``nh3``. Images are deliberately excluded (remote images in mail act as tracking beacons).
     """
-    rendered = _Markdown("commonmark", {"html": True, "linkify": False}).enable("table")
     return nh3.clean(
-        rendered.render(markdown),
+        _MARKDOWN.render(markdown),
         tags=_ALLOWED_TAGS,
         attributes=_ALLOWED_ATTRIBUTES,
         url_schemes=_ALLOWED_URL_SCHEMES,
+        url_relative="deny",  # a mail has no base URL: relative and ``//host`` links are dropped
         link_rel="noopener noreferrer",
         clean_content_tags=_CLEAN_CONTENT_TAGS,
         strip_comments=True,
@@ -91,11 +94,15 @@ def markdown_to_safe_html(markdown: str) -> str:
 
 
 def render_subject(template: str, *, job_name: str, date: dt.date) -> str:
-    """Replace ``{job_name}`` and ``{date}``; other braces stay; line breaks become spaces."""
+    """Replace ``{job_name}`` and ``{date}``; other braces stay; whitespace runs become one space.
+
+    Collapsing every kind of whitespace (CR, LF, VT, FF, U+0085, U+2028, ...) keeps the subject
+    a single header line.
+    """
     values = {"job_name": job_name, "date": date.isoformat()}
     # One pass, so a ``{date}`` inside the job name is not substituted again.
     subject = _PLACEHOLDER.sub(lambda match: values[match.group(1)], template)
-    return subject.replace("\r", " ").replace("\n", " ").strip()
+    return " ".join(subject.split())
 
 
 def _format_duration(seconds: float | None) -> str:

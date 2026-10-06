@@ -13,14 +13,18 @@ from zoneinfo import ZoneInfo
 import aiosmtplib
 from pydantic import ValidationError
 from sqlalchemy import select
-from sqlalchemy.exc import ArgumentError
 from sqlalchemy.orm import Session, sessionmaker
 
 from invio.config.job import JobConfig
 from invio.config.settings import Settings
 from invio.db.models import Job, Notification
 from invio.db.repositories import DigestRepository, NotificationRepository, RunRepository
-from invio.db.session import create_db_engine, normalize_url, redact, session_scope
+from invio.db.session import (
+    check_database_url,
+    create_db_engine,
+    scrub_database_url,
+    session_scope,
+)
 from invio.db.session import session_factory as build_session_factory
 from invio.db.types import utcnow
 from invio.domain import NotificationStatus, RunStatus
@@ -126,7 +130,7 @@ def scrub_secret(text: str, settings: Settings) -> str:
 
 
 def _error_text(exc: BaseException, settings: Settings) -> str:
-    return scrub_secret(f"{type(exc).__name__}: {exc}", settings)
+    return scrub_error(f"{type(exc).__name__}: {exc}", settings)
 
 
 def missing_smtp_settings(settings: Settings) -> list[str]:
@@ -517,40 +521,18 @@ async def retry_failed(
     )
 
 
-class DatabaseConfigError(ValueError):
-    """``INVIO_DATABASE_URL`` is unparsable, names an unknown dialect or a missing driver.
-
-    The message is already scrubbed of the URL and its password.
-    """
-
-
 def open_session_factory(settings: Settings) -> sessionmaker[Session]:
     """Return a session factory on ``INVIO_DATABASE_URL``.
 
     Raises :class:`~invio.config.settings.MissingSettingError` when the URL is not set and
-    :class:`DatabaseConfigError` when it is unusable. It lets the CLI reach the database
-    through this package (the CLI must not import ``invio.db``).
+    :class:`~invio.db.session.DatabaseConfigError` when it is unusable. It lets the CLI reach
+    the database through this package (the CLI must not import ``invio.db``).
     """
     raw = settings.require_secret("database_url")
-    try:
-        # Unknown dialect/driver -> ArgumentError (NoSuchModuleError); uninstalled DBAPI module
-        # -> ImportError. Check both before connecting, as ``invio db upgrade`` does.
-        normalize_url(raw).get_dialect().import_dbapi()
-        engine = create_db_engine(raw)
-    except ArgumentError as exc:
-        message = scrub_error(str(exc), settings)
-        raise DatabaseConfigError(f"invalid database URL: {message}") from None
-    except ImportError as exc:
-        message = scrub_error(str(exc), settings)
-        raise DatabaseConfigError(f"database driver not installed: {message}") from None
-    return build_session_factory(engine)
+    return build_session_factory(create_db_engine(check_database_url(raw)))
 
 
 def scrub_error(text: str, settings: Settings) -> str:
     """Mask the database URL (and password) and the SMTP credentials in ``text``."""
     raw = settings.database_url.get_secret_value() if settings.database_url else ""
-    if raw:
-        text = redact(text, raw)
-        with contextlib.suppress(ArgumentError):
-            text = redact(text, normalize_url(raw))
-    return scrub_secret(text, settings)
+    return scrub_secret(scrub_database_url(text, raw), settings)

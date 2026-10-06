@@ -111,16 +111,16 @@ All user stories depend on these.
     call for the same row (exclusive claim). After a claim the row is `pending`, `attempts` is
     +1 and `last_attempt_at == now`;
   - `DigestRepository.get(id)` returns the digest or `None`.
-- [x] T006 [P] Extend `tests/test_db_migrations.py`: upgrading to `0003` adds
+- [x] T006 [P] Extend `tests/test_db_migrations.py`: upgrading to `0004` adds
   `notifications.attempts` (not null, server default `0`, existing rows read `0`) and
-  `notifications.last_attempt_at` (nullable). Downgrading to `0002` removes both. Follow the
+  `notifications.last_attempt_at` (nullable). Downgrading to `0003` removes both. Follow the
   existing migration test pattern in that file.
 - [x] T007 Add the columns to `Notification` in `src/invio/db/models.py`:
   - `attempts: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"))`;
   - `last_attempt_at: Mapped[datetime | None] = mapped_column(UTCDateTime, default=None)`.
 
-  Create `src/invio/db/migrations/versions/0003_notification_attempts.py` (revision `"0003"`,
-  `down_revision="0002"`, docstring in the style of `0002_job_name_binary_collation.py`):
+  Create `src/invio/db/migrations/versions/0004_notification_attempts.py` (revision `"0004"`,
+  `down_revision="0003"`, docstring in the style of `0002_job_name_binary_collation.py`):
   - upgrade: `op.add_column` for both columns, with `server_default="0"` and `nullable=False`
     for `attempts` and `nullable=True` for `last_attempt_at` using `UTCDateTime`;
   - downgrade: drop both columns (use `batch_alter_table` for SQLite).
@@ -653,7 +653,7 @@ mail (quickstart rows US5 #1–8).
 ```text
 Task: "T003 tests/test_settings.py (smtp_security)"
 Task: "T005 tests/test_db_notifications.py"
-Task: "T006 tests/test_db_migrations.py (0003)"
+Task: "T006 tests/test_db_migrations.py (0004)"
 Task: "T009 tests/test_notify_payload.py"
 then (after T004): "T011 tests/smtp_helpers.py"
 ```

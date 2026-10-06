@@ -18,7 +18,7 @@ recipient, renders one multipart message per recipient and sends it over SMTP wi
 - **Reproducible retries**: the data needed to rebuild the mail (rendered subject, digest date,
   job name, statistics snapshot) is stored with the notification as a versioned, typed
   payload. Retry rebuilds the message from that payload plus the stored digest.
-- **Attempts and claiming**: migration `0003` adds `attempts` and `last_attempt_at` to
+- **Attempts and claiming**: migration `0004` adds `attempts` and `last_attempt_at` to
   `notifications`. Retry claims each row with a conditional `UPDATE` before sending, so
   concurrent retries never double-send. Stale `pending` rows (last attempt more than 1 hour
   ago) are picked up.
@@ -40,7 +40,7 @@ Typer. New runtime: `aiosmtplib>=4`, `markdown-it-py>=3`, `nh3>=0.2.18`, `jinja2
 `aiosmtpd>=1.4` (in-process test SMTP server), `trustme>=1.2` (throwaway TLS certificates for
 STARTTLS / implicit-TLS tests).
 
-**Storage**: existing `notifications` table. Migration `0003` adds `attempts` (int, not null,
+**Storage**: existing `notifications` table. Migration `0004` adds `attempts` (int, not null,
 default 0) and `last_attempt_at` (UTC datetime, nullable). The `payload` JSON holds
 `NotificationPayload` v1.
 
@@ -83,7 +83,7 @@ sent sequentially over one reused SMTP connection.
 **Spec deviation (recorded)**: the spec's Assumptions said "no schema change is expected".
 Claiming rows safely against concurrent retries, and selecting stale `pending` rows by their last
 attempt, needs real columns. JSON payload fields cannot be queried or updated atomically and
-portably across SQLite and MariaDB. Hence migration `0003`; see research.md R6. The spec
+portably across SQLite and MariaDB. Hence migration `0004`; see research.md R6. The spec
 assumption is updated accordingly.
 
 **Post-design re-check**: PASS. The design artifacts introduce no further deviations.
@@ -116,7 +116,7 @@ src/invio/
 │   ├── repositories.py             # NotificationRepository: + begin_attempt, claim_for_retry,
 │   │                               #   retry_candidates; DigestRepository: + get; mark() unchanged
 │   └── migrations/versions/
-│       └── 0003_notification_attempts.py
+│       └── 0004_notification_attempts.py
 ├── notify/
 │   ├── __init__.py                 # re-exports public API
 │   ├── email.py                    # SmtpMailer (aiosmtplib), deliver_digest, retry_failed,
@@ -136,7 +136,7 @@ tests/
 ├── test_notify_retry.py            # retry_failed: failed/stale pending, limit → skipped,
 │                                   #   claiming, deleted digest
 ├── test_cli_notify.py              # `invio notify retry` summary and exit codes
-├── test_db_notifications.py        # repository additions + migration 0003 (db marker)
+├── test_db_notifications.py        # repository additions + migration 0004 (db marker)
 └── test_settings.py                # updated: smtp_security replaces smtp_starttls
 ```
 

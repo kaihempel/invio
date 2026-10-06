@@ -388,6 +388,24 @@ async def test_unexpected_error_never_raises(
     assert {r.error for r in rows(db_engine)} == {"RuntimeError: kaputt"}
 
 
+async def test_delivery_errors_mask_the_database_url(
+    db_engine: Engine, smtp_server: SmtpServer, fake_clock: FakeClock
+) -> None:
+    raw = "mysql+pymysql://invio:db-pw-123@db.example/x"
+    digest_id = seed(db_engine)
+
+    outcome = await deliver(
+        db_engine,
+        digest_id,
+        smtp_settings(smtp_server, database_url=raw),
+        clock=fake_clock,
+        mailer_factory=raising(RuntimeError(f"cannot reach {raw}")),
+    )
+
+    assert outcome.failed == 2
+    assert {r.error for r in rows(db_engine)} == {"RuntimeError: cannot reach ***"}
+
+
 async def test_digest_missing_reports_error(db_engine: Engine, fake_clock: FakeClock) -> None:
     outcome = await deliver(db_engine, 999_999, smtp_settings(), clock=fake_clock)
 
@@ -548,7 +566,7 @@ async def test_line_breaks_in_job_name_cannot_inject_headers(
     message = mail.message
     assert message["Bcc"] is None
     assert message["X-Injected"] is None
-    assert message.get_all("Subject") == ["ai-news  Bcc: evil@example.org  X-Injected: yes"]
+    assert message.get_all("Subject") == ["ai-news Bcc: evil@example.org X-Injected: yes"]
     (row,) = rows(db_engine)
     assert row.payload is not None
     assert "\n" not in row.payload["subject"]

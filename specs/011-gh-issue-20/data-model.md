@@ -3,7 +3,7 @@
 Builds on [specs/002-gh-issue-4/data-model.md](../002-gh-issue-4/data-model.md). Only changes
 and the new typed payload are listed.
 
-## `notifications` (changed, migration `0003_notification_attempts`)
+## `notifications` (changed, migration `0004_notification_attempts`)
 
 | Column | Type | Null | Default | Notes |
 |--------|------|------|---------|-------|
@@ -21,7 +21,7 @@ and the new typed payload are listed.
 | **`attempts`** | `Integer` | no | `0` (server default) | **new**: number of send attempts started |
 | **`last_attempt_at`** | UTC datetime | yes | — | **new**: start time of the latest attempt |
 
-**Migration `0003`**:
+**Migration `0004`**:
 
 - `add_column` × 2 with `server_default="0"` for `attempts`, so existing rows get 0.
 - Downgrade drops both columns.

@@ -58,7 +58,7 @@ def run_retry() -> Result:
     return CliRunner().invoke(create_app(), ["notify", "retry"], env={"COLUMNS": "200"})
 
 
-def failed_rows(engine: Engine, *recipients: str) -> list[int]:
+def add_failed_rows(engine: Engine, *recipients: str) -> list[int]:
     digest_id = seed(engine, to=["a@example.org"])
     return [
         add_notification(engine, digest_id, status=S.FAILED, attempts=1, recipient=recipient)
@@ -69,7 +69,7 @@ def failed_rows(engine: Engine, *recipients: str) -> list[int]:
 def test_summary_exit_0(
     engine: Engine, monkeypatch: pytest.MonkeyPatch, smtp_server: SmtpServer
 ) -> None:
-    failed_rows(engine, "a@example.org", "b@example.org")
+    add_failed_rows(engine, "a@example.org", "b@example.org")
     smtp_env(monkeypatch, port=smtp_server.port)
 
     result = run_retry()
@@ -87,7 +87,7 @@ def test_summary_exit_0(
 def test_still_failing_exit_1(
     engine: Engine, monkeypatch: pytest.MonkeyPatch, closed_port: int
 ) -> None:
-    (row_id,) = failed_rows(engine, "a@example.org")
+    (row_id,) = add_failed_rows(engine, "a@example.org")
     smtp_env(monkeypatch, port=closed_port)
 
     result = run_retry()
@@ -124,7 +124,7 @@ def test_nothing_to_retry(engine: Engine, monkeypatch: pytest.MonkeyPatch) -> No
 
 
 def test_missing_smtp_exit_2(engine: Engine, monkeypatch: pytest.MonkeyPatch) -> None:
-    (row_id,) = failed_rows(engine, "a@example.org")
+    (row_id,) = add_failed_rows(engine, "a@example.org")
     monkeypatch.setenv("INVIO_SMTP_FROM", "invio@localhost")
 
     result = run_retry()
@@ -166,7 +166,7 @@ def test_unknown_security_exit_2(engine: Engine, monkeypatch: pytest.MonkeyPatch
 def test_password_not_printed(
     engine: Engine, monkeypatch: pytest.MonkeyPatch, closed_port: int
 ) -> None:
-    failed_rows(engine, "a@example.org")
+    add_failed_rows(engine, "a@example.org")
     smtp_env(monkeypatch, port=closed_port)
     monkeypatch.setenv("INVIO_SMTP_USER", "bob@x")
     monkeypatch.setenv("INVIO_SMTP_PASSWORD", "s3cr3t-pw")
@@ -275,7 +275,7 @@ def test_missing_smtp_exit_2_even_with_nothing_to_retry(
 
 
 def test_blank_smtp_host_exit_2(engine: Engine, monkeypatch: pytest.MonkeyPatch) -> None:
-    (row_id,) = failed_rows(engine, "a@example.org")
+    (row_id,) = add_failed_rows(engine, "a@example.org")
     smtp_env(monkeypatch, host="   ")
 
     result = run_retry()
@@ -292,7 +292,7 @@ def test_mixed_outcome_exit_1(
     engine: Engine, monkeypatch: pytest.MonkeyPatch, smtp_server: SmtpServer
 ) -> None:
     smtp_server.handler.reject = {"b@example.org"}
-    failed_rows(engine, "a@example.org", "b@example.org")
+    add_failed_rows(engine, "a@example.org", "b@example.org")
     smtp_env(monkeypatch, port=smtp_server.port)
 
     result = run_retry()
