@@ -471,6 +471,43 @@ fails or its answer is unusable, a plain fallback digest listing all items is bu
 `run_status_after_synthesis` turns a `succeeded` run into `partial`; credential and
 configuration errors propagate. Headings exist in English and German; other languages get
 English headings (the model still writes in the job's language).
+### Runs, statistics and the token budget
+
+A run is saved all-or-nothing by `invio.graph.nodes.persist.finalize_run`: the item updates of
+the LLM nodes, their `llm_usage` rows, the digest and the run's final status and statistics are
+committed in one transaction. If the save fails, everything is rolled back, the usage rows are
+written again from the run's `BudgetTracker` ledger, and the run is `failed` with
+`finished_at` and a sanitized `error` (error class and a fixed phrase, never SQL, document text
+or provider messages). `record_failed_run` does the same for a stage that raised before the
+save. If that recovery transaction fails too, the error is re-raised and the run stays
+`running`.
+
+Run status (`decide_status`): `failed` when every attempted item failed and the budget was not
+exceeded; `partial` when the budget stopped the run or any item failed; otherwise `succeeded`
+(also with no items). `runs.stats` holds the stage counts, tokens, estimated cost and budget
+figures, see
+[`specs/013-gh-issue-19/contracts/run-stats.md`](specs/013-gh-issue-19/contracts/run-stats.md).
+
+`limits.max_llm_tokens_per_run` caps the tokens (input plus output) of the per-item LLM calls.
+Before each relevance or summary call the tracker is checked; once `used` is above the limit no
+further per-item call starts, the batch returns what is finished, and items without a final
+state are released (attempt undone, `run_id` cleared, status `new`; an untouched `failed` retry
+stays `failed`), so the next run picks them up. The digest call passes `per_item=False`, so it
+always runs and is counted. Limits and known behaviour:
+
+- The check happens before a call, so the last call and the digest call can push `tokens` above
+  `budget_limit`; `budget_exceeded` is only set when a check failed, so it can be `false` while
+  `tokens > budget_limit`. `over_budget` in `runs.stats` shows that case (`tokens > budget_limit`).
+- Released items are rated again by the next run, so their relevance tokens are spent twice.
+- A killed process leaves the run `running` and only the `llm.call` log lines as usage record.
+- The orchestrator (#21) must commit the run start and `mark_taken` before the LLM stages, must
+  not commit `llm_usage` rows before `finalize_run` (the recovery replays the whole ledger), and
+  must call `record_failed_run` when a stage raises.
+- A digest may only name items the run summarized; any other id fails the save.
+- A run `failed` because every attempted item failed gets `runs.error`
+  `"all attempted items failed"`. A commit that fails after the database applied it is detected
+  by the recovery (the run is no longer `running`): nothing is replayed and the stored status is
+  kept.
 
 ## Notifications
 

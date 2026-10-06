@@ -4,13 +4,24 @@ Every node call records one ``llm_usage`` row, also when the answer stays invali
 was called, so the tokens were spent). Failure text for ``items.last_error`` is built from the
 error class and its structured fields only: provider messages can quote the request (and so
 document text), and validation errors can carry key names chosen by the model.
+
+Every call is also recorded on the run's :class:`~invio.graph.budget.BudgetTracker`, whose ledger
+equals the rows written. A per-item call first checks the budget and raises ``BudgetExceeded``
+when it is used up (no provider call, no row); the digest call passes ``per_item=False`` so it is
+counted but never blocked. ``BudgetExceeded`` is not an ``LLMError`` and not in
+``PER_ITEM_ERRORS``: it never fails an item, only :func:`run_until_exceeded` (the batch loop of
+every per-item stage) catches it.
 """
 
+import logging
+from collections.abc import Awaitable, Callable, Iterable
 from typing import Final, Protocol
 
 from pydantic import BaseModel
 
 from invio.db.repositories import UsageRepository
+from invio.db.types import utcnow
+from invio.graph.budget import BudgetExceeded, BudgetTracker, UsageEntry
 from invio.llm.base import (
     LLMError,
     LLMInvalidOutputError,
@@ -29,7 +40,10 @@ __all__ = [
     "call_structured",
     "call_text",
     "failure_message",
+    "run_until_exceeded",
 ]
+
+logger = logging.getLogger("invio.graph")
 
 # LLM failures that fail one item; credential and configuration errors propagate instead.
 PER_ITEM_ERRORS: Final = (
@@ -57,26 +71,57 @@ class CallContext(Protocol):
     def registry(self) -> ModelRegistry: ...
     @property
     def usage(self) -> UsageRepository: ...
+    @property
+    def budget(self) -> BudgetTracker: ...
 
 
 def _record_usage(ctx: CallContext, model: str, purpose: str, usage: Usage) -> None:
-    """Store one ``llm_usage`` row for a call (a repair request is already summed in)."""
+    """Count one call on the budget and store its ``llm_usage`` row (a repair is summed in).
+
+    The tracker comes first: if the flush fails, the tokens are still in the ledger for the
+    replay after the rollback.
+    """
+    entry = UsageEntry(
+        provider=ctx.provider_name,
+        model=model,
+        purpose=purpose,
+        input_tokens=usage.input_tokens,
+        output_tokens=usage.output_tokens,
+        cost_usd=ctx.registry.cost(model, usage),
+        created_at=utcnow(),
+    )
+    ctx.budget.record(entry)
     ctx.usage.add(
         ctx.job_id,
-        ctx.provider_name,
-        model,
-        usage.input_tokens,
-        usage.output_tokens,
+        entry.provider,
+        entry.model,
+        entry.input_tokens,
+        entry.output_tokens,
         run_id=ctx.run_id,
-        purpose=purpose,
-        cost_usd=ctx.registry.cost(model, usage),
+        purpose=entry.purpose,
+        cost_usd=entry.cost_usd,
+        created_at=entry.created_at,
     )
 
 
 async def call_structured[T: BaseModel](
-    ctx: CallContext, schema: type[T], *, model: str, purpose: str, system: str, user: str
+    ctx: CallContext,
+    schema: type[T],
+    *,
+    model: str,
+    purpose: str,
+    system: str,
+    user: str,
+    per_item: bool = True,
 ) -> T:
-    """Run one structured call and record its usage, also when the answer stays invalid."""
+    """Run one structured call and record its usage, also when the answer stays invalid.
+
+    A per-item call (the default) raises ``BudgetExceeded`` before the provider is called when
+    the run's budget is used up. ``per_item=False`` (the digest call) skips that check; its
+    usage is still counted.
+    """
+    if per_item:
+        ctx.budget.check()
     try:
         result, usage = await ctx.provider.complete_structured(
             system, user, schema, model=model, temperature=0.0
@@ -120,3 +165,33 @@ def failure_message(err: Exception) -> str:
     if isinstance(err, LLMRateLimitError) and err.retry_after is not None:
         facts.append(f"retry after {err.retry_after:g} s")
     return f"{name}: call failed ({', '.join(facts)})"
+
+
+async def run_until_exceeded[I, O](
+    items: Iterable[I], step: Callable[[I], Awaitable[O]], ctx: CallContext, *, stage: str
+) -> list[O]:
+    """Run ``step`` on ``items`` one after the other and return the results, in input order.
+
+    Stops at the first ``BudgetExceeded`` and returns the results completed so far; the item in
+    progress and the rest are left unchanged. ``budget.exceeded`` is logged once, by the stage
+    that first hits the limit (not again when the budget was already exceeded before).
+    """
+    already_exceeded = ctx.budget.exceeded
+    results: list[O] = []
+    for item in items:
+        try:
+            results.append(await step(item))
+        except BudgetExceeded as stop:
+            if not already_exceeded:
+                logger.warning(
+                    "budget.exceeded",
+                    extra={
+                        "stage": stage,
+                        "used": stop.used,
+                        "limit": stop.limit,
+                        "job_id": ctx.job_id,
+                        "db_run_id": ctx.run_id,
+                    },
+                )
+            break
+    return results
