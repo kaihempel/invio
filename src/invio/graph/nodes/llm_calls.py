@@ -1,4 +1,4 @@
-"""Shared plumbing for LLM nodes: one structured call with usage recording, and failure text.
+"""Shared plumbing for LLM nodes: one structured or free-text call with usage, and failure text.
 
 Every node call records one ``llm_usage`` row, also when the answer stays invalid (the model
 was called, so the tokens were spent). Failure text for ``items.last_error`` is built from the
@@ -27,6 +27,7 @@ __all__ = [
     "PER_ITEM_ERRORS",
     "CallContext",
     "call_structured",
+    "call_text",
     "failure_message",
 ]
 
@@ -85,6 +86,20 @@ async def call_structured[T: BaseModel](
         raise
     _record_usage(ctx, model, purpose, usage)
     return result
+
+
+async def call_text(
+    ctx: CallContext, *, model: str, purpose: str, system: str, user: str, max_tokens: int
+) -> str:
+    """Run one free-text call and record its usage.
+
+    A failed request raises and records nothing: the provider reports no usage for it.
+    """
+    text, usage = await ctx.provider.complete(
+        system, user, model=model, temperature=0.0, max_tokens=max_tokens
+    )
+    _record_usage(ctx, model, purpose, usage)
+    return text
 
 
 def failure_message(err: Exception) -> str:

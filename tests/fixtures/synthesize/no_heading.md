@@ -1,0 +1,1 @@
+Agents in production kept moving this week. See [Agent runtime released](https://example.org/a) and the [Evaluation harness](https://example.org/b) for details, plus the [Cost study](https://example.org/c).
