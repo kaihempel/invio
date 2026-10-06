@@ -41,6 +41,7 @@ from invio.llm.mistral import (
     _strict_schema,
 )
 from invio.llm.registry import default_registry
+from tests.async_helpers import RecordingSleep
 from tests.llm_helpers import Score, make_settings
 from tests.mistral_helpers import API_KEY, HANG, Recorder, load_fixture, make_provider
 
@@ -1302,13 +1303,11 @@ async def test_lower_jitter_bound_shortens_the_wait() -> None:
 async def test_default_jitter_stays_within_25_percent() -> None:
     # FR-016 with the real random source (only the sleep is faked).
     recorder = Recorder(tuple(["error_503"] * 4))
-    waits: list[float] = []
-
-    async def record_sleep(seconds: float) -> None:
-        waits.append(seconds)
+    sleep = RecordingSleep()
+    waits = sleep.calls
 
     provider = MistralProvider(
-        API_KEY, timeout_seconds=60, client_factory=recorder.client_factory, sleep=record_sleep
+        API_KEY, timeout_seconds=60, client_factory=recorder.client_factory, sleep=sleep
     )
 
     with pytest.raises(LLMUnavailableError):
@@ -1535,13 +1534,11 @@ async def test_default_clock_measures_an_http_date_from_now() -> None:
     # FR-017 with the real clock (no ``now`` injected); HTTP dates have 1 s resolution.
     when = format_datetime(datetime.now(UTC) + timedelta(seconds=30), usegmt=True)
     recorder = Recorder((httpx2.Response(429, headers={"Retry-After": when}, json={}), "chat_ok"))
-    waits: list[float] = []
-
-    async def record_sleep(seconds: float) -> None:
-        waits.append(seconds)
+    sleep = RecordingSleep()
+    waits = sleep.calls
 
     provider = MistralProvider(
-        API_KEY, timeout_seconds=60, client_factory=recorder.client_factory, sleep=record_sleep
+        API_KEY, timeout_seconds=60, client_factory=recorder.client_factory, sleep=sleep
     )
 
     await _complete(provider)

@@ -52,7 +52,7 @@ simple: a recording notifier, a raising source and a fixed clock are plain objec
 ## R3 — Run dependencies and ports
 
 **Decision**: `graph/ports.py` defines a frozen dataclass `RunDeps` that is passed to
-`build_graph(deps, *, job_id, run_id, token, dry_run)` (contracts/graph.md):
+`build_graph(deps, scope)` (contracts/graph.md):
 
 - `session_factory: sessionmaker[Session]`
 - `fetch_source: SourceFetcher`, i.e.
@@ -84,14 +84,18 @@ no network (Constitution III).
 - *LLM calls*: the provider is wrapped in `RetryingProvider`, an `LLMProvider` decorator in
   `invio.llm.retry`. It retries `complete` and `complete_structured` on the transient errors.
 
-The policy is a frozen dataclass, `RetrySettings`, in a new dependency-free leaf module
-`invio/retry.py`. It sits next to `domain.py`, so `llm`, `sources` and `graph` can all import
+The policy is a frozen dataclass, `RetrySettings`, in a new leaf module `invio/retry.py` that
+imports nothing from `invio`. It sits next to `domain.py`, so `llm`, `sources` and `graph` can all import
 it. Its fields mirror LangGraph's `RetryPolicy` names: `initial_interval=1.0`,
 `backoff_factor=2.0`, `max_interval=30.0`, `max_attempts=3` and `jitter=True`. The same module
-has `async retrying(call, *, policy, retry_on, sleep)`. The wait before attempt *n* + 1 is
-`min(max_interval, initial_interval * backoff_factor**(n-1))`, plus up to 10 % jitter. It uses
-`LLMRateLimitError.retry_after` when that is larger, still capped at `max_interval`. Each retry
-logs `retry.attempt` with the error class, attempt number and wait.
+has `async retrying(call, *, policy, retry_on, retry_after, sleep)`. The wait before attempt
+*n* + 1 is `min(max_interval, initial_interval * backoff_factor**(n-1))`, plus up to 10 %
+jitter. The wait a server asked for (`retry_after(err)`, for the LLM wrapper
+`LLMRateLimitError.retry_after`) is used when it is larger; when it is larger than
+`max_interval` the error is raised at once, because an earlier retry would only be
+rate-limited again. Each retry logs `retry.attempt` with the error class, attempt number and
+wait; giving up early logs `retry.gave_up`. The predicates live next to the errors they
+classify: `invio.llm.retry.is_transient_llm` and `invio.sources.errors.is_transient_fetch`.
 
 `retry_on` is a predicate:
 
@@ -127,8 +131,8 @@ issue's vocabulary without making the `llm` layer import LangGraph, which the la
 `Send("process_item", ItemTask(item_id=…))` for every item that passed. If there is none, it
 routes to `join`. `process_item` is a compiled subgraph (R6) added as a node. Each item's
 processing is wrapped in `async with deps.semaphore:`, an `asyncio.Semaphore(concurrency)`
-created per run (default 4). The compiled graph is also invoked with
-`config={"max_concurrency": concurrency}` as a second bound. All items share the run's single
+created per run (default 4). It is the only bound: LangGraph's `max_concurrency` would add
+nothing the semaphore does not already enforce. All items share the run's single
 work session. That is safe because every repository call is synchronous and never spans an
 `await`, so on the one event-loop thread no two tasks touch the session at the same moment.
 
@@ -194,11 +198,7 @@ configuration errors already propagate by contract in #16, #17 and #18.
 **Decision**: `graph/state.py`:
 
 ```text
-RunState (TypedDict, total=False)
-  job_id: int
-  run_id: int
-  dry_run: bool
-  config: JobConfig
+RunState (TypedDict, total=False)   # job/run ids, config and dry_run live on RunScope
   sources_total: int
   sources_failed: int
   candidates: dict[str, list[Candidate]]          # key = source key (R9)
@@ -208,7 +208,6 @@ RunState (TypedDict, total=False)
   items: Annotated[list[ItemResult], operator.add]
   errors: Annotated[list[RunError], operator.add]
   digest: DigestDraft | None
-  digest_md: str | None
   digest_id: int | None
   status: RunStatus | None
   fatal: RunError | None                           # set by a guarded stage that raised
@@ -282,7 +281,7 @@ and #28 land.
 **Decision**: There are two new `JobRepository` methods, each a single atomic `UPDATE`:
 
 - `claim(job_id, *, now, until) -> bool`:
-  `UPDATE jobs SET locked_until=:until WHERE id=:id AND (locked_until IS NULL OR locked_until < :now)`.
+  `UPDATE jobs SET locked_until=:until WHERE id=:id AND (locked_until IS NULL OR locked_until <= :now)`.
   It returns `rowcount == 1`, in the same form as step 2 of #23.
 - `release(job_id, *, until, next_run_at: datetime | None | _Unset) -> bool`:
   `UPDATE jobs SET locked_until=NULL[, next_run_at=:next] WHERE id=:id AND locked_until=:until`.
@@ -322,8 +321,14 @@ Notification runs before finalize, after the work session commit. `deliver_diges
 sessions and needs the committed digest id.
 
 The lock lifetime is `Settings.run_lock_seconds` (`INVIO_RUN_LOCK_SECONDS`, default 7200, as
-in #23). A run that outlives its lock can be overtaken. This is documented as a known
-limitation, with no heartbeat in this issue. A `next_run_at` back-off after failed runs is
+in #23). A run must not outlive its lock: the lock's `until` value doubles as the run's
+deadline. Every guarded stage up to `persist` and every item node first checks
+`deps.clock() >= token` and raises `LockExpiredError`, which fails the run, so a run that took
+too long stops at the next boundary instead of racing a run that claimed the expired lock. The
+check is a clock comparison, not a database write: a heartbeat `UPDATE` from a second
+connection would block on SQLite while the work session holds the write lock. A stage that is
+already running when the lock expires is not interrupted; `run_lock_seconds` must stay well
+above the longest expected stage. A `next_run_at` back-off after failed runs is
 #23's job: finalize uses the plain schedule.
 
 **Rationale**: This is the pairing from clarification 2. `claim` matches #23's SQL, so `run-due`

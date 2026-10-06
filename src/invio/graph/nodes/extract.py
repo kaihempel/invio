@@ -15,7 +15,8 @@ from invio.db.models import Item
 from invio.db.repositories import ItemRepository
 from invio.graph.ports import PageFetcher
 from invio.graph.state import ItemState, ItemUpdate
-from invio.retry import RetrySettings, Sleep, is_transient_fetch, retrying
+from invio.retry import RetrySettings, Sleep, retrying
+from invio.sources.errors import is_transient_fetch
 from invio.sources.extract import ExtractionError, extract_text
 
 __all__ = ["extract_item", "video_path"]

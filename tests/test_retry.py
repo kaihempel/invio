@@ -1,4 +1,4 @@
-"""Tests for ``invio.retry``: backoff, jitter bound, ``retry_after`` and the predicates."""
+"""Tests for ``invio.retry`` (backoff, jitter bound, ``retry_after``) and the retry predicates."""
 
 import logging
 
@@ -10,26 +10,19 @@ from invio.llm.base import (
     LLMRateLimitError,
     LLMUnavailableError,
 )
-from invio.retry import RetrySettings, is_transient_fetch, is_transient_llm, retrying
+from invio.llm.retry import is_transient_llm, llm_retry_after
+from invio.retry import RetrySettings, retrying
 from invio.sources.errors import (
     BlockedError,
     BlockReason,
     FetchError,
     RenderUnavailableError,
     TooLargeError,
+    is_transient_fetch,
 )
+from tests.async_helpers import RecordingSleep
 
 URL = "https://example.com/feed"
-
-
-class RecordingSleep:
-    """Async ``sleep`` stand-in that records the requested waits."""
-
-    def __init__(self) -> None:
-        self.calls: list[float] = []
-
-    async def __call__(self, seconds: float) -> None:
-        self.calls.append(seconds)
 
 
 class Flaky:
@@ -86,10 +79,10 @@ async def test_exhausted_attempts_reraise_the_last_error_unchanged() -> None:
     assert sleep.calls == [1.0, 2.0]
 
 
-async def test_retry_after_is_used_when_larger_and_capped_at_max_interval() -> None:
+async def test_retry_after_is_used_when_larger_than_the_backoff() -> None:
     sleep = RecordingSleep()
     flaky = Flaky(
-        LLMRateLimitError("slow", retry_after=5), LLMRateLimitError("slow", retry_after=99)
+        LLMRateLimitError("slow", retry_after=5), LLMRateLimitError("slow", retry_after=30)
     )
 
     await retrying(
@@ -97,10 +90,52 @@ async def test_retry_after_is_used_when_larger_and_capped_at_max_interval() -> N
         policy=RetrySettings(jitter=False, max_interval=30.0),
         retry_on=_transient,
         what="llm",
+        retry_after=llm_retry_after,
         sleep=sleep,
     )
 
     assert sleep.calls == [5.0, 30.0]
+
+
+async def test_retry_after_beyond_max_interval_gives_up_without_sleeping(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    sleep = RecordingSleep()
+    err = LLMRateLimitError("slow", retry_after=120)
+    flaky = Flaky(err)
+
+    with (
+        caplog.at_level(logging.INFO, logger="invio.retry"),
+        pytest.raises(LLMRateLimitError) as raised,
+    ):
+        await retrying(
+            flaky,
+            policy=RetrySettings(jitter=False, max_interval=30.0),
+            retry_on=_transient,
+            what="llm",
+            retry_after=llm_retry_after,
+            sleep=sleep,
+        )
+
+    assert raised.value is err
+    assert flaky.calls == 1
+    assert sleep.calls == []
+    assert [r.getMessage() for r in caplog.records] == ["retry.gave_up"]
+
+
+async def test_retry_after_is_ignored_without_a_hint_function() -> None:
+    sleep = RecordingSleep()
+    flaky = Flaky(LLMRateLimitError("slow", retry_after=120))
+
+    await retrying(
+        flaky,
+        policy=RetrySettings(jitter=False),
+        retry_on=_transient,
+        what="llm",
+        sleep=sleep,
+    )
+
+    assert sleep.calls == [1.0]
 
 
 async def test_retry_after_smaller_than_backoff_is_ignored() -> None:
@@ -112,6 +147,7 @@ async def test_retry_after_smaller_than_backoff_is_ignored() -> None:
         policy=RetrySettings(jitter=False),
         retry_on=_transient,
         what="llm",
+        retry_after=llm_retry_after,
         sleep=sleep,
     )
 
@@ -191,6 +227,18 @@ async def test_default_sleep_really_waits_briefly() -> None:
 )
 def test_is_transient_llm(err: BaseException, expected: bool) -> None:
     assert is_transient_llm(err) is expected
+
+
+@pytest.mark.parametrize(
+    ("err", "expected"),
+    [
+        (LLMRateLimitError("x", retry_after=7), 7),
+        (LLMRateLimitError("x"), None),
+        (LLMUnavailableError("x"), None),
+    ],
+)
+def test_llm_retry_after(err: BaseException, expected: float | None) -> None:
+    assert llm_retry_after(err) == expected
 
 
 @pytest.mark.parametrize(

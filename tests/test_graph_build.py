@@ -1,5 +1,6 @@
 """Topology and routing of the research graph, and the video path (S24)."""
 
+import asyncio
 import dataclasses
 from collections.abc import Callable
 from datetime import datetime, timedelta
@@ -14,7 +15,7 @@ from invio.db.repositories import RunRepository
 from invio.db.session import session_scope
 from invio.domain import ItemStatus, RunStatus
 from invio.graph import stages
-from invio.graph.build import RunScope, build_graph, build_item_graph
+from invio.graph.build import RunScope, build_graph, build_item_graph, new_scope
 from invio.graph.state import ItemState
 from invio.pipeline.run import run_job
 from tests.conftest import FakeClock
@@ -44,14 +45,14 @@ def _env(engine: Engine, clock: FakeClock, next_run: NextRun, **kwargs: Any) -> 
 
 
 def _graph(env: Env) -> Any:
-    graph, _ = build_graph(
+    scope = new_scope(
         env.deps,
         job_id=env.job_id,
         run_id=1,
         token=env.deps.clock() + timedelta(hours=1),
         dry_run=False,
     )
-    return graph.get_graph()
+    return build_graph(env.deps, scope).get_graph()
 
 
 def test_the_run_graph_has_the_documented_nodes_and_ends_only_in_finalize(
@@ -72,7 +73,13 @@ def test_the_item_subgraph_has_the_documented_nodes(
     db_engine: Engine, fake_clock: FakeClock, recording_next_run: NextRun
 ) -> None:
     env = _env(db_engine, fake_clock, recording_next_run)
-    scope = RunScope(job_id=env.job_id, run_id=1, token=fake_clock(), dry_run=False)
+    scope = RunScope(
+        job_id=env.job_id,
+        run_id=1,
+        token=fake_clock() + timedelta(hours=2),
+        dry_run=False,
+        semaphore=asyncio.Semaphore(1),
+    )
 
     drawn = build_item_graph(env.deps, scope).get_graph()
 
@@ -118,7 +125,13 @@ async def _stream_nodes(env: Env, kind: str, number: int) -> tuple[list[str], di
             teaser="a teaser",
         )
         run_id, item_id = run.id, item.id
-    scope = RunScope(job_id=env.job_id, run_id=run_id, token=env.deps.clock(), dry_run=False)
+    scope = RunScope(
+        job_id=env.job_id,
+        run_id=run_id,
+        token=env.deps.clock() + env.deps.lock_ttl,
+        dry_run=False,
+        semaphore=asyncio.Semaphore(1),
+    )
     await stages.load_job({}, env.deps, scope)
     graph = build_item_graph(env.deps, scope)
     visited: list[str] = []

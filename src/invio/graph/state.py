@@ -11,7 +11,6 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Annotated, Literal, Required, TypedDict, get_args
 
-from invio.config.job import JobConfig
 from invio.domain import Candidate, ItemType, RunStatus
 from invio.graph.nodes.persist import DigestDraft, StageCounts
 from invio.graph.nodes.relevance import RelevanceOutcome
@@ -123,12 +122,11 @@ def keep_first[T](current: T | None, new: T | None) -> T | None:
 
 
 class RunState(TypedDict, total=False):
-    """State of one run. Only ``items``, ``errors`` and ``fatal`` merge; others: last write wins."""
+    """State of one run. Only ``items``, ``errors`` and ``fatal`` merge; others: last write wins.
 
-    job_id: int
-    run_id: int
-    dry_run: bool
-    config: JobConfig
+    Run identity, the validated job config and the dry-run flag live on the ``RunScope``.
+    """
+
     sources_total: int
     sources_failed: int
     candidates: Mapping[str, list[Candidate]]  # key = source key

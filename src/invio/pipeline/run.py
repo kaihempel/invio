@@ -19,14 +19,12 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, cast
 
-from invio.config.job import LimitsConfig
 from invio.config.settings import get_settings
 from invio.db.repositories import JobRepository, RunRepository
 from invio.db.session import session_scope
 from invio.domain import RunStatus
-from invio.graph.budget import BudgetTracker
-from invio.graph.build import build_graph
-from invio.graph.nodes.persist import DigestDraft, record_failed_run
+from invio.graph.build import build_graph, new_scope
+from invio.graph.nodes.persist import DigestDraft
 from invio.graph.ports import RunDeps
 from invio.graph.scope import RunScope
 from invio.graph.stages import record_failure, release_lock, rollback_work_session
@@ -129,31 +127,17 @@ async def _run(job_id: int, *, dry_run: bool, deps: RunDeps) -> RunResult:
     except BaseException:
         _release_quietly(deps, job_id, token)
         raise
-    try:
-        graph, scope = build_graph(deps, job_id=job_id, run_id=run_id, token=token, dry_run=dry_run)
-    except BaseException as err:
-        _abort_setup(deps, job_id, run_id, token, err)
-        raise
+    scope = new_scope(deps, job_id=job_id, run_id=run_id, token=token, dry_run=dry_run)
     scope.job_name = name
     with run_context(job=name, run_id=str(run_id)):
         logger.info("run.started", extra={"dry_run": dry_run, "job_id": job_id})
         try:
-            final = cast(
-                RunState,
-                await graph.ainvoke(
-                    {
-                        "job_id": job_id,
-                        "run_id": run_id,
-                        "dry_run": dry_run,
-                        "items": [],
-                        "errors": [],
-                    },
-                    config={"max_concurrency": deps.concurrency},
-                ),
-            )
+            graph = build_graph(deps, scope)
+            final = cast(RunState, await graph.ainvoke({"items": [], "errors": []}))
         except BaseException as err:
-            # Cancellation, an interrupt or an error inside ``finalize`` itself: the graph did
-            # not close the run, so do it here, inside the run context (research R8).
+            # A graph that cannot be built, a cancellation, an interrupt or an error inside
+            # ``finalize`` itself: the graph did not close the run, so do it here, inside the
+            # run context (research R8).
             if not scope.finalized:
                 _safety_net(deps, scope, err)
             raise
@@ -186,28 +170,13 @@ def _safety_net(deps: RunDeps, scope: RunScope, error: BaseException) -> None:
     with contextlib.suppress(Exception):  # logged by record_failed_run (error class only)
         record_failure(deps, scope, error)
     try:
-        release_lock(deps, scope, scope.config)
+        release_lock(deps, scope)
     except Exception as release_error:
         logger.error(
             "run.release_failed",
             extra={"error": type(release_error).__name__, "db_run_id": scope.run_id},
         )
     scope.finalized = True
-
-
-def _abort_setup(
-    deps: RunDeps, job_id: int, run_id: int, token: datetime, error: BaseException
-) -> None:
-    """Fail the started run and release the lock when the graph could not even be built."""
-    with contextlib.suppress(Exception):  # logged by record_failed_run (error class only)
-        record_failed_run(
-            deps.session_factory,
-            job_id=job_id,
-            run_id=run_id,
-            budget=BudgetTracker(LimitsConfig().max_llm_tokens_per_run),
-            error=error,
-        )
-    _release_quietly(deps, job_id, token)
 
 
 def _release_quietly(deps: RunDeps, job_id: int, token: datetime) -> None:

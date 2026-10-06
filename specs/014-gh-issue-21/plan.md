@@ -90,9 +90,9 @@ and a few sources per job.
 | III. Test-covered | Every acceptance criterion and scenario maps to quickstart scenarios 1–31, incl. rejection paths (busy lock, invalid config, non-retryable errors); FakeProvider + fixtures, no network, deterministic (injected clock/sleep, purpose-routed fake under fan-out) | PASS |
 | IV. Quality gates | Strict mypy: no untyped `configurable` dict (R1), deps typed via `RunDeps`; `Any` only for `runs.stats` (existing justification); `uv.lock` updated, CI `--locked` | PASS |
 | V. Secrets / observability | `RunError` keeps error class only; `runs.error` via #19's sanitizer; source keys instead of URLs; whole run inside `run_context(job, run_id)` (FR-014); new structured events listed in contracts/run-job.md | PASS |
-| Layering | `cli → pipeline → graph → (db, llm, sources)`; `pipeline` also imports `notify`, `scheduling`; `graph` gets them as ports; `invio.retry` is a dependency-free leaf; new AST tests | PASS |
+| Layering | `cli → pipeline → graph → (db, llm, sources)`; `pipeline` also imports `notify`, `scheduling`; `graph` gets them as ports; `invio.retry` is a leaf that imports nothing from `invio`; new AST tests | PASS |
 | New dependency | `langgraph`: named by issue #21 and README; justification goes in the PR description | PASS (justified) |
-| Simplicity | No checkpointer, no migration, no heartbeat; retry helper ≈ 30 lines instead of `tenacity`; unsupported source types skipped rather than stubbed | PASS |
+| Simplicity | No checkpointer, no migration, no heartbeat (a clock-based lock deadline instead); retry helper ≈ 30 lines instead of `tenacity`; unsupported source types skipped rather than stubbed | PASS |
 | Docs | README "Running a job" section (run_job, dry run, status rules, settings) in the same PR | PASS (planned) |
 
 **Post-design re-check (after Phase 1)**: PASS, with one recorded constitution deviation. The
@@ -124,7 +124,7 @@ specs/014-gh-issue-21/
 
 ```text
 src/invio/
-├── retry.py                      # NEW  RetrySettings, retrying(), is_transient_llm/fetch predicates
+├── retry.py                      # NEW  RetrySettings, retrying() (predicates: llm/retry.py, sources/errors.py)
 ├── config/settings.py            # +max_parallel_items, +run_lock_seconds
 ├── db/repositories.py            # +JobRepository.get/claim/release, +ItemRepository.set_extracted
 ├── sources/http.py               # SafeHttpClient.get(..., conditional=True): False sends no validators (item pages, R6)
@@ -132,7 +132,7 @@ src/invio/
 ├── graph/
 │   ├── state.py                  # NEW  RunState, ItemState, ItemTask, ItemResult, RunError
 │   ├── ports.py                  # NEW  RunDeps, SourceFetcher, PageFetcher, Notifier, ProviderBinding
-│   ├── build.py                  # NEW  RunScope, build_graph(deps, *, job_id, run_id, token, dry_run) -> (graph, scope), guarded(), routing, process_item subgraph
+│   ├── build.py                  # NEW  RunScope, new_scope(...), build_graph(deps, scope) -> graph, guarded(), routing, process_item subgraph
 │   ├── stages.py                 # NEW  stage node functions (load_job … finalize) over RunDeps
 │   └── nodes/
 │       ├── extract.py            # NEW  extract_text node (page fetch + sources.extract), video_path

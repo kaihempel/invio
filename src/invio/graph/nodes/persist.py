@@ -23,7 +23,7 @@ and its parameters, which can contain document text or the database URL (researc
 """
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any, Final
 
@@ -373,12 +373,20 @@ def record_failed_run(
     return RunStatus.FAILED
 
 
+SaveFailure = Callable[[Exception], None]  # told the save error that ``_recover`` swallowed
+
+
 def _recover(
-    factory: sessionmaker[Session], session: Session, result: RunDraft, error: BaseException
+    factory: sessionmaker[Session],
+    session: Session,
+    result: RunDraft,
+    error: BaseException,
+    on_failure: SaveFailure | None = None,
 ) -> RunStatus:
     """Roll the work session back, record the failed run and return the run's stored status.
 
-    Only ints and classes are logged.
+    Only ints and classes are logged. ``on_failure`` is told an ``Exception`` before the
+    recovery runs (a ``BaseException`` is re-raised by the caller anyway).
 
     The ORM objects of the session are expired or detached after the rollback, so nothing of
     them is read here. A rollback that itself fails is logged and the recovery goes on.
@@ -389,6 +397,8 @@ def _recover(
     except Exception as rollback_error:
         logger.error("run.rollback_failed", extra={"error": type(rollback_error).__name__, **ids})
     logger.error("run.persist_failed", extra={"error": type(error).__name__, **ids})
+    if on_failure is not None and isinstance(error, Exception):
+        on_failure(error)
     return record_failed_run(
         factory,
         job_id=result.job_id,
@@ -399,23 +409,29 @@ def _recover(
     )
 
 
-def finalize_run(factory: sessionmaker[Session], session: Session, result: RunDraft) -> RunStatus:
+def finalize_run(
+    factory: sessionmaker[Session],
+    session: Session,
+    result: RunDraft,
+    *,
+    on_failure: SaveFailure | None = None,
+) -> RunStatus:
     """Save the run in ``session`` with one commit and return its final status.
 
     On success logs ``run.persisted`` (status and every statistic as fields). If the save fails
     the work session is rolled back and :func:`record_failed_run` runs; the save error itself is
-    not re-raised and the status is ``failed``. An error of that recovery transaction *is*
-    re-raised (see :func:`record_failed_run`), as is ``KeyboardInterrupt`` or ``SystemExit``
-    after the recovery. A commit that fails after the database applied it (lost connection) is
-    detected by the recovery (the run is no longer ``running``): nothing is replayed and the
-    stored status is returned.
+    not re-raised (``on_failure`` receives it) and the status is ``failed``. An error of that
+    recovery transaction *is* re-raised (see :func:`record_failed_run`), as is
+    ``KeyboardInterrupt`` or ``SystemExit`` after the recovery. A commit that fails after the
+    database applied it (lost connection) is detected by the recovery (the run is no longer
+    ``running``): nothing is replayed and the stored status is returned.
     """
     try:
         run = persist_run(session, result)
         status, stats = RunStatus(run.status), dict(run.stats or {})  # read before the commit
         session.commit()
     except Exception as error:
-        return _recover(factory, session, result, error)
+        return _recover(factory, session, result, error, on_failure)
     except BaseException as error:
         _recover(factory, session, result, error)
         raise
@@ -424,13 +440,20 @@ def finalize_run(factory: sessionmaker[Session], session: Session, result: RunDr
     return status
 
 
-def finish_dry_run(factory: sessionmaker[Session], session: Session, result: RunDraft) -> RunStatus:
+def finish_dry_run(
+    factory: sessionmaker[Session],
+    session: Session,
+    result: RunDraft,
+    *,
+    on_failure: SaveFailure | None = None,
+) -> RunStatus:
     """Finish a dry run: keep the run row with its statistics and discard everything else.
 
     The status, statistics and error are computed first, while the items are still readable;
     then the work session is rolled back (item inserts, attempts, statuses, usage rows and the
     digest all vanish) and the run is finished in a new transaction with ``stats["dry_run"]``
-    set. If that fails, the run is recorded failed like a failed save, without replaying usage.
+    set. If that fails, the run is recorded failed like a failed save (``on_failure`` receives
+    the error), without replaying usage.
     Logs ``run.persisted`` with ``dry_run=True``; returns the final status.
     """
     try:
@@ -445,7 +468,7 @@ def finish_dry_run(factory: sessionmaker[Session], session: Session, result: Run
                 raise LookupError(f"run {result.run_id} not found")
             runs.finish(run, status, stats=stats, error=error)
     except Exception as err:
-        return _recover(factory, session, result, err)
+        return _recover(factory, session, result, err, on_failure)
     except BaseException as err:
         _recover(factory, session, result, err)
         raise

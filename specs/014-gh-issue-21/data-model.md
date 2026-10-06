@@ -40,7 +40,8 @@ This is the `Send` payload of the fan-out: `item_id: int` and `kind: ItemType`
 
 See research R7 for the full field list. The reducers are `items` and `errors`, both
 `Annotated[list[...], operator.add]`. Every other key is replaced on write. `fatal: RunError |
-None` routes to `finalize` (R8).
+None` routes to `finalize` (R8). The run's identity, the validated config and the dry-run flag
+are not state: they live on `RunScope`.
 
 ### ItemState (`invio.graph.state`, `TypedDict`)
 
@@ -56,18 +57,21 @@ part of the LangGraph state.
 
 | Field | Type | Set by | Meaning |
 |---|---|---|---|
-| `job_id`, `run_id` | `int` | `build_graph` | from `run_job` |
-| `token` | `datetime` | `build_graph` | the claimed `locked_until`, the ownership token for `release` |
-| `dry_run` | `bool` | `build_graph` | |
+| `job_id`, `run_id` | `int` | `new_scope` | from `run_job` |
+| `token` | `datetime` | `new_scope` | the claimed `locked_until`: the ownership token for `release` and the run's deadline (`LockExpiredError`) |
+| `dry_run` | `bool` | `new_scope` | |
+| `config` | `JobConfig \| None` | `load_job` | the validated job config |
 | `session` | `Session \| None` | `deduplicate` (opened lazily) | the run's single work session |
 | `budget` | `BudgetTracker` | `load_job` | `limits.max_llm_tokens_per_run` |
 | `binding` | `ProviderBinding \| None` | `load_job` | wrapped in `RetryingProvider` |
-| `semaphore` | `asyncio.Semaphore` | `build_graph` | `deps.concurrency` |
+| `semaphore` | `asyncio.Semaphore` | `new_scope` | `deps.concurrency`; the only concurrency bound |
 | `synthesis` | `SynthesisResult \| None` | `synthesize_digest` | for `run_status_after_synthesis` |
+| `delivery` | `DeliveryReport \| None` | `notify` | the notifier's report, or the counts of the run's `notifications` rows when it raised |
 | `failure` | `BaseException \| None` | `guarded` | the original exception (`RunError` keeps only its class) for `record_failed_run` |
 | `finalized` | `bool` | `finalize` | makes finalize idempotent and tells the safety net whether to act |
 
-Lifecycle: it is created by `build_graph` and returned with the compiled graph. `finalize`
+Lifecycle: `run_job` creates it with `new_scope` after the run row exists and passes it to
+`build_graph`, so a build failure reaches the same safety net. `finalize`
 closes `session` (commit or rollback already done) and sets `finalized`. If `ainvoke` ends with
 `finalized` still false, `run_job` rolls back `session`, records the failure and releases the
 lock (R8).

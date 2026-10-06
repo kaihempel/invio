@@ -8,7 +8,6 @@ import invio.graph
 from tests.test_graph_layering import SRC, _imports_of, _is_within
 
 ROOT = Path(invio.__path__[0])
-ALLOWED_RETRY_IMPORTS = ("invio.llm.base", "invio.sources.errors")
 
 
 def _modules(package: str) -> list[Path]:
@@ -44,12 +43,8 @@ def test_retry_is_a_leaf_module() -> None:
     path = ROOT / "retry.py"
     for name in _imports_of(path):
         top = name.split(".")[0]
-        if top == "invio":
-            assert _is_within(name, ALLOWED_RETRY_IMPORTS) or name == "invio", (
-                f"retry.py imports {name}"
-            )
-        else:
-            assert top in sys.stdlib_module_names, f"retry.py imports third-party {name}"
+        assert top != "invio", f"retry.py imports {name}"
+        assert top in sys.stdlib_module_names, f"retry.py imports third-party {name}"
 
 
 def test_source_root_is_the_parent_of_the_package() -> None:

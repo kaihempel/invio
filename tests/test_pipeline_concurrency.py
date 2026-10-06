@@ -17,7 +17,7 @@ from invio.db.repositories import RunRepository
 from invio.db.session import session_factory, session_scope
 from invio.domain import Candidate, ItemStatus, RunStatus
 from invio.graph import stages
-from invio.graph.build import build_graph
+from invio.graph.build import build_graph, new_scope
 from invio.graph.ports import RunDeps
 from invio.pipeline.run import JobBusyError, RunResult, run_job
 from tests.conftest import FakeClock
@@ -323,14 +323,11 @@ async def test_the_semaphore_bounds_items_without_langgraphs_max_concurrency(
         run = RunRepository(session).start(env.job_id)
         run_id, token = run.id, fake_clock() + env.deps.lock_ttl
         job.locked_until = token
-    graph, scope = build_graph(
-        env.deps, job_id=env.job_id, run_id=run_id, token=token, dry_run=False
-    )
+    scope = new_scope(env.deps, job_id=env.job_id, run_id=run_id, token=token, dry_run=False)
+    graph = build_graph(env.deps, scope)
     scope.job_name = "research"
 
-    await graph.ainvoke(
-        {"job_id": env.job_id, "run_id": run_id, "dry_run": False, "items": [], "errors": []}
-    )
+    await graph.ainvoke({"items": [], "errors": []})
 
     assert ports.max_in_flight == 2
     assert _summarized(db_engine) == 10

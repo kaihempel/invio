@@ -4,7 +4,7 @@ import asyncio
 import dataclasses
 import logging
 from collections.abc import Callable
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 import pytest
@@ -171,7 +171,6 @@ async def test_a_failing_graph_build_fails_the_run_and_releases_the_lock(
 
     monkeypatch.setattr(run_module, "build_graph", boom)
     env = build_env(db_engine, fake_clock, recording_next_run)
-    original = _job(db_engine, env.job_id).next_run_at
 
     with pytest.raises(RuntimeError, match="cannot build"):
         await run_job(env.job_id, deps=env.deps)
@@ -180,7 +179,8 @@ async def test_a_failing_graph_build_fails_the_run_and_releases_the_lock(
     assert (run.status, run.error) == (RunStatus.FAILED, "RuntimeError: run failed")
     job = _job(db_engine, env.job_id)
     assert job.locked_until is None
-    assert job.next_run_at == original
+    # Like every other failure, the safety net schedules the next run from the stored config.
+    assert job.next_run_at == fake_clock() + timedelta(hours=1)
 
 
 async def test_a_failing_next_run_computation_keeps_the_run_succeeded(

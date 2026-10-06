@@ -54,13 +54,20 @@ from invio.llm.base import LLMAuthError, LLMConfigError, LLMError
 from invio.sources.errors import FetchError
 from invio.sources.extract import ExtractionError
 
-__all__ = ["build_graph", "build_item_graph", "item_failure_message"]
+__all__ = ["build_graph", "build_item_graph", "item_failure_message", "new_scope"]
 
 logger = logging.getLogger("invio.graph")
 
 # Errors that no item can recover from: the run fails instead of failing every item. A database
-# error leaves the shared work session unusable, so it is run-fatal too.
-RUN_FATAL_ITEM_ERRORS = (LLMAuthError, LLMConfigError, MissingSettingError, SQLAlchemyError)
+# error leaves the shared work session unusable, and an expired lock means another run may own
+# the job, so both are run-fatal too.
+RUN_FATAL_ITEM_ERRORS = (
+    LLMAuthError,
+    LLMConfigError,
+    MissingSettingError,
+    SQLAlchemyError,
+    stages.LockExpiredError,
+)
 
 
 class _RunAborted(Exception):
@@ -84,18 +91,20 @@ class _ItemNode(Protocol):
     async def __call__(self, state: ItemState) -> ItemUpdate: ...
 
 
-def _recording(stage: RunStage, scope: RunScope, node: _ItemNode) -> _ItemNode:
+def _recording(stage: RunStage, deps: RunDeps, scope: RunScope, node: _ItemNode) -> _ItemNode:
     """Wrap an item node so it records its stage on the scope before it runs.
 
     The error boundary reads it: the subgraph's state is discarded when a node raises, so the
     scope is the only place that still knows which node an item was in. Once the run is failing
-    the wrapper stops the item instead of starting the node.
+    the wrapper stops the item instead of starting the node; once the run's lock has expired it
+    raises :class:`~invio.graph.stages.LockExpiredError`, which fails the run.
     """
 
     async def entered(state: ItemState) -> ItemUpdate:
         if scope.failure is not None:
             raise _RunAborted  # do not keep spending LLM budget on a run that is failing
         scope.item_stage[state["item_id"]] = stage
+        stages.ensure_lock_held(deps, scope)
         return await node(state)
 
     return entered
@@ -107,10 +116,6 @@ def build_item_graph(deps: RunDeps, scope: RunScope) -> ItemGraph:
     async def route_kind(state: ItemState) -> ItemUpdate:
         scope.item_stage[state["item_id"]] = "extract_text"
         return {"stage": "extract_text"}
-
-    async def video(state: ItemState) -> ItemUpdate:
-        scope.item_stage[state["item_id"]] = "extract_text"
-        return await video_path(state)
 
     async def extract(state: ItemState) -> ItemUpdate:
         return await stages.extract_text(state, deps, scope)
@@ -130,10 +135,10 @@ def build_item_graph(deps: RunDeps, scope: RunScope) -> ItemGraph:
 
     graph = StateGraph(ItemState)
     graph.add_node("route_kind", route_kind)
-    graph.add_node("extract_text", _recording("extract_text", scope, extract))
-    graph.add_node("video_path", video)
-    graph.add_node("score_relevance", _recording("score_relevance", scope, score))
-    graph.add_node("summarize_item", _recording("summarize_item", scope, summarize))
+    graph.add_node("extract_text", _recording("extract_text", deps, scope, extract))
+    graph.add_node("video_path", video_path)
+    graph.add_node("score_relevance", _recording("score_relevance", deps, scope, score))
+    graph.add_node("summarize_item", _recording("summarize_item", deps, scope, summarize))
     graph.add_edge(START, "route_kind")
     graph.add_conditional_edges("route_kind", by_kind, ["extract_text", "video_path"])
     graph.add_edge("video_path", "extract_text")
@@ -201,16 +206,21 @@ def _node_failures(result: ItemResult) -> list[RunError]:
     return errors
 
 
-def guarded(stage: RunStage, node: _RunNode, scope: RunScope) -> _RunNode:
+def guarded(
+    stage: RunStage, node: _RunNode, scope: RunScope, *, before: Callable[[], None] | None = None
+) -> _RunNode:
     """Wrap a stage so an exception becomes a ``fatal`` state update instead of aborting the run.
 
-    The original exception is kept on the scope (``RunError`` holds only its class) for
-    ``record_failed_run``; the first one wins. ``BaseException`` (cancellation, interrupts) is
-    not caught: the safety net of ``run_job`` handles it (research R8).
+    ``before`` runs first, inside the same guard (the lock check). The original exception is
+    kept on the scope (``RunError`` holds only its class) for ``record_failed_run``; the first
+    one wins. ``BaseException`` (cancellation, interrupts) is not caught: the safety net of
+    ``run_job`` handles it (research R8).
     """
 
     async def run(state: RunState) -> RunState:
         try:
+            if before is not None:
+                before()
             return await node(state)
         except Exception as err:
             return _fatal(stage, err, scope)
@@ -244,17 +254,21 @@ def _bind(fn: StageFn, deps: RunDeps, scope: RunScope) -> _RunNode:
     return node
 
 
-def build_graph(
+def new_scope(
     deps: RunDeps, *, job_id: int, run_id: int, token: datetime, dry_run: bool
-) -> tuple[RunGraph, RunScope]:
-    """Compile the research graph of one run and return it with its :class:`RunScope`."""
-    scope = RunScope(
+) -> RunScope:
+    """The :class:`RunScope` of a run that ``run_job`` has claimed and started."""
+    return RunScope(
         job_id=job_id,
         run_id=run_id,
         token=token,
         dry_run=dry_run,
         semaphore=asyncio.Semaphore(deps.concurrency),
     )
+
+
+def build_graph(deps: RunDeps, scope: RunScope) -> RunGraph:
+    """Compile the research graph of the run that ``scope`` belongs to."""
     item_graph = build_item_graph(deps, scope)
 
     async def process_item(state: ItemTask) -> RunState:
@@ -324,8 +338,12 @@ def build_graph(
 
     graph = StateGraph(RunState)
 
-    def stage(name: RunStage, fn: StageFn) -> None:
-        graph.add_node(name, guarded(name, _bind(fn, deps, scope), scope))
+    def lock_held() -> None:
+        stages.ensure_lock_held(deps, scope)
+
+    def stage(name: RunStage, fn: StageFn, *, fenced: bool = True) -> None:
+        check = lock_held if fenced else None
+        graph.add_node(name, guarded(name, _bind(fn, deps, scope), scope, before=check))
 
     def continue_to(current: str, following: str) -> None:
         graph.add_conditional_edges(current, route_after(following), [following, "finalize"])
@@ -338,7 +356,7 @@ def build_graph(
     graph.add_node("join", _bind(stages.join, deps, scope))
     stage("synthesize_digest", stages.synthesize_digest)
     stage("persist", stages.persist)
-    stage("notify", stages.notify)
+    stage("notify", stages.notify, fenced=False)  # the run is saved: delivery is not racing
     graph.add_node("finalize", _bind(stages.finalize, deps, scope))
 
     graph.add_edge(START, "load_job")
@@ -352,4 +370,4 @@ def build_graph(
     continue_to("persist", "notify")
     graph.add_edge("notify", "finalize")
     graph.add_edge("finalize", END)
-    return graph.compile(), scope
+    return graph.compile()

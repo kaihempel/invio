@@ -34,6 +34,7 @@ from invio.llm.base import LLMError, LLMProvider, Usage, structured_with_repair
 from invio.llm.fake import FakeReply, FakeScriptExhaustedError, FakeStep
 from invio.llm.registry import ModelRegistry, load_registry
 from invio.retry import RetrySettings, Sleep
+from tests.async_helpers import RecordingSleep
 from tests.db_helpers import make_candidate
 from tests.llm_helpers import FIXTURE_REGISTRY_DIR
 
@@ -252,16 +253,6 @@ class RecordingNotifier:
         self.calls.append(digest_id)
         self.trace.append("notify")
         return self.report
-
-
-class RecordingSleep:
-    """Async ``sleep`` stand-in that records the requested waits."""
-
-    def __init__(self) -> None:
-        self.calls: list[float] = []
-
-    async def __call__(self, seconds: float) -> None:
-        self.calls.append(seconds)
 
 
 async def settle(turns: int = 100) -> None:

@@ -59,7 +59,7 @@ class JobRepository:
         return self._session.get(Job, job_id)
 
     def claim(self, job_id: int, *, now: datetime, until: datetime) -> bool:
-        """Take the run lock: set ``locked_until = until`` if it is free or expired.
+        """Take the run lock: set ``locked_until = until`` if it is free or expired (``<= now``).
 
         One conditional UPDATE (the SQL of #23 step 2), so of several concurrent callers exactly
         one gets ``True``. Does not commit; the caller owns the transaction. The
@@ -67,7 +67,7 @@ class JobRepository:
         """
         result = self._session.execute(
             update(Job)
-            .where(Job.id == job_id, or_(Job.locked_until.is_(None), Job.locked_until < now))
+            .where(Job.id == job_id, or_(Job.locked_until.is_(None), Job.locked_until <= now))
             .values(locked_until=until)
             .execution_options(synchronize_session=False)
         )

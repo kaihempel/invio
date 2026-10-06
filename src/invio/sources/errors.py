@@ -8,7 +8,14 @@ from enum import StrEnum
 
 from invio.sources.urls import redact_url, without_query
 
-__all__ = ["BlockReason", "BlockedError", "FetchError", "RenderUnavailableError", "TooLargeError"]
+__all__ = [
+    "BlockReason",
+    "BlockedError",
+    "FetchError",
+    "RenderUnavailableError",
+    "TooLargeError",
+    "is_transient_fetch",
+]
 
 
 class BlockReason(StrEnum):
@@ -65,3 +72,25 @@ class RenderUnavailableError(FetchError):
     def __init__(self, *, url: str = "") -> None:
         super().__init__("render_unavailable", url=url)
         self.args = (f"{self.args[0].rstrip(': ')} ({self.INSTALL_HINT})",)
+
+
+_TRANSIENT_FETCH_REASONS = frozenset(
+    {"timeout", "connection_failed", "dns_failed", "invalid_response", "render_failed"}
+)
+_TRANSIENT_HTTP_STATUSES = frozenset({408, 425, 429})
+
+
+def is_transient_fetch(err: BaseException) -> bool:
+    """Allow-list: only network trouble and retryable HTTP statuses are worth another try.
+
+    Everything else (4xx other than 408/425/429, invalid URL, not HTML, malformed feed, missing
+    selector, too many redirects, policy refusals, size limits, an unknown reason) is permanent.
+    """
+    if not isinstance(err, FetchError) or isinstance(
+        err, BlockedError | TooLargeError | RenderUnavailableError
+    ):
+        return False
+    if err.reason == "http_status":
+        status = err.status
+        return status is not None and (status in _TRANSIENT_HTTP_STATUSES or 500 <= status <= 599)
+    return err.reason in _TRANSIENT_FETCH_REASONS

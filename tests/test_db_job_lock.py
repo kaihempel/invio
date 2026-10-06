@@ -6,10 +6,9 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy import Engine
 
-from invio.db.models import Job
 from invio.db.repositories import KEEP, JobRepository
 from invio.db.session import session_factory, session_scope
-from tests.db_helpers import uses_sqlite
+from tests.db_helpers import make_job, uses_sqlite
 
 pytestmark = [pytest.mark.db, pytest.mark.usefixtures("clean_jobs")]
 
@@ -20,7 +19,7 @@ NEXT = datetime(2026, 10, 5, 8, 0, tzinfo=UTC)
 
 def _make_job(engine: Engine, **fields: object) -> int:
     with session_scope(session_factory(engine)) as session:
-        return JobRepository(session).add(Job(name="locky", config={}, **fields)).id
+        return make_job(session, "locky", config={}, **fields).id
 
 
 def _claim(engine: Engine, job_id: int, *, now: datetime = NOW, until: datetime = UNTIL) -> bool:
@@ -69,6 +68,13 @@ def test_second_claim_before_expiry_fails_and_keeps_the_lock(db_engine: Engine) 
 
 def test_claim_on_expired_lock_succeeds(db_engine: Engine) -> None:
     job_id = _make_job(db_engine, locked_until=NOW - timedelta(seconds=1))
+
+    assert _claim(db_engine, job_id) is True
+    assert _state(db_engine, job_id)[0] == UNTIL
+
+
+def test_claim_exactly_at_expiry_succeeds(db_engine: Engine) -> None:
+    job_id = _make_job(db_engine, locked_until=NOW)
 
     assert _claim(db_engine, job_id) is True
     assert _state(db_engine, job_id)[0] == UNTIL

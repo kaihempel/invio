@@ -1,7 +1,6 @@
 """``RetryingProvider``: transient provider errors are retried at the request boundary."""
 
 import pytest
-from invio.llm.retry import RetryingProvider
 
 from invio.llm.base import (
     LLMAuthError,
@@ -13,9 +12,10 @@ from invio.llm.base import (
     Usage,
 )
 from invio.llm.fake import FakeProvider, FakeReply, FakeStep
+from invio.llm.retry import RetryingProvider
 from invio.retry import RetrySettings
+from tests.async_helpers import RecordingSleep
 from tests.llm_helpers import VALID_SCORE_JSON, Score
-from tests.pipeline_helpers import RecordingSleep
 
 POLICY = RetrySettings(jitter=False)
 
@@ -76,6 +76,18 @@ async def test_retry_after_of_a_rate_limit_sets_the_wait() -> None:
     await _complete(provider)
 
     assert sleep.calls == [4.0]
+
+
+async def test_retry_after_beyond_max_interval_is_raised_after_one_attempt() -> None:
+    sleep = RecordingSleep()
+    error = LLMRateLimitError("slow", retry_after=120)
+    provider, inner = _provider([error, FakeReply("ok")], sleep)
+
+    with pytest.raises(LLMRateLimitError):
+        await _complete(provider)
+
+    assert len(inner.requests) == 1
+    assert sleep.calls == []
 
 
 async def test_attempts_are_bounded_and_the_last_error_is_raised() -> None:

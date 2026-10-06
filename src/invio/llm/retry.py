@@ -7,16 +7,27 @@ a node counts a request once it succeeded, writes its usage row once and never r
 chunk calls of a summary (spec 014, research R4).
 
 Permanent errors (credentials, a rejected request, an invalid structured answer, which the
-inner provider already repaired once) are raised after one attempt. The module only depends on
+inner provider already repaired once) are raised after one attempt, and so is a rate limit
+whose ``retry_after`` is longer than the policy's ``max_interval``. The module only depends on
 ``invio.retry`` and ``invio.llm.base``; it knows nothing of the graph.
 """
 
 from pydantic import BaseModel
 
-from invio.llm.base import LLMProvider, Usage
-from invio.retry import RetrySettings, Sleep, is_transient_llm, retrying
+from invio.llm.base import LLMProvider, LLMRateLimitError, LLMUnavailableError, Usage
+from invio.retry import RetrySettings, Sleep, retrying
 
-__all__ = ["RetryingProvider"]
+__all__ = ["RetryingProvider", "is_transient_llm", "llm_retry_after"]
+
+
+def is_transient_llm(err: BaseException) -> bool:
+    """Rate limits and provider outages are worth another try; everything else is not."""
+    return isinstance(err, LLMRateLimitError | LLMUnavailableError)
+
+
+def llm_retry_after(err: BaseException) -> float | None:
+    """The wait a rate-limited provider asked for, if it named one."""
+    return err.retry_after if isinstance(err, LLMRateLimitError) else None
 
 
 class RetryingProvider:
@@ -38,6 +49,7 @@ class RetryingProvider:
             policy=self._policy,
             retry_on=is_transient_llm,
             what="llm",
+            retry_after=llm_retry_after,
             sleep=self._sleep,
         )
 
@@ -52,6 +64,7 @@ class RetryingProvider:
             policy=self._policy,
             retry_on=is_transient_llm,
             what="llm",
+            retry_after=llm_retry_after,
             sleep=self._sleep,
         )
 

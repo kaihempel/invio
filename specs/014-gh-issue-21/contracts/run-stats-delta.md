@@ -21,9 +21,9 @@ Tests check `dry_run` runs against the ledger instead.
 
 ## Integration fix
 
-`invio.notify.email._items_found` reads `stats["items_found"]`, but the #19 layout writes
-`found`. This issue makes notify read `found`, and still accepts `items_found`, so the
-"items found" line of the mail is filled for pipeline runs.
+`invio.notify.email._items_found` read `stats["items_found"]`, but the #19 layout writes
+`found` and nothing ever wrote `items_found` to `runs.stats`. This issue makes notify read
+`found`, so the "items found" line of the mail is filled for pipeline runs.
 
 ## Repository additions (`invio.db.repositories`)
 
@@ -31,7 +31,7 @@ Tests check `dry_run` runs against the ledger instead.
 class JobRepository:
     def get(self, job_id: int) -> Job | None: ...
     def claim(self, job_id: int, *, now: datetime, until: datetime) -> bool:
-        """One UPDATE … WHERE id AND (locked_until IS NULL OR locked_until < now); rowcount == 1."""
+        """One UPDATE … WHERE id AND (locked_until IS NULL OR locked_until <= now); rowcount == 1."""
 
     def release(
         self, job_id: int, *, until: datetime, next_run_at: datetime | None | _Keep = KEEP

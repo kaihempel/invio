@@ -1,5 +1,7 @@
 """``run_job`` failure paths: bad items, bad sources, error hygiene, budget stops, finalization."""
 
+import asyncio
+import dataclasses
 import logging
 from collections.abc import Callable
 from datetime import datetime
@@ -376,6 +378,7 @@ async def test_s14_a_failed_save_is_recovered_with_the_usage_replayed(
         result = await run_job(env.job_id, deps=env.deps)
 
     assert result.status == RunStatus.FAILED
+    assert result.errors == (RunError(stage="persist", error_class="IntegrityError"),)
     run = _run_row(db_engine)
     assert (run.status, run.error) == (RunStatus.FAILED, "IntegrityError: run failed")
     assert len(_rows(db_engine, LlmUsage)) == len(env.provider.calls) == 7
@@ -429,6 +432,80 @@ async def test_a_notifier_that_raises_is_a_partial_run_not_a_lost_one(
     assert _run_row(db_engine).status == RunStatus.PARTIAL
     assert result.errors == (RunError(stage="notify", error_class="RuntimeError"),)
     assert len(_rows(db_engine, Digest)) == 1
+    assert _job(db_engine, env.job_id).locked_until is None
+
+
+async def test_a_notifier_that_raises_midway_reports_the_mails_already_sent(
+    db_engine: Engine, fake_clock: FakeClock, recording_next_run: NextRun
+) -> None:
+    from invio.domain import NotificationStatus
+    from tests.db_helpers import make_notification
+    from tests.pipeline_helpers import FakePorts, RecordingNotifier
+
+    class HalfWay(RecordingNotifier):
+        async def __call__(self, digest_id: int) -> Any:
+            with session_scope(session_factory(db_engine)) as session:
+                digest = session.get(Digest, digest_id)
+                assert digest is not None
+                job = session.get(Job, digest.job_id)
+                assert job is not None
+                for status in (NotificationStatus.SENT, NotificationStatus.PENDING):
+                    make_notification(
+                        session, job, run_id=digest.run_id, digest_id=digest_id, status=status
+                    )
+            raise RuntimeError("smtp died after the first recipient")
+
+    ports = FakePorts({FEED_1: make_candidates(3)}, notifier=HalfWay())
+    env = build_env(db_engine, fake_clock, recording_next_run, ports=ports)
+
+    result = await run_job(env.job_id, deps=env.deps)
+
+    assert result.status == RunStatus.PARTIAL
+    assert (result.notifications_sent, result.notifications_failed) == (1, 1)
+
+
+async def test_a_run_that_outlives_its_lock_stops_before_the_next_stage(
+    db_engine: Engine, fake_clock: FakeClock, recording_next_run: NextRun
+) -> None:
+    env = build_env(db_engine, fake_clock, recording_next_run)
+    fetch_source = env.deps.fetch_source
+
+    async def slow_fetch(config: Any) -> Any:
+        fake_clock.advance(env.deps.lock_ttl)  # the lock expires while the source loads
+        return await fetch_source(config)
+
+    deps = dataclasses.replace(env.deps, fetch_source=slow_fetch)
+
+    result = await run_job(env.job_id, deps=deps)
+
+    assert result.status == RunStatus.FAILED
+    assert result.errors == (RunError(stage="deduplicate", error_class="LockExpiredError"),)
+    assert (_run_row(db_engine).error or "").startswith("LockExpiredError:")
+    assert _rows(db_engine, Item) == []  # deduplicate never ran
+    assert env.provider.calls == []
+    assert env.ports.notifier.calls == []
+    assert _job(db_engine, env.job_id).locked_until is None  # nobody took it: still ours
+
+
+async def test_a_lock_that_expires_during_the_items_fails_the_run(
+    db_engine: Engine, fake_clock: FakeClock, recording_next_run: NextRun
+) -> None:
+    env = build_env(db_engine, fake_clock, recording_next_run)
+    fetch_page = env.deps.fetch_page
+
+    async def slow_page(url: str) -> str:
+        fake_clock.advance(env.deps.lock_ttl)
+        return await fetch_page(url)
+
+    deps = dataclasses.replace(env.deps, fetch_page=slow_page)
+
+    result = await run_job(env.job_id, deps=deps)
+
+    assert result.status == RunStatus.FAILED
+    assert {e.error_class for e in result.errors} == {"LockExpiredError"}
+    assert env.provider.calls == []  # no item reached score_relevance
+    assert _rows(db_engine, Digest) == []
+    assert env.ports.notifier.calls == []
     assert _job(db_engine, env.job_id).locked_until is None
 
 
@@ -742,7 +819,13 @@ def test_a_failing_rollback_of_the_work_session_is_logged_not_raised(
             self.closed = True
 
     session = Broken()
-    scope = RunScope(job_id=1, run_id=2, token=datetime(2026, 1, 1, tzinfo=UTC), dry_run=False)
+    scope = RunScope(
+        job_id=1,
+        run_id=2,
+        token=datetime(2026, 1, 1, tzinfo=UTC),
+        dry_run=False,
+        semaphore=asyncio.Semaphore(1),
+    )
     scope.session = session  # type: ignore[assignment]
 
     with caplog.at_level(logging.ERROR, logger="invio.graph"):

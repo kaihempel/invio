@@ -34,8 +34,9 @@ An expired lock (`locked_until <= now`) is taken over (FR-016).
 4. In a dry run, no `digests`, `llm_usage` or `notifications` rows are added, and every `items`
    row is unchanged (status, attempts, run_id, raw_content, summary, relevance), including items
    that did not exist before. `runs.stats["dry_run"] is True`.
-5. `RunResult.errors` lists every recorded `RunError`. None of them contains secrets, URLs with
-   a query string, or provider, database or document text.
+5. `RunResult.errors` lists every recorded `RunError`, including a `persist` error when the
+   save failed. None of them contains secrets, URLs with a query string, or provider,
+   database or document text.
 
 The function **returns** a `RunResult` for `succeeded`, `partial` and `failed` runs. It
 **raises** in only three cases:
@@ -71,7 +72,8 @@ The function **returns** a `RunResult` for `succeeded`, `partial` and `failed` r
 | `ExtractionError("too_short")` | none: the item continues with title and teaser |
 | `BudgetExceeded` | item left unchanged and released at save |
 | `FetchError` of a source after retries | source failed (status rules 2 and 4) |
-| `LLMAuthError`, `LLMConfigError`, `MissingSettingError`, `JobConfigError` | run `failed` |
+| `LLMAuthError`, `LLMConfigError`, `MissingSettingError` | run `failed` |
+| `LockExpiredError` (the run outlived `run_lock_seconds`; checked before every stage up to `persist` and every item node) | run `failed` |
 | `pydantic.ValidationError` of the stored job config (in `load_job`) | run `failed`, `runs.error = "ValidationError: invalid fields <path>[, <path>…]"` (paths only, at most 5) |
 | `FetchError` per source | that source failed. Any other exception in `fetch_sources` fails the run (guarded stage) |
 | any exception outside item processing | run `failed` (guarded stage) |
@@ -80,10 +82,12 @@ The function **returns** a `RunResult` for `succeeded`, `partial` and `failed` r
 
 `max_attempts=3`, `initial_interval=1.0 s`, `backoff_factor=2.0`, `max_interval=30 s`,
 `jitter=True` (+0–10 %). `LLMRateLimitError.retry_after` is used when it is larger than the
-computed wait, still capped at `max_interval`. Retried: `LLMRateLimitError`,
-`LLMUnavailableError`, and `FetchError` except `BlockedError`, `TooLargeError` and
-`RenderUnavailableError`. Applied per external call: source fetch, item page fetch and
-provider request.
+computed wait; when it is larger than `max_interval` the error is raised at once (an earlier
+retry would only be rate-limited again). Retried: `LLMRateLimitError`, `LLMUnavailableError`
+(`invio.llm.retry.is_transient_llm`), and the transient `FetchError`s of the allow-list in
+`invio.sources.errors.is_transient_fetch` (timeouts, connection and DNS errors, invalid
+responses, render failures, HTTP 408/425/429/5xx). Applied per external call: source fetch,
+item page fetch and provider request.
 
 ## Settings (new, `INVIO_` prefix)
 
@@ -96,7 +100,7 @@ provider request.
 
 `run.started`, `run.stage_failed` (stage, error class), `source.failed` (source key, error
 class), `source.unsupported` (source key, type), `retry.attempt` (what, attempt, wait_s, error
-class), `item.failed` (item_id, stage, error class), `run.finalized` (status, dry_run,
+class), `retry.gave_up` (what, attempt, error class; `retry_after` beyond `max_interval`), `item.failed` (item_id, stage, error class), `run.finalized` (status, dry_run,
 next_run_at), and `run.lock_lost` (when release finds a different lock). Events that already
 exist (`deduplicated`, `relevance.*`, `summarize.*`, `synthesize.*`, `run.persisted`,
 `budget.exceeded`) are unchanged.

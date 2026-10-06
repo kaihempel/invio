@@ -25,11 +25,12 @@ from invio.db.repositories import (
     DigestRepository,
     ItemRepository,
     JobRepository,
+    NotificationRepository,
     RunRepository,
     UsageRepository,
 )
 from invio.db.session import session_scope
-from invio.domain import Candidate, ItemStatus, RunStatus
+from invio.domain import Candidate, ItemStatus, NotificationStatus, RunStatus
 from invio.graph.budget import BudgetTracker
 from invio.graph.nodes.deduplicate import deduplicate as run_deduplicate
 from invio.graph.nodes.extract import extract_item
@@ -50,16 +51,18 @@ from invio.graph.nodes.synthesize import (
     entries_from_items,
 )
 from invio.graph.nodes.synthesize import synthesize_digest as run_synthesis
-from invio.graph.ports import ProviderBinding, RunDeps
+from invio.graph.ports import DeliveryReport, RunDeps
 from invio.graph.scope import RunScope
 from invio.graph.state import ItemResult, ItemState, ItemUpdate, RunError, RunState, error_of
 from invio.llm.retry import RetryingProvider
-from invio.retry import is_transient_fetch, retrying
-from invio.sources.errors import FetchError
+from invio.retry import retrying
+from invio.sources.errors import FetchError, is_transient_fetch
 
 __all__ = [
+    "LockExpiredError",
     "close_work_session",
     "deduplicate",
+    "ensure_lock_held",
     "extract_text",
     "fetch_sources",
     "finalize",
@@ -99,26 +102,31 @@ def close_work_session(scope: RunScope) -> None:
         session.close()
 
 
-def _config(state: RunState) -> JobConfig:
-    config = state.get("config")
-    assert config is not None, "load_job has not run"
-    return config
+def _required[T](value: T | None, what: str) -> T:
+    """``value``, which ``load_job`` (or an earlier stage) must have set; a bug otherwise."""
+    if value is None:
+        raise RuntimeError(f"{what} is not set: the stage ran out of order")
+    return value
 
 
-def _binding(scope: RunScope) -> ProviderBinding:
-    assert scope.binding is not None, "load_job has not run"
-    return scope.binding
+def _load_item(items: ItemRepository, item_id: int) -> Item:
+    return _required(items.get(item_id), f"item {item_id}")
 
 
-def _budget(scope: RunScope) -> BudgetTracker:
-    assert scope.budget is not None, "load_job has not run"
-    return scope.budget
+class LockExpiredError(RuntimeError):
+    """The run outlived its job lock: another run may own the job now, so this one stops."""
 
 
-def _load_item(session: Session, item_id: int) -> Item:
-    item = ItemRepository(session).get(item_id)
-    assert item is not None, f"item {item_id} vanished"
-    return item
+def ensure_lock_held(deps: RunDeps, scope: RunScope) -> None:
+    """Raise :class:`LockExpiredError` once the run's lock (its token) has expired.
+
+    Checked before every stage that writes run data and before every item node, so a run that
+    takes longer than ``lock_ttl`` stops at the next boundary instead of racing a run that
+    claimed the expired lock (research R8). ``claim`` takes a lock over at ``locked_until <=
+    now``, hence ``>=`` here.
+    """
+    if deps.clock() >= scope.token:
+        raise LockExpiredError(f"the lock of job {scope.job_id} expired at {scope.token}")
 
 
 def source_key(index: int, source: SourceConfig) -> str:
@@ -139,9 +147,7 @@ async def load_job(state: RunState, deps: RunDeps, scope: RunScope) -> RunState:
     LLM call.
     """
     with session_scope(deps.session_factory) as session:
-        job = JobRepository(session).get(scope.job_id)
-        assert job is not None, f"job {scope.job_id} vanished"
-        raw = job.config
+        raw = _required(JobRepository(session).get(scope.job_id), f"job {scope.job_id}").config
     config = JobConfig.model_validate(raw)
     scope.config = config
     binding = deps.provider_for(config.llm)
@@ -149,7 +155,7 @@ async def load_job(state: RunState, deps: RunDeps, scope: RunScope) -> RunState:
     retrying_provider = RetryingProvider(binding.provider, policy=deps.retry, sleep=deps.sleep)
     scope.binding = dataclasses.replace(binding, provider=retrying_provider)
     scope.budget = BudgetTracker(config.limits.max_llm_tokens_per_run)
-    return {"config": config}
+    return {}
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -187,7 +193,7 @@ async def fetch_sources(state: RunState, deps: RunDeps, scope: RunScope) -> RunS
     retries is a source failure; any other exception is a bug or a credential problem and
     reaches the stage guard (research R9), after the other fetches have finished.
     """
-    config = _config(state)
+    config = _required(scope.config, "config")
     wanted: list[tuple[str, SourceConfig]] = []
     for index, source in enumerate(config.sources):
         if not source.enabled:
@@ -232,7 +238,7 @@ async def fetch_sources(state: RunState, deps: RunDeps, scope: RunScope) -> RunS
 
 async def deduplicate(state: RunState, deps: RunDeps, scope: RunScope) -> RunState:
     """Select this run's items. A normal run commits the take before the LLM stages begin."""
-    config = _config(state)
+    config = _required(scope.config, "config")
     session = work_session(deps, scope)
     result = run_deduplicate(
         session,
@@ -250,12 +256,11 @@ async def deduplicate(state: RunState, deps: RunDeps, scope: RunScope) -> RunSta
 
 async def keyword_prefilter(state: RunState, deps: RunDeps, scope: RunScope) -> RunState:
     """Apply the keyword rules to the taken items; a rejected item becomes ``skipped_keyword``."""
-    config = _config(state)
+    config = _required(scope.config, "config")
     items = ItemRepository(work_session(deps, scope))
     selected: list[int] = []
     for item_id in state.get("taken", []):
-        item = items.get(item_id)
-        assert item is not None
+        item = _load_item(items, item_id)
         if keyword_filter(item, config.search.keywords, items).matched:
             selected.append(item_id)
     counts = state.get("counts") or StageCounts(found=0, new=0, after_keyword_filter=0)
@@ -271,23 +276,24 @@ async def join(state: RunState, deps: RunDeps, scope: RunScope) -> RunState:
 
 
 def _scoring_context(deps: RunDeps, scope: RunScope) -> ScoringContext:
-    binding, session = _binding(scope), work_session(deps, scope)
+    binding, session = _required(scope.binding, "binding"), work_session(deps, scope)
     return ScoringContext(
         job_id=scope.job_id,
         run_id=scope.run_id,
-        search=_scope_config(scope).search,
+        search=_required(scope.config, "config").search,
         provider=binding.provider,
         provider_name=binding.provider_name,
         model=binding.fast_model,
         registry=binding.registry,
         items=ItemRepository(session),
         usage=UsageRepository(session),
-        budget=_budget(scope),
+        budget=_required(scope.budget, "budget"),
     )
 
 
 def _summary_context(deps: RunDeps, scope: RunScope) -> SummaryContext:
-    binding, session, config = _binding(scope), work_session(deps, scope), _scope_config(scope)
+    binding, session = _required(scope.binding, "binding"), work_session(deps, scope)
+    config = _required(scope.config, "config")
     return SummaryContext(
         job_id=scope.job_id,
         run_id=scope.run_id,
@@ -300,13 +306,8 @@ def _summary_context(deps: RunDeps, scope: RunScope) -> SummaryContext:
         registry=binding.registry,
         items=ItemRepository(session),
         usage=UsageRepository(session),
-        budget=_budget(scope),
+        budget=_required(scope.budget, "budget"),
     )
-
-
-def _scope_config(scope: RunScope) -> JobConfig:
-    assert scope.config is not None, "load_job has not run"
-    return scope.config
 
 
 # --- Per-item stages (nodes of the process_item subgraph) -------------------------------------
@@ -315,7 +316,7 @@ def _scope_config(scope: RunScope) -> JobConfig:
 async def extract_text(state: ItemState, deps: RunDeps, scope: RunScope) -> ItemUpdate:
     """Fetch the item page and store its text; a too short page keeps title and teaser."""
     session = work_session(deps, scope)
-    item = _load_item(session, state["item_id"])
+    item = _load_item(ItemRepository(session), state["item_id"])
     await extract_item(
         item,
         fetch_page=deps.fetch_page,
@@ -328,14 +329,14 @@ async def extract_text(state: ItemState, deps: RunDeps, scope: RunScope) -> Item
 
 async def score_relevance(state: ItemState, deps: RunDeps, scope: RunScope) -> ItemUpdate:
     """Rate the item with the ``fast`` model."""
-    item = _load_item(work_session(deps, scope), state["item_id"])
+    item = _load_item(ItemRepository(work_session(deps, scope)), state["item_id"])
     outcome = await score_item(item, _scoring_context(deps, scope))
     return {"stage": "score_relevance", "relevance": outcome}
 
 
 async def summarize(state: ItemState, deps: RunDeps, scope: RunScope) -> ItemUpdate:
     """Summarize a relevant item."""
-    item = _load_item(work_session(deps, scope), state["item_id"])
+    item = _load_item(ItemRepository(work_session(deps, scope)), state["item_id"])
     outcome = await summarize_item(item, _summary_context(deps, scope))
     return {"stage": "summarize_item", "summary": outcome}
 
@@ -363,7 +364,7 @@ def _outcomes(
 
 async def synthesize_digest(state: RunState, deps: RunDeps, scope: RunScope) -> RunState:
     """Write the digest of the summarized items with one ``smart`` call (none without items)."""
-    config, binding = _config(state), _binding(scope)
+    config, binding = _required(scope.config, "config"), _required(scope.binding, "binding")
     session = work_session(deps, scope)
     _, summaries = _outcomes(state)
     items = ItemRepository(session)
@@ -383,7 +384,7 @@ async def synthesize_digest(state: RunState, deps: RunDeps, scope: RunScope) -> 
         smart_model=binding.smart_model,
         registry=binding.registry,
         usage=UsageRepository(session),
-        budget=_budget(scope),
+        budget=_required(scope.budget, "budget"),
     )
     result = await run_synthesis(entries, context)
     scope.synthesis = result
@@ -398,8 +399,7 @@ def _update_run_status(deps: RunDeps, scope: RunScope, status: RunStatus) -> Non
     """Store ``status`` on the run in its own committed transaction, keeping stats and error."""
     with session_scope(deps.session_factory) as session:
         runs = RunRepository(session)
-        run = runs.get(scope.run_id)
-        assert run is not None
+        run = _required(runs.get(scope.run_id), f"run {scope.run_id}")
         runs.finish(
             run,
             status,
@@ -417,8 +417,12 @@ def _digest_id(deps: RunDeps, scope: RunScope) -> int | None:
 
 
 async def persist(state: RunState, deps: RunDeps, scope: RunScope) -> RunState:
-    """Save the run all-or-nothing and return its status and the stored digest's id."""
-    config = _config(state)
+    """Save the run all-or-nothing and return its status and the stored digest's id.
+
+    A save that fails is recorded by ``finalize_run``/``finish_dry_run`` without raising; its
+    error class still reaches ``RunResult.errors`` as a ``persist`` error.
+    """
+    config = _required(scope.config, "config")
     session = work_session(deps, scope)
     items = ItemRepository(session)
     taken = [row for item_id in state.get("taken", []) if (row := items.get(item_id)) is not None]
@@ -438,7 +442,7 @@ async def persist(state: RunState, deps: RunDeps, scope: RunScope) -> RunState:
         relevance=relevance,
         summaries=summaries,
         digest=digest or DigestDraft(title=scope.job_name, body="", item_ids=()),
-        budget=_budget(scope),
+        budget=_required(scope.budget, "budget"),
         dry_run=scope.dry_run,
         fallback_digest=scope.synthesis is not None and scope.synthesis.fallback,
     )
@@ -449,9 +453,13 @@ async def persist(state: RunState, deps: RunDeps, scope: RunScope) -> RunState:
             draft, store_empty_digest=decide_status(draft) is not RunStatus.FAILED
         )
     save = finish_dry_run if scope.dry_run else finalize_run
-    status = save(deps.session_factory, session, draft)
+    failures: list[Exception] = []
+    status = save(deps.session_factory, session, draft, on_failure=failures.append)
     close_work_session(scope)  # committed or rolled back: free the connection for what follows
-    return {"status": status, "digest_id": _digest_id(deps, scope)}
+    update: RunState = {"status": status, "digest_id": _digest_id(deps, scope)}
+    if failures:
+        update["errors"] = [error_of("persist", failures[0])]
+    return update
 
 
 async def notify(state: RunState, deps: RunDeps, scope: RunScope) -> RunState:
@@ -460,12 +468,34 @@ async def notify(state: RunState, deps: RunDeps, scope: RunScope) -> RunState:
     status = state.get("status")
     if digest_id is None or status is None or status is RunStatus.FAILED or scope.dry_run:
         return {}  # nothing stored, a failed run, or a dry run: nothing is sent
-    report = await deps.notify(digest_id)
+    try:
+        report = await deps.notify(digest_id)
+    except Exception:
+        # Some recipients may have been mailed before the notifier broke: report what the
+        # notification rows say, so ``RunResult`` does not claim that nothing was sent.
+        scope.delivery = _delivery_from_rows(deps, scope)
+        raise
     scope.delivery = report
     if status is RunStatus.SUCCEEDED and (report.failed > 0 or report.error is not None):
         _update_run_status(deps, scope, RunStatus.PARTIAL)
         return {"status": RunStatus.PARTIAL}
     return {}
+
+
+def _delivery_from_rows(deps: RunDeps, scope: RunScope) -> DeliveryReport | None:
+    """The delivery counts stored for this run; ``None`` when they cannot be read.
+
+    Counts like ``deliver_digest``: every row that is not ``sent`` failed (a ``pending`` row
+    was never delivered).
+    """
+    try:
+        with session_scope(deps.session_factory) as session:
+            rows = NotificationRepository(session).list_for_run(scope.run_id)
+            sent = sum(1 for row in rows if row.status == NotificationStatus.SENT)
+            return DeliveryReport(sent=sent, failed=len(rows) - sent)
+    except Exception as err:  # the notifier's error is the one that matters
+        logger.error("run.delivery_unreadable", extra={"error": type(err).__name__})
+        return None
 
 
 def rollback_work_session(scope: RunScope) -> None:
@@ -501,7 +531,7 @@ def _stored_schedule(deps: RunDeps, scope: RunScope) -> ScheduleConfig | None:
         return None
 
 
-def release_lock(deps: RunDeps, scope: RunScope, config: JobConfig | None) -> datetime | None:
+def release_lock(deps: RunDeps, scope: RunScope) -> datetime | None:
     """Release this run's job lock and, outside a dry run, set the next run time.
 
     One atomic UPDATE that only succeeds while the lock still holds the run's token. A job whose
@@ -510,6 +540,7 @@ def release_lock(deps: RunDeps, scope: RunScope, config: JobConfig | None) -> da
     """
     schedule = None
     if not scope.dry_run:
+        config = scope.config
         schedule = config.schedule if config is not None else _stored_schedule(deps, scope)
     next_run_at = None
     if schedule is not None:
@@ -574,7 +605,7 @@ async def finalize(state: RunState, deps: RunDeps, scope: RunScope) -> RunState:
         status = record_failure(deps, scope, error, lower_succeeded=fatal.stage == "notify")
     if status is None:
         raise RuntimeError("finalize reached before persist set a status")
-    next_run_at = release_lock(deps, scope, state.get("config"))
+    next_run_at = release_lock(deps, scope)
     logger.info(
         "run.finalized",
         extra={

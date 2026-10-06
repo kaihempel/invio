@@ -17,8 +17,9 @@ the job lock, also after a stage exception or a cancellation.
 - Dry run: the work session is rolled back; only the run row remains, with `stats.dry_run = true`.
 - `RunResult` (persist input) is renamed `RunDraft`, so the public `RunResult` is the return value
   of `run_job`.
-- `notify.email._items_found` now reads `stats["found"]` (the #19 layout), keeping `items_found`
-  as a fallback.
+- `notify.email._items_found` now reads `stats["found"]` (the #19 layout).
+- A run that outlives its job lock (`INVIO_RUN_LOCK_SECONDS`) stops at the next stage or item
+  node with `LockExpiredError` and is `failed`, so it cannot race a run that took the lock over.
 
 ## New dependency
 
@@ -34,6 +35,7 @@ override was needed. `uv.lock` is updated and CI still runs `uv sync --locked`.
   would never fire, and re-running a node would repeat side effects. The retried calls are the
   source fetch, the item page fetch and each provider request (`invio.retry`,
   `invio.llm.retry.RetryingProvider`). Policy parameters and retried error kinds are the issue's.
+  A `Retry-After` longer than `max_interval` is not waited for: the call fails at once.
 - New package `invio.pipeline` (composition root): `invio.graph` may not import `notify` or
   `scheduling`, so these are injected through `RunDeps` ports.
 - `RunScope` lives in `invio.graph.scope` to avoid an import cycle between `build.py` and
@@ -50,9 +52,9 @@ override was needed. `uv.lock` is updated and CI still runs `uv sync --locked`.
 
 - #22: `invio job run [--dry-run]` (the library entry point exists; the CLI reachability of
   Constitution II is deferred, see plan.md Complexity Tracking).
-- #23: `invio run-due`, failure back-off for `next_run_at`; no lock heartbeat or run deadline yet.
-- Split the retry predicates out of `invio.retry` into `llm`/`sources`; distinct base classes for
-  `JobBusyError`/`JobNotFoundError`.
+- #23: `invio run-due`, failure back-off for `next_run_at`; a lock heartbeat if runs ever need
+  to outlive `run_lock_seconds` (today they stop at the deadline).
+- Distinct base classes for `JobBusyError`/`JobNotFoundError`.
 - #29: replaces the `video_path` placeholder (it passes the item on to `extract_text` unchanged).
 
 ## Test plan
