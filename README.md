@@ -458,6 +458,19 @@ use `structured_with_repair`), plus one `models.d/<name>.yaml` file. Modules are
 automatically; no shared file changes. A provider beyond the five in the job schema also needs
 the `LLMProvider` enum in `invio.config.job` extended.
 
+### Digest synthesis
+
+`invio.graph.nodes.synthesize.synthesize_digest(entries, ctx)` turns the run's summarized items
+into the Markdown digest with one `smart` call per run (`entries_from_items` builds the entries
+from stored items). The model writes an intro and `##` theme sections in the job's `language`;
+invio appends "More items" for entries the answer did not link, and "Worth a closer look" with
+the top 3 by relevance. Only the input URLs survive: every other URL, image and raw HTML link in
+the answer is removed (an unknown link keeps its text). No items means an empty digest and no
+LLM call; the notifier's `send_if_empty` decides whether anything is sent. If the model request
+fails or its answer is unusable, a plain fallback digest listing all items is built and
+`run_status_after_synthesis` turns a `succeeded` run into `partial`; credential and
+configuration errors propagate. Headings exist in English and German; other languages get
+English headings (the model still writes in the job's language).
 ### Runs, statistics and the token budget
 
 A run is saved all-or-nothing by `invio.graph.nodes.persist.finalize_run`: the item updates of

@@ -27,7 +27,6 @@ from typing import Annotated, Final, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
 
-from invio.config.languages import language_name
 from invio.db.models import Item
 from invio.db.repositories import ItemRepository, UsageRepository
 from invio.domain import ItemStatus
@@ -39,7 +38,12 @@ from invio.graph.nodes.llm_calls import (
     failure_message,
     run_until_exceeded,
 )
-from invio.graph.nodes.prompting import document_message, neutralise
+from invio.graph.nodes.prompting import (
+    document_message,
+    interest_section,
+    language_instruction,
+    neutralise,
+)
 from invio.llm.base import LLMProvider
 from invio.llm.registry import ModelRegistry
 
@@ -306,8 +310,7 @@ def build_messages(
     Raises:
         KeyError: ``language`` is not an ISO 639-1 code (the name comes from the closed table).
     """
-    name = language_name(language)
-    sections = [_TASKS[kind], f"<interest>{interest}</interest>"]
+    sections = [_TASKS[kind], interest_section(interest)]
     if kind == "chunk":
         sections.append(
             f"This is part {part} of {parts} of a longer document; list the key content of this "
@@ -321,7 +324,7 @@ def build_messages(
                 f"of {truncated_from} parts of the document; the rest was cut off."
             )
         sections.append(_SHAPE_RULES)
-    sections.append(f'Write all text in {name} (ISO 639-1 code "{language}").')
+    sections.append(language_instruction(language))
     sections.append(_UNTRUSTED_RULE)
     return "\n\n".join(sections), document_message(title, content)
 

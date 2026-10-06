@@ -46,6 +46,18 @@ def test_graph_package_does_not_import_cli_or_scheduling() -> None:
             assert not _is_within(name, banned), f"{path.relative_to(root)} imports {name}"
 
 
+def test_graph_package_does_not_import_notify() -> None:
+    # The digest node mirrors notify's run-status rule instead of importing it.
+    root = Path(invio.graph.__path__[0])
+    paths = list(root.rglob("*.py"))
+    assert any(path.name == "synthesize.py" for path in paths)
+    for path in paths:
+        for name in _imports_of(path):
+            assert not _is_within(name, ("invio.notify",)), (
+                f"{path.relative_to(root)} imports {name}"
+            )
+
+
 def test_llm_package_does_not_import_graph() -> None:
     for path in Path(invio.llm.__path__[0]).rglob("*.py"):
         for name in _imports_of(path):
