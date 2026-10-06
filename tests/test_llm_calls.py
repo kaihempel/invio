@@ -89,8 +89,9 @@ class _Answer(BaseModel):
 
     value: int
 
+
 # --- call_text -----------------------------------------------------------------------------
-      
+
 _REGISTRY = ModelRegistry(
     {"fast-model": ModelInfo("fast-model", "mistral", Decimal("1"), Decimal("2"), 32000)}
 )
@@ -106,7 +107,7 @@ class _Ctx:
     provider_name: str
     registry: ModelRegistry
     usage: UsageRepository
-    budget: BudgetTracker  
+    budget: BudgetTracker
 
 
 def _ctx(db_session: Session, fake: FakeProvider) -> CallContext:
