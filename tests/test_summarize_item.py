@@ -91,6 +91,11 @@ def _context(
     )
 
 
+def _extra(record: logging.LogRecord, name: str) -> object:
+    """Return the ``extra`` field ``name`` of a log record (typed access)."""
+    return record.__dict__[name]
+
+
 def _usage_rows(db_session: Session) -> list[LlmUsage]:
     return list(db_session.scalars(select(LlmUsage).order_by(LlmUsage.id)))
 
@@ -239,7 +244,11 @@ async def test_invalid_answers_fail_the_item_and_record_summed_usage(db_session:
 @pytest.mark.db
 @pytest.mark.parametrize(
     "error",
-    [LLMUnavailableError("down"), LLMRateLimitError("slow down"), LLMInvalidRequestError("bad")],
+    [
+        LLMUnavailableError("down: <secret request text>", provider="mistral", model="m"),
+        LLMRateLimitError("slow down: <secret request text>", provider="mistral", model="m"),
+        LLMInvalidRequestError("bad: <secret request text>", provider="mistral", model="m"),
+    ],
     ids=["unavailable", "rate-limit", "invalid-request"],
 )
 async def test_per_item_errors_do_not_stop_the_batch(
@@ -258,7 +267,8 @@ async def test_per_item_errors_do_not_stop_the_batch(
         ItemStatus.FAILED,
         ItemStatus.SUMMARIZED,
     ]
-    assert items[1].last_error == f"{type(error).__name__}: {error}"
+    # provider messages can echo the request, so only class, provider and model are kept
+    assert items[1].last_error == f"{type(error).__name__}: call failed (provider mistral, model m)"
     assert outcomes[1].error == items[1].last_error
 
 
@@ -370,9 +380,9 @@ async def test_more_than_max_chunks_are_truncated_and_flagged(
     assert outcome.truncated is True
     assert outcome.chunks == MAX_CHUNKS
     record = next(r for r in caplog.records if r.getMessage() == "summarize.truncated")
-    assert (record.kept, record.dropped) == (20, 5)  # type: ignore[attr-defined]
+    assert (_extra(record, "kept"), _extra(record, "dropped")) == (20, 5)
     done = next(r for r in caplog.records if r.getMessage() == "summarize.done")
-    assert done.truncated is True  # type: ignore[attr-defined]
+    assert _extra(done, "truncated") is True
 
 
 @pytest.mark.db
@@ -776,7 +786,9 @@ async def test_mixed_batch_of_short_long_and_failing_items(db_session: Session) 
         else:
             assert item.summary is not None
             assert ItemSummary.model_validate_json(item.summary) == outcome.summary
-    assert items[3].last_error == "LLMRateLimitError: slow down"
+    assert items[3].last_error == (
+        "LLMRateLimitError: call failed (provider unknown, model unknown)"
+    )
     # one usage row per provider call, also for invalid answers; none for the rate-limited one
     assert len(_usage_rows(db_session)) == sum(o.calls for o in outcomes) - 1
 
@@ -810,12 +822,15 @@ async def test_unpriced_model_records_usage_without_cost(db_session: Session) ->
 async def test_whitespace_padded_long_body_is_still_summarized(db_session: Session) -> None:
     job = make_job(db_session)
     item = make_item(db_session, job, raw_content="start" + " " * 20000 + "end")
-    fake = FakeProvider([FakeReply(_chunk_json()), FakeReply(_summary_json())])
+    fake = FakeProvider([FakeReply(_summary_json())])
     outcome = await summarize_item(item, _context(db_session, job, fake))
-    # above the threshold by estimate, but one chunk once whitespace is normalised
-    assert [r.model for r in fake.requests] == ["fast-model", "smart-model"]
-    assert (outcome.calls, outcome.chunks) == (2, 1)
+    # above the threshold by estimate, but one chunk once whitespace is normalised: one short
+    # call on the normalised text, no pointless combine
+    assert [r.model for r in fake.requests] == ["fast-model"]
+    assert "<content>start end</content>" in fake.requests[0].user
+    assert (outcome.calls, outcome.chunks, outcome.truncated) == (1, 0, False)
     assert outcome.status == ItemStatus.SUMMARIZED
+    assert _usage_rows(db_session)[0].purpose == "summarize"
 
 
 # --- Quickstart walk-through ---------------------------------------------------------------

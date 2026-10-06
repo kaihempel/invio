@@ -11,8 +11,9 @@ backstop: even a successful injection can only yield a valid 0..1 score.
 
 Each call records one ``llm_usage`` row, also when the answer stays invalid. Per-item LLM
 failures mark the item ``failed`` and scoring continues; credential and configuration errors
-stop the step. Persistence is flush-only (the caller commits). Delimiter neutralisation is the
-shared :func:`invio.graph.nodes.prompting.neutralise`.
+stop the step. Persistence is flush-only (the caller commits). The prompt and call helpers are
+shared with the other LLM nodes (:mod:`invio.graph.nodes.prompting`,
+:mod:`invio.graph.nodes.llm_calls`).
 """
 
 import logging
@@ -28,15 +29,9 @@ from invio.db.models import Item
 from invio.db.repositories import ItemRepository, UsageRepository
 from invio.domain import ItemStatus
 from invio.graph.nodes.keyword_filter import item_text
-from invio.graph.nodes.prompting import neutralise
-from invio.llm.base import (
-    LLMInvalidOutputError,
-    LLMInvalidRequestError,
-    LLMProvider,
-    LLMRateLimitError,
-    LLMUnavailableError,
-    Usage,
-)
+from invio.graph.nodes.llm_calls import PER_ITEM_ERRORS, call_structured, failure_message
+from invio.graph.nodes.prompting import document_message, neutralise
+from invio.llm.base import LLMProvider
 from invio.llm.registry import ModelRegistry
 
 __all__ = [
@@ -119,16 +114,15 @@ def build_messages(
 
     The system message holds the task and the job's ``semantic_description``; the document only
     ever appears in the user message. The body (teaser and text) is cut to
-    ``MAX_DOCUMENT_CHARS`` characters plus a ``[truncated]`` marker; the title is sent in full.
-    Delimiter tags in title and body are neutralised (before the cut, so it never lands inside
-    a real tag).
+    ``MAX_DOCUMENT_CHARS`` characters plus a ``[truncated]`` marker; the title to
+    ``MAX_TITLE_CHARS``. Delimiter tags in title and body are neutralised (before the cut, so it
+    never lands inside a real tag).
     """
     body = neutralise(item_text(None, teaser, text))
     if len(body) > MAX_DOCUMENT_CHARS:
         body = f"{body[:MAX_DOCUMENT_CHARS]}\n[truncated]"
     system = _SYSTEM_TEMPLATE.format(interest=semantic_description)
-    user = f"<document>\n<title>{neutralise(title)}</title>\n<content>{body}</content>\n</document>"
-    return system, user
+    return system, document_message(title, body)
 
 
 def _quantize(score: float) -> Decimal:
@@ -136,29 +130,9 @@ def _quantize(score: float) -> Decimal:
     return Decimal(str(score)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
 
-def _record_usage(ctx: ScoringContext, usage: Usage) -> None:
-    """Store one ``llm_usage`` row for a scoring call (repair request already summed in)."""
-    ctx.usage.add(
-        ctx.job_id,
-        ctx.provider_name,
-        ctx.model,
-        usage.input_tokens,
-        usage.output_tokens,
-        run_id=ctx.run_id,
-        purpose=PURPOSE,
-        cost_usd=ctx.registry.cost(ctx.model, usage),
-    )
-
-
-# Fixed text for invalid answers: the validation errors can carry key names chosen by the
-# model (and so steerable by the document), which must not reach ``last_error``.
-_INVALID_OUTPUT_MESSAGE: Final = "invalid structured answer after repair"
-
-
 def _fail(item: Item, ctx: ScoringContext, err: Exception) -> RelevanceOutcome:
     """Mark ``item`` failed with ``"<ErrorClass>: <message>"`` (never document text)."""
-    message = _INVALID_OUTPUT_MESSAGE if isinstance(err, LLMInvalidOutputError) else str(err)
-    error = f"{type(err).__name__}: {message}"
+    error = failure_message(err)
     ctx.items.mark_failed(item, error)
     logger.warning("relevance.failed", extra={"item_id": item.id, "error": type(err).__name__})
     return RelevanceOutcome(
@@ -179,15 +153,11 @@ async def score_item(item: Item, ctx: ScoringContext) -> RelevanceOutcome:
         item.title, item.teaser, item.raw_content, ctx.search.semantic_description
     )
     try:
-        result, usage = await ctx.provider.complete_structured(
-            system, user, RelevanceResult, model=ctx.model, temperature=0.0
+        result = await call_structured(
+            ctx, RelevanceResult, model=ctx.model, purpose=PURPOSE, system=system, user=user
         )
-    except LLMInvalidOutputError as err:
-        _record_usage(ctx, err.usage)  # the model was called (twice), so the tokens were spent
+    except PER_ITEM_ERRORS as err:
         return _fail(item, ctx, err)
-    except (LLMUnavailableError, LLMRateLimitError, LLMInvalidRequestError) as err:
-        return _fail(item, ctx, err)
-    _record_usage(ctx, usage)
     relevance = _quantize(result.score)
     status = (
         ItemStatus.RELEVANT

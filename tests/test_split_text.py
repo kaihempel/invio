@@ -145,7 +145,8 @@ def test_paragraphs_are_not_cut_when_they_fit() -> None:
     assert len(chunks) > 1
     for prev, nxt in pairwise(chunks):
         new_text = nxt[len(_tail(prev, nxt, 10)) :]
-        assert any(new_text.startswith(p) for p in paragraphs)
+        assert new_text.startswith("\n\n")  # the paragraph break before the new text is kept
+        assert any(new_text[2:].startswith(p) for p in paragraphs)
 
 
 def test_sentences_are_not_cut_when_they_fit() -> None:
@@ -257,3 +258,22 @@ def test_overlap_zero_never_repeats_text() -> None:
     chunks = split_text(text, 80, 0)
     sentence_ids = [int(m) for chunk in chunks for m in re.findall(r"Sentence (\d+)", chunk)]
     assert sentence_ids == list(range(200))
+
+
+def test_overlap_keeps_the_separator_so_words_never_run_together() -> None:
+    words = [f"w{n}" for n in range(2000)]
+    chunks = split_text(" ".join(words), 20, 5)
+    assert len(chunks) > 1
+    known = set(words)
+    for chunk in chunks:
+        assert set(chunk.split()) <= known  # a glued "w12w13" would not be a known word
+    for prev, nxt in pairwise(chunks):
+        tail = _tail(prev, nxt, 5)
+        assert nxt[len(tail)] == " "
+
+
+def test_overlap_inside_a_cut_word_adds_no_separator() -> None:
+    word = _huge_word(2000)
+    chunks = split_text(word, 50, 10)
+    assert len(chunks) > 1
+    assert all(chunk in word for chunk in chunks)  # each chunk is one contiguous slice

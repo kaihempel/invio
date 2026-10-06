@@ -12,7 +12,9 @@ them. Every answer is schema-validated.
 
 Each provider call records one ``llm_usage`` row, also when the answer stays invalid. Per-item LLM
 failures mark the item ``failed`` (no partial summary) and summarizing continues; credential and
-configuration errors stop the step. Persistence is flush-only (the caller commits).
+configuration errors stop the step. Persistence is flush-only (the caller commits). The prompt
+and call helpers are shared with the other LLM nodes (:mod:`invio.graph.nodes.prompting`,
+:mod:`invio.graph.nodes.llm_calls`).
 """
 
 import logging
@@ -29,15 +31,9 @@ from invio.db.models import Item
 from invio.db.repositories import ItemRepository, UsageRepository
 from invio.domain import ItemStatus
 from invio.graph.nodes.keyword_filter import item_text
-from invio.graph.nodes.prompting import neutralise
-from invio.llm.base import (
-    LLMInvalidOutputError,
-    LLMInvalidRequestError,
-    LLMProvider,
-    LLMRateLimitError,
-    LLMUnavailableError,
-    Usage,
-)
+from invio.graph.nodes.llm_calls import PER_ITEM_ERRORS, call_structured, failure_message
+from invio.graph.nodes.prompting import document_message, neutralise
+from invio.llm.base import LLMProvider
 from invio.llm.registry import ModelRegistry
 
 __all__ = [
@@ -62,8 +58,9 @@ logger = logging.getLogger("invio.graph")
 CHUNK_MAX_TOKENS: Final = 3000  # estimated tokens per chunk, overlap included
 CHUNK_OVERLAP_TOKENS: Final = 200  # estimated tokens repeated at the start of the next chunk
 SHORT_TEXT_MAX_TOKENS: Final = CHUNK_MAX_TOKENS  # bodies up to this size need one call
-# Budget for the rendered parts of one combine request. Separate so tests can lower it; always
-# read as a module global at call time.
+# Soft budget for the rendered parts of one combine request: a group of two oversized parts or
+# with a joined leftover can exceed it, and system prompt and title are not counted. Separate so
+# tests can lower it; always read as a module global at call time.
 COMBINE_MAX_TOKENS: Final = CHUNK_MAX_TOKENS
 MAX_CHUNKS: Final = 20  # chunks beyond this are dropped (and flagged as truncated)
 PURPOSE_SHORT: Final = "summarize"  # llm_usage.purpose values
@@ -152,6 +149,7 @@ _WORD = re.compile(r"\s+")
 
 # A unit of text and the separator that follows it when it is not the last unit of a chunk.
 _Unit = tuple[str, str]
+_MAX_SEPARATOR_CHARS: Final = 2  # the longest separator ("\n\n")
 
 
 def _pieces(pattern: re.Pattern[str], text: str) -> list[str]:
@@ -208,8 +206,9 @@ def split_text(text: str, max_tokens: int, overlap: int) -> list[str]:
     sentence, then word, then character boundaries. Whitespace between units is normalised to a
     blank line after a paragraph and a space otherwise. With ``overlap > 0`` every chunk after
     the first starts with a non-empty tail (at most ``overlap`` tokens) of the previous chunk,
-    glued to the new text without a separator, so its first word can look run together; this is
-    cosmetic. Blank text gives ``[]`` and text within the limit ``[text]``.
+    then the separator that stood there in the text (none inside a cut word), so words and
+    numbers never run together; the separator counts towards the new text's cap. Blank text
+    gives ``[]`` and text within the limit ``[text]``.
 
     Token counts are :func:`estimate_tokens` estimates, which underestimate CJK text.
 
@@ -225,19 +224,21 @@ def split_text(text: str, max_tokens: int, overlap: int) -> list[str]:
     if estimate_tokens(text) <= max_tokens:
         return [text]
 
-    budget_chars = 4 * (max_tokens - overlap)
+    # With overlap, room is kept for the separator between the tail and the new text.
+    budget_chars = 4 * (max_tokens - overlap) - (_MAX_SEPARATOR_CHARS if overlap > 0 else 0)
     chunks: list[str] = []
+    joint = ""  # the separator between the previous chunk's text and new_text
     new_text = ""
     separator = ""
 
     def flush() -> None:
-        tail = _overlap_tail(chunks[-1], overlap) if chunks and overlap > 0 else ""
+        tail = _overlap_tail(chunks[-1], overlap) + joint if chunks and overlap > 0 else ""
         chunks.append(tail + new_text)
 
     for unit, after in _units(text, budget_chars):
         if new_text and len(new_text) + len(separator) + len(unit) > budget_chars:
             flush()
-            new_text = unit
+            new_text, joint = unit, separator
         else:
             new_text = f"{new_text}{separator}{unit}" if new_text else unit
         separator = after
@@ -287,7 +288,8 @@ def build_messages(
 
     The system message holds the task for ``kind``, the job's ``interest``, the shape rules, the
     language instruction and the untrusted-data rule; document text never appears in it. The
-    user message is one ``<document>`` block with the neutralised ``title`` and ``content``
+    user message is one ``<document>`` block (:func:`document_message`) with the neutralised
+    ``title`` (cut to ``MAX_TITLE_CHARS``) and ``content``
     (the body for ``short``, one chunk for ``chunk``, the rendered partial summaries for
     ``combine``). ``part`` and ``parts`` describe a chunk; for ``combine`` with
     ``truncated_from`` set they say that only ``parts`` of ``truncated_from`` parts were
@@ -307,18 +309,13 @@ def build_messages(
     else:
         if kind == "combine" and truncated_from is not None:
             sections.append(
-                f"The source text was truncated: only the first {parts} of {truncated_from} "
-                "parts were summarized."
+                f"The document was truncated: the partial summaries cover only the first {parts} "
+                f"of {truncated_from} parts of the document; the rest was cut off."
             )
         sections.append(_SHAPE_RULES)
     sections.append(f'Write all text in {name} (ISO 639-1 code "{language}").')
     sections.append(_UNTRUSTED_RULE)
-    system = "\n\n".join(sections)
-    user = (
-        f"<document>\n<title>{neutralise(title)}</title>\n"
-        f"<content>{neutralise(content)}</content>\n</document>"
-    )
-    return system, user
+    return "\n\n".join(sections), document_message(title, content)
 
 
 def _render_parts(summaries: Sequence[ChunkSummary | ItemSummary], start: int) -> str:
@@ -338,40 +335,6 @@ def _render_parts(summaries: Sequence[ChunkSummary | ItemSummary], start: int) -
 # --- Calls ---------------------------------------------------------------------------------
 
 
-def _record_usage(ctx: SummaryContext, model: str, purpose: str, usage: Usage) -> None:
-    """Store one ``llm_usage`` row for a call (a repair request is already summed in)."""
-    ctx.usage.add(
-        ctx.job_id,
-        ctx.provider_name,
-        model,
-        usage.input_tokens,
-        usage.output_tokens,
-        run_id=ctx.run_id,
-        purpose=purpose,
-        cost_usd=ctx.registry.cost(model, usage),
-    )
-
-
-async def _call[T: BaseModel](
-    ctx: SummaryContext, schema: type[T], *, model: str, purpose: str, system: str, user: str
-) -> T:
-    """Run one structured call and record its usage, also when the answer stays invalid."""
-    try:
-        result, usage = await ctx.provider.complete_structured(
-            system, user, schema, model=model, temperature=0.0
-        )
-    except LLMInvalidOutputError as err:
-        _record_usage(ctx, model, purpose, err.usage)  # the model was called, tokens were spent
-        raise
-    _record_usage(ctx, model, purpose, usage)
-    return result
-
-
-# Fixed text for invalid answers: the validation errors can carry key names chosen by the
-# model (and so steerable by the document), which must not reach ``last_error``.
-_INVALID_OUTPUT_MESSAGE: Final = "invalid structured answer after repair"
-
-
 def _fail(
     item: Item,
     ctx: SummaryContext,
@@ -381,9 +344,13 @@ def _fail(
     chunks: int,
     truncated: bool,
 ) -> SummaryOutcome:
-    """Mark ``item`` failed with ``"<ErrorClass>: <message>"`` (never document text)."""
-    message = _INVALID_OUTPUT_MESSAGE if isinstance(err, LLMInvalidOutputError) else str(err)
-    error = f"{type(err).__name__}: {message}"
+    """Mark ``item`` failed with ``"<ErrorClass>: <message>"`` (never document text).
+
+    No partial summary is stored. A summary from an earlier run is deliberately left unchanged
+    (data-model: ``relevant -> failed (summary unchanged)``); the ``failed`` status, not the
+    ``summary`` column, says whether the item has a current summary.
+    """
+    error = failure_message(err)
     ctx.items.mark_failed(item, error)
     logger.warning("summarize.failed", extra={"item_id": item.id, "error": type(err).__name__})
     return SummaryOutcome(
@@ -416,7 +383,7 @@ async def _summarize_short(
         language=ctx.language,
     )
     tally.calls += 1
-    return await _call(
+    return await call_structured(
         ctx, ItemSummary, model=ctx.fast_model, purpose=PURPOSE_SHORT, system=system, user=user
     )
 
@@ -438,7 +405,7 @@ async def _map_chunks(
         )
         tally.calls += 1
         partials.append(
-            await _call(
+            await call_structured(
                 ctx,
                 ChunkSummary,
                 model=ctx.fast_model,
@@ -451,23 +418,29 @@ async def _map_chunks(
     return partials
 
 
+_BLOCK_SEPARATOR_CHARS: Final = 2  # "\n\n" between two rendered parts
+
+
 def _group(
     parts: Sequence[ChunkSummary | ItemSummary],
 ) -> list[list[ChunkSummary | ItemSummary]]:
     """Group consecutive ``parts`` so each group's rendering fits ``COMBINE_MAX_TOKENS``.
 
     A group closes only once it holds two parts and the next one would exceed the budget, so
-    every group has at least two parts; a single leftover part joins the previous group.
+    every group has at least two parts; a single leftover part joins the previous group. The
+    group's rendered size is tracked as a running sum of the part blocks and their separators.
     """
     groups: list[list[ChunkSummary | ItemSummary]] = []
-    start = 1  # number of the first part of the current group
     current: list[ChunkSummary | ItemSummary] = []
+    size = 0  # chars of the current group's rendering
     for number, part in enumerate(parts, 1):
-        over = estimate_tokens(_render_parts([*current, part], start)) > COMBINE_MAX_TOKENS
-        if len(current) >= 2 and over:
+        block = len(_render_parts([part], number))
+        grown = size + _BLOCK_SEPARATOR_CHARS + block if current else block
+        if len(current) >= 2 and ceil(grown / 4) > COMBINE_MAX_TOKENS:
             groups.append(current)
-            current, start = [], number
+            current, grown = [], block
         current.append(part)
+        size = grown
     if len(current) == 1 and groups:
         groups[-1].extend(current)
     else:
@@ -477,7 +450,7 @@ def _group(
 
 async def _combine(
     item: Item,
-    partials: list[ChunkSummary | ItemSummary],
+    partials: Sequence[ChunkSummary | ItemSummary],
     truncated_from: int | None,
     ctx: SummaryContext,
     tally: _Tally,
@@ -485,7 +458,7 @@ async def _combine(
     """Merge partial summaries with the ``smart`` model until one summary remains (reduce)."""
     parts = len(partials)
     while True:
-        merged: list[ChunkSummary | ItemSummary] = []
+        merged: list[ItemSummary] = []
         start = 1
         for group in _group(partials):
             system, user = build_messages(
@@ -500,7 +473,7 @@ async def _combine(
             start += len(group)
             tally.calls += 1
             merged.append(
-                await _call(
+                await call_structured(
                     ctx,
                     ItemSummary,
                     model=ctx.smart_model,
@@ -509,25 +482,16 @@ async def _combine(
                     user=user,
                 )
             )
+        if len(merged) == 1:
+            return merged[0]
         partials = merged
-        if len(partials) == 1:
-            (final,) = partials
-            assert isinstance(final, ItemSummary)
-            return final
-
-
-_PER_ITEM_ERRORS: Final = (
-    LLMInvalidOutputError,
-    LLMUnavailableError,
-    LLMRateLimitError,
-    LLMInvalidRequestError,
-)
 
 
 async def summarize_item(item: Item, ctx: SummaryContext) -> SummaryOutcome:
     """Summarize one item and store the summary JSON and status ``summarized``.
 
-    A body of at most ``SHORT_TEXT_MAX_TOKENS`` takes one ``fast`` call. A longer one is split,
+    A body of at most ``SHORT_TEXT_MAX_TOKENS`` (or one that splits into a single chunk once
+    whitespace is normalised) takes one ``fast`` call. A longer one is split,
     at most ``MAX_CHUNKS`` chunks are summarized with the ``fast`` model and the partial
     summaries are merged with ``smart`` calls until one remains; further chunks are dropped, which
     is logged and flagged in every combine request. Writes are flushed, not committed.
@@ -543,8 +507,10 @@ async def summarize_item(item: Item, ctx: SummaryContext) -> SummaryOutcome:
     try:
         if estimate_tokens(body) <= SHORT_TEXT_MAX_TOKENS:
             summary = await _summarize_short(item, body, ctx, tally)
+        elif len(chunks := split_text(body, CHUNK_MAX_TOKENS, CHUNK_OVERLAP_TOKENS)) == 1:
+            # Over the threshold by estimate, but one chunk once whitespace is normalised.
+            summary = await _summarize_short(item, chunks[0], ctx, tally)
         else:
-            chunks = split_text(body, CHUNK_MAX_TOKENS, CHUNK_OVERLAP_TOKENS)
             kept = chunks[:MAX_CHUNKS]
             truncated = len(kept) < len(chunks)
             if truncated:
@@ -558,7 +524,7 @@ async def summarize_item(item: Item, ctx: SummaryContext) -> SummaryOutcome:
                 )
             partials = await _map_chunks(item, kept, ctx, tally)
             summary = await _combine(item, partials, len(chunks) if truncated else None, ctx, tally)
-    except _PER_ITEM_ERRORS as err:
+    except PER_ITEM_ERRORS as err:
         return _fail(item, ctx, err, calls=tally.calls, chunks=tally.chunks, truncated=truncated)
     ctx.items.set_summary(item, summary.model_dump_json())
     logger.info(

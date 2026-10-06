@@ -171,7 +171,9 @@ code; no open NEEDS CLARIFICATION remain.
 - **Decision**: identical to #16: `LLMInvalidOutputError` (after recording its usage),
   `LLMUnavailableError`, `LLMRateLimitError`, `LLMInvalidRequestError` in any call of an item
   → item `failed`, `last_error = "<ErrorClass>: <message>"` (fixed message for invalid
-  output), no summary stored, remaining calls for that item skipped, next item continues.
+  output; provider, model, HTTP status and retry-after only for other errors, since a provider
+  message can echo the request — shared with #16 via `llm_calls.failure_message`), no summary
+  stored (an earlier summary stays unchanged), remaining calls for that item skipped, next item continues.
   `LLMAuthError`, `LLMConfigError` and other exceptions propagate.
 - **Rationale**: FR-014/FR-015; consistent behaviour across pipeline nodes.
 - **Alternatives considered**: storing a partial summary from successful chunks — spec says no

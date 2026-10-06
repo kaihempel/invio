@@ -34,7 +34,9 @@ def split_text(text: str, max_tokens: int, overlap: int) -> list[str]
   per chunk is at most `max_tokens - overlap` tokens, cut at paragraph, then sentence, then
   word, then character boundaries; when `overlap > 0`, chunk *i+1* starts with a **non-empty**
   tail of chunk *i* of at most `overlap` estimated tokens (word-boundary tail preferred,
-  character tail when there is no word boundary). Pure and deterministic.
+  character tail when there is no word boundary), followed by the separator that stood between
+  the two in the text (blank line, space, or nothing inside a cut word), so words and numbers
+  never run together; the separator counts towards the new-text cap. Pure and deterministic.
 
 ```python
 def build_messages(
@@ -52,10 +54,11 @@ for `combine` when `truncated_from` is set). User: one `<document>` block with n
 async def summarize_item(item: Item, ctx: SummaryContext) -> SummaryOutcome
 async def summarize_items(items: Iterable[Item], ctx: SummaryContext) -> list[SummaryOutcome]
 ```
-- Body = teaser + extracted text. Short path: exactly one `fast` call (`ItemSummary`). Long
-  path: `min(len(chunks), MAX_CHUNKS)` `fast` calls (`ChunkSummary`), then `smart` combine
-  calls (`ItemSummary`, parts grouped to ≤ `COMBINE_MAX_TOKENS`, ≥ 2 per group) until one
-  summary remains.
+- Body = teaser + extracted text. Short path: exactly one `fast` call (`ItemSummary`); also
+  taken with the normalised text when a body over the threshold splits into a single chunk
+  (whitespace runs). Long path: `min(len(chunks), MAX_CHUNKS)` `fast` calls (`ChunkSummary`), then `smart` combine
+  calls (`ItemSummary`, parts grouped to ≤ `COMBINE_MAX_TOKENS`, ≥ 2 per group; a soft
+  budget) until one summary remains.
 - Success: `ItemRepository.set_summary(item, summary.model_dump_json())` → status
   `summarized`, `last_error` cleared.
 - Per-item errors (`LLMInvalidOutputError`, `LLMUnavailableError`, `LLMRateLimitError`,
@@ -82,6 +85,24 @@ def neutralise(text: str) -> str
 ```
 Moved unchanged from `relevance._neutralise`; swaps `<`/`>` of `document`/`title`/`content`
 tags for U+2039/U+203A. `relevance.py` imports it.
+
+```python
+def document_message(title: str, content: str) -> str
+```
+The user message of both nodes: one `<document>` block with neutralised title (cut to
+`MAX_TITLE_CHARS = 500`) and content.
+
+## Shared helper (`invio.graph.nodes.llm_calls`)
+
+```python
+PER_ITEM_ERRORS  # (LLMInvalidOutputError, LLMUnavailableError, LLMRateLimitError, LLMInvalidRequestError)
+async def call_structured(ctx, schema, *, model, purpose, system, user) -> T
+def failure_message(err: Exception) -> str
+```
+`call_structured` records one `llm_usage` row per call (also `err.usage` on an invalid answer).
+`failure_message` gives `"<ErrorClass>: <message>"`: a fixed message for an invalid answer,
+and only provider, model, HTTP status and retry-after for other LLM errors (the provider's own
+message can echo the request). Used by the relevance and summarization nodes.
 
 ## Repository addition (`invio.db.repositories.ItemRepository`)
 
