@@ -308,6 +308,21 @@ class ItemRepository:
             item.attempts += 1
         self._session.flush()
 
+    def release(self, items: Iterable[Item]) -> None:
+        """Hand taken ``items`` back to the next run after a budget stop. One flush.
+
+        Undoes the take: ``attempts`` goes down by one (never below 0) and ``run_id`` is cleared.
+        The status becomes ``new`` so ``list_pending`` selects the item again (an item already
+        rated ``relevant`` would otherwise never be picked up); an item that is still ``failed``
+        (a retry taken but not touched) stays ``failed`` (research R4).
+        """
+        for item in items:
+            item.attempts = max(item.attempts - 1, 0)
+            item.run_id = None
+            if item.status != ItemStatus.FAILED:
+                item.status = ItemStatus.NEW
+        self._session.flush()
+
     def mark_status(self, items: Iterable[Item], status: ItemStatus) -> None:
         """Set ``status`` on ``items``. One flush."""
         for item in items:
@@ -549,8 +564,9 @@ class UsageRepository:
         run_id: int | None = None,
         purpose: str | None = None,
         cost_usd: Decimal | None = None,
+        created_at: datetime | None = None,
     ) -> LlmUsage:
-        """Store one LLM call's usage."""
+        """Store one LLM call's usage; ``created_at`` defaults to now (a replay passes its own)."""
         usage = LlmUsage(
             job_id=job_id,
             run_id=run_id,
@@ -560,6 +576,7 @@ class UsageRepository:
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             cost_usd=cost_usd,
+            created_at=created_at or utcnow(),
         )
         self._session.add(usage)
         self._session.flush()

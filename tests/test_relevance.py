@@ -5,6 +5,7 @@ import logging
 import re
 import time
 from collections.abc import Callable
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 
@@ -17,6 +18,7 @@ from invio.config.job import SearchConfig
 from invio.db.models import Item, Job, LlmUsage, Run
 from invio.db.repositories import ItemRepository, UsageRepository
 from invio.domain import ItemStatus
+from invio.graph.budget import BudgetExceeded, BudgetTracker, UsageEntry
 from invio.graph.nodes.relevance import (
     MAX_DOCUMENT_CHARS,
     RelevanceResult,
@@ -62,6 +64,7 @@ def _context(
     min_relevance: float = 0.6,
     run: Run | None = None,
     registry: ModelRegistry | None = None,
+    budget: BudgetTracker | None = None,
 ) -> ScoringContext:
     return ScoringContext(
         job_id=job.id,
@@ -75,6 +78,7 @@ def _context(
         registry=registry if registry is not None else _REGISTRY,
         items=ItemRepository(db_session),
         usage=UsageRepository(db_session),
+        budget=budget if budget is not None else BudgetTracker(1_000_000),
     )
 
 
@@ -317,6 +321,75 @@ async def test_score_items_with_no_items(db_session: Session) -> None:
     assert await score_items([], _context(db_session, job, fake)) == []
     assert fake.requests == []
     assert _usage_rows(db_session) == []
+
+
+def _spend(budget: BudgetTracker) -> None:
+    """Use up ``budget`` and latch ``exceeded``, as an earlier stage would have."""
+    budget.record(
+        UsageEntry(
+            provider="mistral",
+            model="fast-model",
+            purpose="relevance",
+            input_tokens=budget.limit + 1,
+            output_tokens=0,
+            cost_usd=None,
+            created_at=datetime(2026, 10, 6, tzinfo=UTC),
+        )
+    )
+    with pytest.raises(BudgetExceeded):
+        budget.check()
+
+
+@pytest.mark.db
+async def test_score_items_stops_when_the_budget_is_exceeded(
+    db_session: Session, caplog: pytest.LogCaptureFixture
+) -> None:
+    job = make_job(db_session)
+    items = [make_item(db_session, job, url=f"https://example.com/{n}") for n in range(5)]
+    reply = FakeReply(_answer(0.9), Usage(500, 100))
+    fake = FakeProvider([reply] * 5)
+    budget = BudgetTracker(1000)
+    with caplog.at_level(logging.INFO, logger="invio.graph"):
+        outcomes = await score_items(items, _context(db_session, job, fake, budget=budget))
+    assert len(fake.requests) == 2
+    assert [o.item_id for o in outcomes] == [items[0].id, items[1].id]
+    for item in items[2:]:
+        assert (item.status, item.last_error, item.relevance) == (ItemStatus.NEW, None, None)
+    assert len(_usage_rows(db_session)) == 2
+    assert budget.exceeded is True
+    (record,) = [r for r in caplog.records if r.getMessage() == "budget.exceeded"]
+    assert (record.used, record.limit) == (1200, 1000)
+
+
+@pytest.mark.db
+async def test_score_item_lets_budget_exceeded_propagate_without_failing_the_item(
+    db_session: Session,
+) -> None:
+    job = make_job(db_session)
+    item = make_item(db_session, job)
+    budget = BudgetTracker(1)
+    _spend(budget)
+    fake = FakeProvider([])
+    with pytest.raises(BudgetExceeded):
+        await score_item(item, _context(db_session, job, fake, budget=budget))
+    assert (item.status, item.last_error) == (ItemStatus.NEW, None)
+    assert fake.requests == []
+
+
+@pytest.mark.db
+async def test_score_items_does_not_log_again_when_the_budget_was_already_exceeded(
+    db_session: Session, caplog: pytest.LogCaptureFixture
+) -> None:
+    job = make_job(db_session)
+    item = make_item(db_session, job)
+    budget = BudgetTracker(1)
+    _spend(budget)
+    with caplog.at_level(logging.INFO, logger="invio.graph"):
+        outcomes = await score_items(
+            [item], _context(db_session, job, FakeProvider([]), budget=budget)
+        )
+    assert outcomes == []
+    assert [r for r in caplog.records if r.getMessage() == "budget.exceeded"] == []
 
 
 @pytest.mark.db

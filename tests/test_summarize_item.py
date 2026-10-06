@@ -17,6 +17,7 @@ from invio.config.job import loads_yaml
 from invio.db.models import Job, LlmUsage, Run
 from invio.db.repositories import ItemRepository, UsageRepository
 from invio.domain import ItemStatus
+from invio.graph.budget import BudgetExceeded, BudgetTracker
 from invio.graph.nodes.summarize_item import (
     CHUNK_MAX_TOKENS,
     CHUNK_OVERLAP_TOKENS,
@@ -75,6 +76,7 @@ def _context(
     *,
     language: str = "en",
     run: Run | None = None,
+    budget: BudgetTracker | None = None,
 ) -> SummaryContext:
     return SummaryContext(
         job_id=job.id,
@@ -88,6 +90,7 @@ def _context(
         registry=_REGISTRY,
         items=ItemRepository(db_session),
         usage=UsageRepository(db_session),
+        budget=budget if budget is not None else BudgetTracker(1_000_000),
     )
 
 
@@ -468,6 +471,55 @@ async def test_chunk_failure_stops_the_item_and_continues_with_the_next(
     assert long_item.summary is None
     assert short_item.status == ItemStatus.SUMMARIZED
     assert (outcomes[0].calls, outcomes[0].chunks) == (2, 1)
+
+
+@pytest.mark.db
+async def test_budget_stop_between_chunks_leaves_the_item_unchanged(
+    db_session: Session, caplog: pytest.LogCaptureFixture
+) -> None:
+    job = make_job(db_session)
+    long_item = make_item(
+        db_session, job, url="https://example.com/long", raw_content=_paragraphs(3)
+    )
+    short_item = make_item(db_session, job, url="https://example.com/short", raw_content=SHORT_TEXT)
+    reply = FakeReply(_chunk_json(), Usage(300, 100))
+    fake = FakeProvider([reply] * 3)
+    budget = BudgetTracker(700)
+    with caplog.at_level(logging.INFO, logger="invio.graph"):
+        outcomes = await summarize_items(
+            [long_item, short_item], _context(db_session, job, fake, budget=budget)
+        )
+    assert outcomes == []
+    assert len(fake.requests) == 2  # two chunk calls, then the stop; nothing for the next item
+    for item in (long_item, short_item):
+        assert (item.status, item.summary, item.last_error) == (ItemStatus.NEW, None, None)
+    assert [r.purpose for r in _usage_rows(db_session)] == ["summarize_chunk"] * 2
+    assert budget.exceeded is True
+    assert len([r for r in caplog.records if r.getMessage() == "budget.exceeded"]) == 1
+
+
+@pytest.mark.db
+async def test_budget_stop_keeps_the_summaries_finished_before_it(db_session: Session) -> None:
+    job = make_job(db_session)
+    first = make_item(db_session, job, url="https://example.com/1", raw_content=SHORT_TEXT)
+    second = make_item(db_session, job, url="https://example.com/2", raw_content=SHORT_TEXT)
+    fake = FakeProvider([FakeReply(_summary_json(), Usage(900, 200))] * 2)
+    outcomes = await summarize_items(
+        [first, second], _context(db_session, job, fake, budget=BudgetTracker(1000))
+    )
+    assert [o.item_id for o in outcomes] == [first.id]
+    assert first.status == ItemStatus.SUMMARIZED
+    assert second.status == ItemStatus.NEW
+
+
+@pytest.mark.db
+async def test_summarize_item_lets_budget_exceeded_propagate(db_session: Session) -> None:
+    job = make_job(db_session)
+    item = make_item(db_session, job, raw_content=_paragraphs(3))
+    fake = FakeProvider([FakeReply(_chunk_json(), Usage(300, 100))] * 3)
+    with pytest.raises(BudgetExceeded):
+        await summarize_item(item, _context(db_session, job, fake, budget=BudgetTracker(700)))
+    assert (item.status, item.last_error) == (ItemStatus.NEW, None)
 
 
 @pytest.mark.db
@@ -862,6 +914,7 @@ def _job_context(db_session: Session, job: Job, fake: LLMProvider, language: str
         registry=_REGISTRY,
         items=ItemRepository(db_session),
         usage=UsageRepository(db_session),
+        budget=BudgetTracker(1_000_000),
     )
 
 
