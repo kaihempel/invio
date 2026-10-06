@@ -52,3 +52,10 @@ Invariants (tested):
 - `tokens == input_tokens + output_tokens`.
 - `input_tokens`, `output_tokens`, `estimated_cost_usd` equal `UsageRepository.totals_for_run`.
 - `estimated_cost_usd` equals the per-call `ModelRegistry.cost` sum for the recorded tokens.
+
+## Additions (#21)
+
+The pipeline (#21) adds the keys `sources`, `sources_failed` and, for dry runs, `dry_run` to
+`runs.stats`, and the `runs.error` text `"all sources failed"`. The layout version stays `1`.
+See [`specs/014-gh-issue-21/contracts/run-stats-delta.md`](../../014-gh-issue-21/contracts/run-stats-delta.md)
+for the details; stats consumers (#22, #35) should read it together with this file.

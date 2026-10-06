@@ -155,7 +155,9 @@ def _digest_date(started_at: datetime, timezone: str) -> date:
 
 
 def _items_found(stats: dict[str, Any] | None) -> int | None:
-    value = (stats or {}).get("items_found")
+    # ``found`` is what the pipeline writes (runs.stats layout, #19); ``items_found`` is legacy.
+    data = stats or {}
+    value = data["found"] if "found" in data else data.get("items_found")
     return value if type(value) is int and value >= 0 else None
 
 

@@ -9,7 +9,8 @@ from collections.abc import Collection, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
-from typing import Any
+from enum import Enum
+from typing import Any, Final
 
 from sqlalchemy import ColumnElement, Select, and_, case, exists, func, insert, or_, select, update
 from sqlalchemy.exc import IntegrityError
@@ -20,6 +21,7 @@ from invio.db.types import utcnow
 from invio.domain import COST_PRECISION, Candidate, ItemStatus, NotificationStatus, RunStatus
 
 __all__ = [
+    "KEEP",
     "DigestRepository",
     "ItemRepository",
     "JobRepository",
@@ -28,6 +30,14 @@ __all__ = [
     "UsageRepository",
     "UsageTotals",
 ]
+
+
+class _Keep(Enum):
+    KEEP = "keep"
+
+
+# Sentinel for ``JobRepository.release``: leave ``next_run_at`` as it is (``None`` clears it).
+KEEP: Final = _Keep.KEEP
 
 
 def _all[T](session: Session, stmt: Select[T]) -> builtins.list[T]:
@@ -43,6 +53,45 @@ class JobRepository:
     def get_by_name(self, name: str) -> Job | None:
         """Return the job called ``name`` or ``None``."""
         return self._session.scalars(select(Job).where(Job.name == name)).one_or_none()
+
+    def get(self, job_id: int) -> Job | None:
+        """Return the job with ``job_id`` or ``None``."""
+        return self._session.get(Job, job_id)
+
+    def claim(self, job_id: int, *, now: datetime, until: datetime) -> bool:
+        """Take the run lock: set ``locked_until = until`` if it is free or expired.
+
+        One conditional UPDATE (the SQL of #23 step 2), so of several concurrent callers exactly
+        one gets ``True``. Does not commit; the caller owns the transaction. The
+        ``until`` value doubles as the ownership token for :meth:`release`.
+        """
+        result = self._session.execute(
+            update(Job)
+            .where(Job.id == job_id, or_(Job.locked_until.is_(None), Job.locked_until < now))
+            .values(locked_until=until)
+            .execution_options(synchronize_session=False)
+        )
+        return result.rowcount == 1  # type: ignore[attr-defined, no-any-return]
+
+    def release(
+        self, job_id: int, *, until: datetime, next_run_at: datetime | _Keep | None = KEEP
+    ) -> bool:
+        """Clear the lock if it still equals ``until`` (this run's token), in one UPDATE.
+
+        ``next_run_at`` is written together with the release unless it is :data:`KEEP`; ``None``
+        is a legal value that clears it. Returns ``False`` and changes nothing when the lock
+        belongs to someone else now. Does not commit.
+        """
+        values: dict[str, Any] = {"locked_until": None}
+        if next_run_at is not KEEP:
+            values["next_run_at"] = next_run_at
+        result = self._session.execute(
+            update(Job)
+            .where(Job.id == job_id, Job.locked_until == until)
+            .values(**values)
+            .execution_options(synchronize_session=False)
+        )
+        return result.rowcount == 1  # type: ignore[attr-defined, no-any-return]
 
     def list(self, *, enabled_only: bool = False) -> builtins.list[Job]:
         """Return jobs ordered by name, optionally only the enabled ones."""
@@ -222,6 +271,12 @@ class ItemRepository:
         item.last_error = None
         self._session.flush()
 
+    def set_extracted(self, item: Item, text: str) -> None:
+        """Store the extracted page text, set status EXTRACTED, flush."""
+        item.raw_content = text
+        item.status = ItemStatus.EXTRACTED
+        self._session.flush()
+
     def mark_failed(self, item: Item, error: str) -> None:
         """Set status FAILED and last_error, flush (relevance unchanged)."""
         item.status = ItemStatus.FAILED
@@ -390,6 +445,11 @@ class DigestRepository:
     def get(self, digest_id: int) -> Digest | None:
         """Return the digest with this id, or ``None``."""
         return self._session.get(Digest, digest_id)
+
+    def get_for_run(self, run_id: int) -> Digest | None:
+        """Return the digest stored by run ``run_id`` or ``None``."""
+        stmt = select(Digest).where(Digest.run_id == run_id).order_by(Digest.id.desc()).limit(1)
+        return self._session.scalars(stmt).first()
 
     def list_for_job(self, job_id: int) -> builtins.list[Digest]:
         """Return the job's digests, newest first."""

@@ -907,3 +907,38 @@ def test_open_session_factory_opens_a_sqlite_database(tmp_path: Path) -> None:
 
     with factory() as session:
         assert session.bind is not None
+
+
+@pytest.mark.parametrize(
+    ("stats", "expected"),
+    [
+        ({"found": 7}, 7),
+        ({"items_found": 5}, 5),
+        ({"found": 3, "items_found": 9}, 3),
+        ({"found": 0}, 0),
+        ({"found": -1, "items_found": 5}, None),
+        ({"found": True}, None),
+        ({"found": "7"}, None),
+        ({"found": 1.5}, None),
+        ({}, None),
+        (None, None),
+    ],
+    ids=[
+        "found",
+        "legacy-key",
+        "found-wins",
+        "zero",
+        "negative-found-is-not-replaced",
+        "bool",
+        "string",
+        "float",
+        "absent",
+        "no-stats",
+    ],
+)
+def test_items_found_reads_found_and_falls_back_to_the_legacy_key(
+    stats: dict[str, Any] | None, expected: int | None
+) -> None:
+    from invio.notify.email import _items_found
+
+    assert _items_found(stats) == expected

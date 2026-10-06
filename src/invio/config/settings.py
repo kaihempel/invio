@@ -97,6 +97,10 @@ class Settings(BaseSettings):
     ollama_base_url: str = "http://localhost:11434"
     llm_timeout_seconds: float = Field(default=60.0, gt=0, allow_inf_nan=False)
 
+    # Run orchestration (``invio.pipeline``)
+    max_parallel_items: int = Field(default=4, ge=1)
+    run_lock_seconds: int = Field(default=7200, ge=60)
+
     # E-mail notifications
     smtp_host: str | None = None
     smtp_port: int = 587

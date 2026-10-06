@@ -52,7 +52,8 @@ Settings come from `INVIO_*` environment variables or a `.env` file in the worki
 the file from elsewhere, e.g. under cron/systemd where the working directory differs; a missing
 file is then an error. Secrets are `SecretStr` and never appear in `repr`/logs. Provider keys
 are optional until the provider is actually used. `INVIO_LLM_TIMEOUT_SECONDS` (default `60`,
-must be > 0) bounds every single LLM request:
+must be > 0) bounds every single LLM request; `INVIO_MAX_PARALLEL_ITEMS` and
+`INVIO_RUN_LOCK_SECONDS` configure job runs (see "Running a job"):
 
 ```python
 from invio.config.settings import get_settings
@@ -500,14 +501,67 @@ always runs and is counted. Limits and known behaviour:
   `tokens > budget_limit`. `over_budget` in `runs.stats` shows that case (`tokens > budget_limit`).
 - Released items are rated again by the next run, so their relevance tokens are spent twice.
 - A killed process leaves the run `running` and only the `llm.call` log lines as usage record.
-- The orchestrator (#21) must commit the run start and `mark_taken` before the LLM stages, must
-  not commit `llm_usage` rows before `finalize_run` (the recovery replays the whole ledger), and
-  must call `record_failed_run` when a stage raises.
+- The orchestrator (`run_job`, see "Running a job") commits the run start and `mark_taken`
+  before the LLM stages, commits no `llm_usage` row before `finalize_run` (the recovery replays
+  the whole ledger), and calls `record_failed_run` when a stage raises.
 - A digest may only name items the run summarized; any other id fails the save.
 - A run `failed` because every attempted item failed gets `runs.error`
   `"all attempted items failed"`. A commit that fails after the database applied it is detected
   by the recovery (the run is no longer `running`): nothing is replayed and the stored status is
   kept.
+
+### Running a job
+
+`invio.pipeline.run.run_job(job_id, dry_run=False)` runs one job end to end. It returns a
+`RunResult` (`job_id`, `run_id`, final `status`, `dry_run`, `digest`, `stats`, `errors`,
+`notifications_sent`, `notifications_failed`) for every run that started, whatever its status.
+It raises, before any run row is created or lock is changed, `JobNotFoundError` (unknown id),
+`JobDisabledError` and `JobBusyError` (another run holds an unexpired lock; `locked_until` says
+until when), and `ValueError` for `concurrency < 1`. The CLI command follows in #22 and
+`invio run-due` in #23.
+
+```python
+import asyncio
+
+from invio.pipeline.run import run_job
+
+result = asyncio.run(run_job(1, dry_run=True))
+print(result.status, result.digest)
+```
+
+Stages, as one LangGraph graph per run: `load_job` (validate the stored config, bind the
+provider) -> `fetch_sources` -> `deduplicate` -> `keyword_prefilter` -> one `process_item` per
+item (page extraction, relevance, summary) -> `join` -> `synthesize_digest` -> `persist` ->
+`notify` -> `finalize`. `finalize` is the only way out: it sets `next_run_at` and releases the
+job lock whatever happened, also after a stage exception or a cancellation.
+
+Final status, in order: a stage raised -> `failed` (`runs.error` is `"<Class>: run failed"`, the
+LLM facts for an `LLMError`, or the failing field paths for an invalid job config); every source
+with an adapter failed -> `failed` (`"all sources failed"`); every attempted item failed ->
+`failed` (`"all attempted items failed"`); any source or item failed, or the token budget was
+exceeded -> `partial`; otherwise `succeeded`. A fallback digest (the digest call failed) and a
+failed or skipped recipient lower `succeeded` to `partial`. Credential and configuration errors
+(`LLMAuthError`, `LLMConfigError`, a missing API key) fail the whole run instead of every item.
+
+Retries: a source fetch, an item page fetch and each provider request are retried on transient
+errors (`LLMRateLimitError`, `LLMUnavailableError`, `FetchError` except `BlockedError`,
+`TooLargeError`, `RenderUnavailableError`) with exponential backoff: at most 3 attempts, 1 s
+initial wait, factor 2, at most 30 s, plus up to 10 % jitter; `retry_after` of a rate limit is
+used when larger. Everything else is attempted once. Retries wrap the single call (not the
+node), so a node never repeats side effects.
+
+Settings: `INVIO_MAX_PARALLEL_ITEMS` (default `4`, at least `1`) bounds the items processed at
+once (and the sources fetched at once); `INVIO_RUN_LOCK_SECONDS` (default `7200`, at least `60`)
+is how long a run holds its job lock.
+
+Dry run: the run produces the digest in `RunResult.digest` only. Nothing is sent, `next_run_at`
+stays as it is, and no item, digest or `llm_usage` row is kept: the work is rolled back and
+only the run row remains, with `stats["dry_run"] = true` and the token figures of the calls
+that were made.
+
+Known limitations: the lock has no heartbeat, so a run longer than `INVIO_RUN_LOCK_SECONDS` can
+be overtaken by another one; source types without an adapter yet (`sitemap`, `youtube_*`) are
+skipped with a `source.unsupported` log line; video items use the text of their page until #29.
 
 ## Notifications
 
@@ -546,7 +600,9 @@ src/invio/
   domain.py     shared records, status enums, url_hash (stdlib only)
   db/           models, engine/session helpers, repositories.py, migrations/ (Alembic)
   services/     jobs.py (JobService: job CRUD, YAML import/export)
-  graph/        LangGraph pipelines
+  graph/        LangGraph research graph: state, ports, stages, build; nodes/ (LLM stages)
+  pipeline/     run orchestration (run_job) and the production wiring of the graph's ports
+  retry.py      call-level retry with exponential backoff (dependency-free leaf)
   sources/      source adapters (rss.py, web.py; browser.py is the only Playwright user, loaded
                 lazily); http.py (SafeHttpClient) with netguard, robots, ratelimit;
                 extract.py (article text); text.py, urls.py

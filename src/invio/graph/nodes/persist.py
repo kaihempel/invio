@@ -27,6 +27,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Final
 
+from pydantic import ValidationError
 from sqlalchemy.orm import Session, sessionmaker
 
 from invio.db.models import Item, Run
@@ -46,13 +47,16 @@ from invio.llm.base import LLMError
 
 __all__ = [
     "ALL_FAILED_ERROR",
+    "ALL_SOURCES_FAILED_ERROR",
     "STATS_VERSION",
     "DigestDraft",
-    "RunResult",
+    "RunDraft",
     "StageCounts",
     "build_stats",
     "decide_status",
+    "failure_error",
     "finalize_run",
+    "finish_dry_run",
     "persist_run",
     "record_failed_run",
     "unprocessed",
@@ -62,6 +66,7 @@ logger = logging.getLogger("invio.graph")
 
 STATS_VERSION: Final = 1  # layout of runs.stats, see contracts/run-stats.md
 ALL_FAILED_ERROR: Final = "all attempted items failed"  # runs.error of a run failed by its items
+ALL_SOURCES_FAILED_ERROR: Final = "all sources failed"  # runs.error when no source could be read
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -71,6 +76,8 @@ class StageCounts:
     found: int
     new: int
     after_keyword_filter: int
+    sources: int = 0  # enabled sources with an adapter
+    sources_failed: int = 0  # of those, still failing after retries
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -83,7 +90,7 @@ class DigestDraft:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class RunResult:
+class RunDraft:
     """Everything the save step needs: what the run took, what the stages produced, the budget."""
 
     job_id: int
@@ -94,9 +101,14 @@ class RunResult:
     summaries: Sequence[SummaryOutcome]
     digest: DigestDraft | None
     budget: BudgetTracker
+    dry_run: bool = False
+    # The digest is the fallback text (the digest call failed): a ``succeeded`` run is ``partial``.
+    fallback_digest: bool = False
+    # Store the digest even when its ``item_ids`` are empty (``notification.send_if_empty``).
+    store_empty_digest: bool = False
 
 
-def unprocessed(result: RunResult) -> list[Item]:
+def unprocessed(result: RunDraft) -> list[Item]:
     """Return the taken items that reached no final state in this run (pure).
 
     Final: skipped by the keyword filter, rated ``skipped_irrelevant`` or ``failed``, or
@@ -142,7 +154,7 @@ def _ledger_stats(budget: BudgetTracker) -> dict[str, Any]:
     }
 
 
-def _failed_ids(result: RunResult) -> set[int]:
+def _failed_ids(result: RunDraft) -> set[int]:
     """Ids of the items that failed in either stage."""
     outcomes: list[RelevanceOutcome | SummaryOutcome] = [*result.relevance, *result.summaries]
     return {o.item_id for o in outcomes if o.status == ItemStatus.FAILED}
@@ -150,7 +162,7 @@ def _failed_ids(result: RunResult) -> set[int]:
 
 # Any: runs.stats is a JSON column (dict[str, Any] on the model); the layout is documented in
 # contracts/run-stats.md.
-def build_stats(result: RunResult) -> dict[str, Any]:
+def build_stats(result: RunDraft) -> dict[str, Any]:
     """Return the ``runs.stats`` object for ``result`` (pure).
 
     Stage counts come from the orchestrator and the outcomes, token and cost figures from the
@@ -162,6 +174,8 @@ def build_stats(result: RunResult) -> dict[str, Any]:
         "found": result.counts.found,
         "new": result.counts.new,
         "after_keyword_filter": result.counts.after_keyword_filter,
+        "sources": result.counts.sources,
+        "sources_failed": result.counts.sources_failed,
         "relevant": sum(o.status == ItemStatus.RELEVANT for o in result.relevance),
         "summarized": sum(o.status == ItemStatus.SUMMARIZED for o in result.summaries),
         "failed": len(_failed_ids(result)),
@@ -170,24 +184,47 @@ def build_stats(result: RunResult) -> dict[str, Any]:
     }
 
 
-def decide_status(result: RunResult) -> RunStatus:
-    """Return the final status of a run that reached the save (pure; FR-010 in this order).
+def _all_sources_failed(result: RunDraft) -> bool:
+    """Whether every source with an adapter failed (and there was at least one)."""
+    return result.counts.sources >= 1 and result.counts.sources_failed == result.counts.sources
 
-    ``failed`` when the budget was not exceeded and every attempted item failed (an attempted
-    item has a relevance or summary outcome); ``partial`` when the budget stopped the run or any
-    item failed; otherwise ``succeeded``, also for a run without items. A run that fails before
-    or while saving is ``failed`` through :func:`record_failed_run`, not through this function.
-    """
+
+def _items_all_failed(result: RunDraft) -> bool:
     attempted = {o.item_id for o in result.relevance} | {o.item_id for o in result.summaries}
-    failed = _failed_ids(result)
-    if not result.budget.exceeded and attempted and failed == attempted:
+    return not result.budget.exceeded and bool(attempted) and _failed_ids(result) == attempted
+
+
+def decide_status(result: RunDraft) -> RunStatus:
+    """Return the final status of a run that reached the save (pure; FR-009/FR-010 in order).
+
+    ``failed`` when every source with an adapter failed, or when the budget was not exceeded and
+    every attempted item failed (an attempted item has a relevance or summary outcome);
+    ``partial`` when a source failed, the budget stopped the run or any item failed; otherwise
+    ``succeeded``, also for a run without items. A run that fails before or while saving is
+    ``failed`` through :func:`record_failed_run`, not through this function.
+    """
+    if _all_sources_failed(result) or _items_all_failed(result):
         return RunStatus.FAILED
-    if result.budget.exceeded or failed:
+    if (
+        result.counts.sources_failed > 0
+        or result.budget.exceeded
+        or result.fallback_digest
+        or _failed_ids(result)
+    ):
         return RunStatus.PARTIAL
     return RunStatus.SUCCEEDED
 
 
-def _validate_digest(result: RunResult) -> None:
+def failure_error(result: RunDraft) -> str | None:
+    """The ``runs.error`` text of a run failed by its sources or items, else ``None`` (pure)."""
+    if _all_sources_failed(result):
+        return ALL_SOURCES_FAILED_ERROR
+    if _items_all_failed(result):
+        return ALL_FAILED_ERROR
+    return None
+
+
+def _validate_digest(result: RunDraft) -> None:
     """Raise ``ValueError`` unless the digest's item ids are taken and summarized by the run, once.
 
     A digest uses the items the run processed successfully (FR-005): not a failed or irrelevant
@@ -208,13 +245,14 @@ def _validate_digest(result: RunResult) -> None:
         raise ValueError(f"digest item_ids not summarized by the run: {unsummarized}")
 
 
-def persist_run(session: Session, result: RunResult) -> Run:
+def persist_run(session: Session, result: RunDraft) -> Run:
     """Write the digest and finish the run in ``session``; flush only, the caller commits.
 
     When the budget was exceeded, the unprocessed items are released first (attempt undone, back
     to ``new``, research R4). Raises ``ValueError`` for an invalid digest and ``LookupError`` for
     an unknown run. Status and statistics are computed before the first write, from the items as
-    the stages left them; a run failed by its items gets :data:`ALL_FAILED_ERROR` as its error.
+    the stages left them; a run failed by its sources or items gets
+    :data:`ALL_SOURCES_FAILED_ERROR` or :data:`ALL_FAILED_ERROR` as its error.
     """
     runs = RunRepository(session)
     run = runs.get(result.run_id)
@@ -224,7 +262,7 @@ def persist_run(session: Session, result: RunResult) -> Run:
     status, stats = decide_status(result), build_stats(result)
     if result.budget.exceeded:
         ItemRepository(session).release(unprocessed(result))
-    if result.digest is not None and result.digest.item_ids:
+    if result.digest is not None and (result.digest.item_ids or result.store_empty_digest):
         DigestRepository(session).add(
             result.job_id,
             result.digest.title,
@@ -232,14 +270,36 @@ def persist_run(session: Session, result: RunResult) -> Run:
             list(result.digest.item_ids),
             run_id=result.run_id,
         )
-    error = ALL_FAILED_ERROR if status == RunStatus.FAILED else None
-    return runs.finish(run, status, stats=stats, error=error)
+    return runs.finish(run, status, stats=stats, error=failure_error(result))
+
+
+MAX_ERROR_PATHS: Final = 5  # field paths named in the error of an invalid stored job config
+
+
+def _invalid_fields(error: ValidationError) -> str:
+    """``"ValidationError: invalid fields <path>[, <path>…]"``: paths only, never values.
+
+    pydantic's messages quote the offending input, so only the dotted ``loc`` of each error is
+    used (repeats dropped, at most :data:`MAX_ERROR_PATHS`, then ``", …"``).
+    """
+    paths: list[str] = []
+    for detail in error.errors(include_input=False, include_url=False):
+        path = ".".join(str(part) for part in detail["loc"]) or "(root)"
+        if path not in paths:
+            paths.append(path)
+    text = ", ".join(paths[:MAX_ERROR_PATHS])
+    if len(paths) > MAX_ERROR_PATHS:
+        text += ", …"
+    return f"{type(error).__name__}: invalid fields {text or '(root)'}"
 
 
 def _sanitized_error(error: BaseException) -> str:
-    """Error text for ``runs.error``: LLM errors by their facts, anything else by class only."""
+    """Error text for ``runs.error``: LLM errors by their facts, a config ``ValidationError`` by
+    its field paths, anything else by class only."""
     if isinstance(error, LLMError):
         return failure_message(error)
+    if isinstance(error, ValidationError):
+        return _invalid_fields(error)
     return f"{type(error).__name__}: run failed"
 
 
@@ -250,12 +310,16 @@ def record_failed_run(
     run_id: int,
     budget: BudgetTracker,
     error: BaseException,
+    replay_usage: bool = True,
 ) -> RunStatus:
     """Mark the run ``failed`` in a new transaction, keep its LLM usage and return its status.
 
     Re-inserts every ledger entry as an ``llm_usage`` row of the run (the caller's work session
     was rolled back, taking its rows along), then finishes the run with the ledger statistics
     (stage counts are omitted, the results were discarded) and a sanitized error.
+
+    ``replay_usage=False`` is for a dry run: no usage row is written and the stats carry
+    ``"dry_run": True``, so nothing but the run row remains.
 
     A run that is no longer ``running`` is left as it is and its status returned: a save whose
     commit failed after the database applied it has already stored the run, its usage rows and
@@ -278,7 +342,7 @@ def record_failed_run(
                 )
                 return RunStatus(run.status)
             usage = UsageRepository(session)
-            for entry in budget.ledger:
+            for entry in budget.ledger if replay_usage else ():
                 usage.add(
                     job_id,
                     entry.provider,
@@ -293,7 +357,11 @@ def record_failed_run(
             runs.finish(
                 run,
                 RunStatus.FAILED,
-                stats={"version": STATS_VERSION, **_ledger_stats(budget)},
+                stats={
+                    "version": STATS_VERSION,
+                    **_ledger_stats(budget),
+                    **({} if replay_usage else {"dry_run": True}),
+                },
                 error=message,
             )
     except Exception as recovery_error:
@@ -306,7 +374,7 @@ def record_failed_run(
 
 
 def _recover(
-    factory: sessionmaker[Session], session: Session, result: RunResult, error: BaseException
+    factory: sessionmaker[Session], session: Session, result: RunDraft, error: BaseException
 ) -> RunStatus:
     """Roll the work session back, record the failed run and return the run's stored status.
 
@@ -322,11 +390,16 @@ def _recover(
         logger.error("run.rollback_failed", extra={"error": type(rollback_error).__name__, **ids})
     logger.error("run.persist_failed", extra={"error": type(error).__name__, **ids})
     return record_failed_run(
-        factory, job_id=result.job_id, run_id=result.run_id, budget=result.budget, error=error
+        factory,
+        job_id=result.job_id,
+        run_id=result.run_id,
+        budget=result.budget,
+        error=error,
+        replay_usage=not result.dry_run,
     )
 
 
-def finalize_run(factory: sessionmaker[Session], session: Session, result: RunResult) -> RunStatus:
+def finalize_run(factory: sessionmaker[Session], session: Session, result: RunDraft) -> RunStatus:
     """Save the run in ``session`` with one commit and return its final status.
 
     On success logs ``run.persisted`` (status and every statistic as fields). If the save fails
@@ -345,6 +418,36 @@ def finalize_run(factory: sessionmaker[Session], session: Session, result: RunRe
         return _recover(factory, session, result, error)
     except BaseException as error:
         _recover(factory, session, result, error)
+        raise
+    ids = {"job_id": result.job_id, "db_run_id": result.run_id}
+    logger.info("run.persisted", extra={"status": status.value, **ids, **stats})
+    return status
+
+
+def finish_dry_run(factory: sessionmaker[Session], session: Session, result: RunDraft) -> RunStatus:
+    """Finish a dry run: keep the run row with its statistics and discard everything else.
+
+    The status, statistics and error are computed first, while the items are still readable;
+    then the work session is rolled back (item inserts, attempts, statuses, usage rows and the
+    digest all vanish) and the run is finished in a new transaction with ``stats["dry_run"]``
+    set. If that fails, the run is recorded failed like a failed save, without replaying usage.
+    Logs ``run.persisted`` with ``dry_run=True``; returns the final status.
+    """
+    try:
+        _validate_digest(result)
+        status, stats = decide_status(result), {**build_stats(result), "dry_run": True}
+        error = failure_error(result)
+        session.rollback()
+        with session_scope(factory) as fresh:
+            runs = RunRepository(fresh)
+            run = runs.get(result.run_id)
+            if run is None:
+                raise LookupError(f"run {result.run_id} not found")
+            runs.finish(run, status, stats=stats, error=error)
+    except Exception as err:
+        return _recover(factory, session, result, err)
+    except BaseException as err:
+        _recover(factory, session, result, err)
         raise
     ids = {"job_id": result.job_id, "db_run_id": result.run_id}
     logger.info("run.persisted", extra={"status": status.value, **ids, **stats})
