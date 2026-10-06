@@ -23,6 +23,7 @@ from invio.config.job import loads_yaml
 from invio.db.models import Item, LlmUsage
 from invio.db.repositories import UsageRepository
 from invio.domain import ItemStatus, RunStatus
+from invio.graph.budget import BudgetTracker
 from invio.graph.nodes.llm_calls import CallContext, failure_message
 from invio.graph.nodes.summarize_item import ItemSummary
 from invio.graph.nodes.synthesize import (
@@ -131,6 +132,7 @@ def _context(db_session: Session, fake: FakeProvider, *, language: str = "en") -
         smart_model="smart-model",
         registry=_REGISTRY,
         usage=UsageRepository(db_session),
+        budget=BudgetTracker(1_000_000),
     )
     satisfies_protocol: CallContext = ctx  # checked by mypy; the protocol is what call_text needs
     assert satisfies_protocol is ctx

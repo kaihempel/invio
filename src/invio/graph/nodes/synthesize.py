@@ -31,6 +31,7 @@ from pydantic import ValidationError
 from invio.db.models import Item
 from invio.db.repositories import UsageRepository
 from invio.domain import ItemStatus, RunStatus
+from invio.graph.budget import BudgetTracker
 from invio.graph.nodes.llm_calls import PER_ITEM_ERRORS, call_text, failure_message
 from invio.graph.nodes.prompting import (
     document_message,
@@ -92,7 +93,7 @@ class DigestEntry:
 
 @dataclass(frozen=True, kw_only=True, slots=True)
 class SynthesisContext:
-    """Everything synthesis needs: job settings, provider, model, usage repository.
+    """Everything synthesis needs: job settings, provider, model, usage repository, budget.
 
     Satisfies :class:`~invio.graph.nodes.llm_calls.CallContext`.
     """
@@ -106,6 +107,7 @@ class SynthesisContext:
     smart_model: str
     registry: ModelRegistry
     usage: UsageRepository
+    budget: BudgetTracker
 
 
 @dataclass(frozen=True, slots=True)

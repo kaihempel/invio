@@ -3,10 +3,8 @@
 from dataclasses import dataclass
 from decimal import Decimal
 
-from dataclasses import dataclass
-from decimal import Decimal
-
 import pytest
+from pydantic import BaseModel, ConfigDict
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -16,10 +14,11 @@ from invio.graph.budget import BudgetExceeded, BudgetTracker
 from invio.graph.nodes.llm_calls import (
     INVALID_OUTPUT_MESSAGE,
     PER_ITEM_ERRORS,
+    CallContext,
     call_structured,
+    call_text,
     failure_message,
 )
-from pydantic import BaseModel, ConfigDict
 from invio.graph.nodes.prompting import MAX_TITLE_CHARS, document_message
 from invio.llm.base import (
     LLMInvalidOutputError,
@@ -84,13 +83,14 @@ def test_document_message_neutralises_and_caps_the_title() -> None:
     assert len(inner_title) == MAX_TITLE_CHARS
 
 
+# --- shared fixtures -----------------------------------------------------------------------
+
+
 class _Answer(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     value: int
 
-
-# --- call_text -----------------------------------------------------------------------------
 
 _REGISTRY = ModelRegistry(
     {"fast-model": ModelInfo("fast-model", "mistral", Decimal("1"), Decimal("2"), 32000)}
@@ -110,15 +110,19 @@ class _Ctx:
     budget: BudgetTracker
 
 
-def _ctx(db_session: Session, fake: FakeProvider) -> CallContext:
+# --- call_text -----------------------------------------------------------------------------
+
+
+def _text_ctx(db_session: Session, fake: FakeProvider) -> CallContext:
     job = make_job(db_session)
-    return _Ctx(job.id, None, fake, "mistral", _REGISTRY, UsageRepository(db_session))
+    usage = UsageRepository(db_session)
+    return _Ctx(job.id, None, fake, "mistral", _REGISTRY, usage, BudgetTracker(1_000_000))
 
 
 @pytest.mark.db
 async def test_call_text_returns_the_text_and_records_one_usage_row(db_session: Session) -> None:
     fake = FakeProvider([FakeReply("text", Usage(7, 3))])
-    ctx = _ctx(db_session, fake)
+    ctx = _text_ctx(db_session, fake)
     answer = await call_text(
         ctx, model="m", purpose="synthesize", system="sys", user="usr", max_tokens=123
     )
@@ -139,10 +143,13 @@ async def test_call_text_returns_the_text_and_records_one_usage_row(db_session: 
 @pytest.mark.db
 async def test_call_text_error_propagates_without_usage(db_session: Session) -> None:
     fake = FakeProvider([LLMUnavailableError("down")])
-    ctx = _ctx(db_session, fake)
+    ctx = _text_ctx(db_session, fake)
     with pytest.raises(LLMUnavailableError):
         await call_text(ctx, model="m", purpose="synthesize", system="s", user="u", max_tokens=5)
     assert list(db_session.scalars(select(LlmUsage))) == []
+
+
+# --- call_structured: budget check and ledger ----------------------------------------------
 
 
 def _ctx(
