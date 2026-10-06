@@ -29,9 +29,14 @@ from invio.config.job import SearchConfig
 from invio.db.models import Item
 from invio.db.repositories import ItemRepository, UsageRepository
 from invio.domain import ItemStatus
-from invio.graph.budget import BudgetExceeded, BudgetTracker
+from invio.graph.budget import BudgetTracker
 from invio.graph.nodes.keyword_filter import item_text
-from invio.graph.nodes.llm_calls import PER_ITEM_ERRORS, call_structured, failure_message
+from invio.graph.nodes.llm_calls import (
+    PER_ITEM_ERRORS,
+    call_structured,
+    failure_message,
+    run_until_exceeded,
+)
 from invio.graph.nodes.prompting import document_message, neutralise
 from invio.llm.base import LLMProvider
 from invio.llm.registry import ModelRegistry
@@ -185,16 +190,6 @@ async def score_items(items: Iterable[Item], ctx: ScoringContext) -> list[Releva
     progress and the rest are left unchanged. ``budget.exceeded`` is logged once, by the stage
     that first hits the limit (not again when the budget was already exceeded before this stage).
     """
-    already_exceeded = ctx.budget.exceeded
-    outcomes: list[RelevanceOutcome] = []
-    for item in items:
-        try:
-            outcomes.append(await score_item(item, ctx))
-        except BudgetExceeded as stop:
-            if not already_exceeded:
-                logger.warning(
-                    "budget.exceeded",
-                    extra={"stage": "relevance", "used": stop.used, "limit": stop.limit},
-                )
-            break
-    return outcomes
+    return await run_until_exceeded(
+        items, lambda item: score_item(item, ctx), ctx, stage="relevance"
+    )

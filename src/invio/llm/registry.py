@@ -16,10 +16,10 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, ValidationError, field_validator
 
 import invio.llm
+from invio.domain import COST_PRECISION
 from invio.llm.base import LLMConfigError, ModelRegistryError, Usage
 
 _PRICE_UNIT = Decimal(1_000_000)
-_COST_PRECISION = Decimal("0.000001")
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,7 +102,7 @@ class ModelRegistry:
             usage.input_tokens * info.input_price_per_mtok
             + usage.output_tokens * info.output_price_per_mtok
         ) / _PRICE_UNIT
-        return total.quantize(_COST_PRECISION, rounding=ROUND_HALF_UP)
+        return total.quantize(COST_PRECISION, rounding=ROUND_HALF_UP)
 
 
 def _parse_file(path: Path) -> _RegistryFile:

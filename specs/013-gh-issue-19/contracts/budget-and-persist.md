@@ -97,7 +97,7 @@ def finalize_run(factory: sessionmaker[Session], session: Session, result: RunRe
 def record_failed_run(
     factory: sessionmaker[Session], *, job_id: int, run_id: int,
     budget: BudgetTracker, error: BaseException,
-) -> None
+) -> RunStatus
 ```
 
 Preconditions for callers (#21): the run row and the deduplication take (`mark_taken`) are
@@ -107,26 +107,34 @@ with `record_failed_run` (FR-011).
 Behaviour:
 
 - `persist_run`: when `budget.exceeded`, releases `unprocessed(result)`; adds the digest if
-  `digest` is not `None` and has at least one item id (ids must be in `taken`, else
-  `ValueError`; repeated ids are a `ValueError` too; an unknown run is a `LookupError`);
-  finishes the run with `decide_status(result)` and `build_stats(result)`. Flush only.
-- `finalize_run`: `persist_run` + `session.commit()`; logs `run.persisted` (`status` + stats fields). On any exception:
+  `digest` is not `None` and has at least one item id (ids must be in `taken` and summarized
+  by the run, else `ValueError`; repeated ids are a `ValueError` too; an unknown run is a
+  `LookupError`); finishes the run with `decide_status(result)` and `build_stats(result)`, and
+  with `runs.error = ALL_FAILED_ERROR` when that status is `failed`. Flush only.
+- `finalize_run`: `persist_run` + `session.commit()`; logs `run.persisted` (`status`, `job_id`,
+  `db_run_id` + stats fields). On any exception:
   `session.rollback()` (a failing rollback is logged as `run.rollback_failed`, recovery goes on),
-  log `run.persist_failed` (class only), `record_failed_run(...)`, return
-  `RunStatus.FAILED`. Never re-raises the error of the save itself; an error of the recovery
+  log `run.persist_failed` (class, `job_id`, `db_run_id`), return `record_failed_run(...)`
+  (`RunStatus.FAILED`, or the stored status if the commit was applied before it failed). Never re-raises the error of the save itself; an error of the recovery
   transaction (`record_failed_run`) *is* re-raised; `KeyboardInterrupt`/`SystemExit` are
   re-raised after recovery. Status and stats are computed before any write.
-- `record_failed_run`: in a new `session_scope`: re-insert every ledger entry as a usage row of
+- `record_failed_run`: in a new `session_scope`: if the run is no longer `running` (a commit
+  applied before it failed), log `run.already_finished` and return its status without any
+  write; otherwise re-insert every ledger entry as a usage row of
   the run, set the run `failed` with `finished_at`, stats from the ledger only (stage counts
   omitted, `budget_exceeded` from the tracker) and a sanitized error: `failure_message(err)` for an `LLMError`, otherwise
   `"<ErrorClass>: run failed"` (research R8). If this also
-  fails, log `run.record_failed_error` with the error class and re-raise (the CLI exits
-  non-zero).
+  fails, log `run.record_failed_error` with the error class, `job_id` and `db_run_id` and
+  re-raise (the CLI exits non-zero). Returns `RunStatus.FAILED`.
 
 Further preconditions for callers (#21): do not commit `llm_usage` rows before `finalize_run`
 (`record_failed_run` replays the whole ledger and assumes the work session's rows were rolled
 back), and commit the run start and `mark_taken` before the LLM stages.
 
 `budget_exceeded` is set only by a failed `check()`: the last per-item call and the digest call
-can push `tokens` above `budget_limit` while it stays `false`. `budget.exceeded` is logged once,
-by the stage that first hits the limit.
+can push `tokens` above `budget_limit` while it stays `false` (`over_budget` is `true` then).
+`budget.exceeded` is logged once (`stage`, `used`, `limit`, `job_id`, `db_run_id`), by the stage
+that first hits the limit; both stages share the loop `llm_calls.run_until_exceeded`.
+
+Log events carry the database ids as `job_id` and `db_run_id`: `run_id` is a reserved key of
+the JSON formatter (the `invio.log` run context id).

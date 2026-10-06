@@ -467,6 +467,19 @@ def test_released_items_are_pending_again(db_session: Session) -> None:
     assert repo.list_pending(job.id, run_id=other.id, max_attempts=3, limit=10) == [item]
 
 
+def test_release_clears_the_relevance_of_a_rated_item(db_session: Session) -> None:
+    job = make_job(db_session)
+    run = make_run(db_session, job)
+    rated = make_item(db_session, job, "https://example.com/1", status=ItemStatus.RELEVANT)
+    retry = make_item(db_session, job, "https://example.com/2", status=ItemStatus.FAILED)
+    rated.relevance = retry.relevance = Decimal("0.80")
+    repo = ItemRepository(db_session)
+    repo.mark_taken([rated, retry], run.id)
+    repo.release([rated, retry])
+    assert (rated.status, rated.relevance) == (ItemStatus.NEW, None)
+    assert (retry.status, retry.relevance) == (ItemStatus.FAILED, Decimal("0.80"))
+
+
 def test_item_mark_status_sets_status(db_session: Session) -> None:
     job = make_job(db_session)
     one = make_item(db_session, job, "https://example.com/1")

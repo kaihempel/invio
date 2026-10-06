@@ -45,6 +45,7 @@ from invio.graph.nodes.summarize_item import SummaryOutcome
 from invio.llm.base import LLMError
 
 __all__ = [
+    "ALL_FAILED_ERROR",
     "STATS_VERSION",
     "DigestDraft",
     "RunResult",
@@ -60,6 +61,7 @@ __all__ = [
 logger = logging.getLogger("invio.graph")
 
 STATS_VERSION: Final = 1  # layout of runs.stats, see contracts/run-stats.md
+ALL_FAILED_ERROR: Final = "all attempted items failed"  # runs.error of a run failed by its items
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -122,7 +124,11 @@ def unprocessed(result: RunResult) -> list[Item]:
 
 
 def _ledger_stats(budget: BudgetTracker) -> dict[str, Any]:
-    """The token, cost and budget figures; with ``version`` the layout of a recovered run."""
+    """The token, cost and budget figures; with ``version`` the layout of a recovered run.
+
+    ``budget_exceeded`` says the budget stopped per-item calls; ``over_budget`` says the tokens
+    ended above the limit, which the last per-item call or the digest call can cause on its own.
+    """
     return {
         "llm_calls": budget.calls,
         "input_tokens": budget.input_tokens,
@@ -132,6 +138,7 @@ def _ledger_stats(budget: BudgetTracker) -> dict[str, Any]:
         "cost_complete": budget.cost_complete,
         "budget_limit": budget.limit,
         "budget_exceeded": budget.exceeded,
+        "over_budget": budget.used > budget.limit,
     }
 
 
@@ -181,10 +188,10 @@ def decide_status(result: RunResult) -> RunStatus:
 
 
 def _validate_digest(result: RunResult) -> None:
-    """Raise ``ValueError`` unless the digest's item ids are taken by the run, each once.
+    """Raise ``ValueError`` unless the digest's item ids are taken and summarized by the run, once.
 
-    After a budget stop the ids must also exclude the unprocessed items: they are released and
-    will be processed again, so a digest must not reference them yet.
+    A digest uses the items the run processed successfully (FR-005): not a failed or irrelevant
+    item, and not an item a budget stop left unprocessed (it is released and processed again).
     """
     if result.digest is None:
         return
@@ -195,10 +202,10 @@ def _validate_digest(result: RunResult) -> None:
     missing = sorted(set(ids) - taken)
     if missing:
         raise ValueError(f"digest item_ids not taken by the run: {missing}")
-    if result.budget.exceeded:
-        released = sorted(set(ids) & {item.id for item in unprocessed(result)})
-        if released:
-            raise ValueError(f"digest item_ids not processed by the run: {released}")
+    summarized = {o.item_id for o in result.summaries if o.status == ItemStatus.SUMMARIZED}
+    unsummarized = sorted(set(ids) - summarized)
+    if unsummarized:
+        raise ValueError(f"digest item_ids not summarized by the run: {unsummarized}")
 
 
 def persist_run(session: Session, result: RunResult) -> Run:
@@ -207,7 +214,7 @@ def persist_run(session: Session, result: RunResult) -> Run:
     When the budget was exceeded, the unprocessed items are released first (attempt undone, back
     to ``new``, research R4). Raises ``ValueError`` for an invalid digest and ``LookupError`` for
     an unknown run. Status and statistics are computed before the first write, from the items as
-    the stages left them.
+    the stages left them; a run failed by its items gets :data:`ALL_FAILED_ERROR` as its error.
     """
     runs = RunRepository(session)
     run = runs.get(result.run_id)
@@ -225,7 +232,8 @@ def persist_run(session: Session, result: RunResult) -> Run:
             list(result.digest.item_ids),
             run_id=result.run_id,
         )
-    return runs.finish(run, status, stats=stats)
+    error = ALL_FAILED_ERROR if status == RunStatus.FAILED else None
+    return runs.finish(run, status, stats=stats, error=error)
 
 
 def _sanitized_error(error: BaseException) -> str:
@@ -242,12 +250,16 @@ def record_failed_run(
     run_id: int,
     budget: BudgetTracker,
     error: BaseException,
-) -> None:
-    """Mark the run ``failed`` in a new transaction and keep its LLM usage.
+) -> RunStatus:
+    """Mark the run ``failed`` in a new transaction, keep its LLM usage and return its status.
 
     Re-inserts every ledger entry as an ``llm_usage`` row of the run (the caller's work session
     was rolled back, taking its rows along), then finishes the run with the ledger statistics
     (stage counts are omitted, the results were discarded) and a sanitized error.
+
+    A run that is no longer ``running`` is left as it is and its status returned: a save whose
+    commit failed after the database applied it has already stored the run, its usage rows and
+    its final status, so a replay would duplicate the rows and overwrite the real status.
 
     If this transaction fails, ``run.record_failed_error`` is logged with the error class only
     and the error is re-raised: the run stays ``running`` and the caller must exit non-zero.
@@ -255,9 +267,16 @@ def record_failed_run(
     message = _sanitized_error(error)
     try:
         with session_scope(factory) as session:
-            run = RunRepository(session).get(run_id)
+            runs = RunRepository(session)
+            run = runs.get(run_id)
             if run is None:
                 raise LookupError(f"run {run_id} not found")
+            if run.status != RunStatus.RUNNING:
+                logger.warning(
+                    "run.already_finished",
+                    extra={"status": run.status, "job_id": job_id, "db_run_id": run_id},
+                )
+                return RunStatus(run.status)
             usage = UsageRepository(session)
             for entry in budget.ledger:
                 usage.add(
@@ -271,32 +290,38 @@ def record_failed_run(
                     cost_usd=entry.cost_usd,
                     created_at=entry.created_at,
                 )
-            RunRepository(session).finish(
+            runs.finish(
                 run,
                 RunStatus.FAILED,
                 stats={"version": STATS_VERSION, **_ledger_stats(budget)},
                 error=message,
             )
     except Exception as recovery_error:
-        logger.error("run.record_failed_error", extra={"error": type(recovery_error).__name__})
+        logger.error(
+            "run.record_failed_error",
+            extra={"error": type(recovery_error).__name__, "job_id": job_id, "db_run_id": run_id},
+        )
         raise
+    return RunStatus.FAILED
 
 
 def _recover(
     factory: sessionmaker[Session], session: Session, result: RunResult, error: BaseException
-) -> None:
-    """Roll the work session back and record the failed run; only ints and classes are logged.
+) -> RunStatus:
+    """Roll the work session back, record the failed run and return the run's stored status.
+
+    Only ints and classes are logged.
 
     The ORM objects of the session are expired or detached after the rollback, so nothing of
     them is read here. A rollback that itself fails is logged and the recovery goes on.
     """
-    error_class = type(error).__name__
+    ids = {"job_id": result.job_id, "db_run_id": result.run_id}
     try:
         session.rollback()
     except Exception as rollback_error:
-        logger.error("run.rollback_failed", extra={"error": type(rollback_error).__name__})
-    logger.error("run.persist_failed", extra={"error": error_class})
-    record_failed_run(
+        logger.error("run.rollback_failed", extra={"error": type(rollback_error).__name__, **ids})
+    logger.error("run.persist_failed", extra={"error": type(error).__name__, **ids})
+    return record_failed_run(
         factory, job_id=result.job_id, run_id=result.run_id, budget=result.budget, error=error
     )
 
@@ -308,18 +333,19 @@ def finalize_run(factory: sessionmaker[Session], session: Session, result: RunRe
     the work session is rolled back and :func:`record_failed_run` runs; the save error itself is
     not re-raised and the status is ``failed``. An error of that recovery transaction *is*
     re-raised (see :func:`record_failed_run`), as is ``KeyboardInterrupt`` or ``SystemExit``
-    after the recovery. A commit that fails after the database applied it (lost connection)
-    leads to duplicate usage rows from the replay; that case is accepted.
+    after the recovery. A commit that fails after the database applied it (lost connection) is
+    detected by the recovery (the run is no longer ``running``): nothing is replayed and the
+    stored status is returned.
     """
     try:
         run = persist_run(session, result)
         status, stats = RunStatus(run.status), dict(run.stats or {})  # read before the commit
         session.commit()
     except Exception as error:
-        _recover(factory, session, result, error)
-        return RunStatus.FAILED
+        return _recover(factory, session, result, error)
     except BaseException as error:
         _recover(factory, session, result, error)
         raise
-    logger.info("run.persisted", extra={"status": status.value, **stats})
+    ids = {"job_id": result.job_id, "db_run_id": result.run_id}
+    logger.info("run.persisted", extra={"status": status.value, **ids, **stats})
     return status

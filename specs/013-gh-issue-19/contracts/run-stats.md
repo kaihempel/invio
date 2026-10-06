@@ -20,7 +20,8 @@ run output) MUST check `version` and ignore unknown keys.
   "estimated_cost_usd": "0.010305",
   "cost_complete": true,
   "budget_limit": 200000,
-  "budget_exceeded": false
+  "budget_exceeded": false,
+  "over_budget": false
 }
 ```
 
@@ -41,9 +42,10 @@ run output) MUST check `version` and ignore unknown keys.
 | `cost_complete` | bool | `false` if any call used a model without a registered price |
 | `budget_limit` | int | the job's `limits.max_llm_tokens_per_run` |
 | `budget_exceeded` | bool | whether the budget stopped per-item calls |
+| `over_budget` | bool | `tokens > budget_limit` (also true when only the last call overshot) |
 
 Recovery layout (run `failed` by the recovery step): only `version`, `llm_calls`, the token keys,
-the cost keys, `budget_limit` and `budget_exceeded` are present; stage counts are omitted because
+the cost keys, `budget_limit`, `budget_exceeded` and `over_budget` are present; stage counts are omitted because
 the run's results were discarded.
 
 Invariants (tested):

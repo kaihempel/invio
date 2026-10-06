@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 
 from invio.db.models import Digest, Item, Job, LlmUsage, Notification, Run
 from invio.db.types import utcnow
-from invio.domain import Candidate, ItemStatus, NotificationStatus, RunStatus
+from invio.domain import COST_PRECISION, Candidate, ItemStatus, NotificationStatus, RunStatus
 
 __all__ = [
     "DigestRepository",
@@ -313,14 +313,16 @@ class ItemRepository:
 
         Undoes the take: ``attempts`` goes down by one (never below 0) and ``run_id`` is cleared.
         The status becomes ``new`` so ``list_pending`` selects the item again (an item already
-        rated ``relevant`` would otherwise never be picked up); an item that is still ``failed``
-        (a retry taken but not touched) stays ``failed`` (research R4).
+        rated ``relevant`` would otherwise never be picked up) and its ``relevance`` is cleared,
+        since it will be rated again; an item that is still ``failed`` (a retry taken but not
+        touched) stays ``failed`` (research R4).
         """
         for item in items:
             item.attempts = max(item.attempts - 1, 0)
             item.run_id = None
             if item.status != ItemStatus.FAILED:
                 item.status = ItemStatus.NEW
+                item.relevance = None
         self._session.flush()
 
     def mark_status(self, items: Iterable[Item], status: ItemStatus) -> None:
@@ -601,5 +603,5 @@ class UsageRepository:
         return UsageTotals(
             input_tokens=int(tokens_in),
             output_tokens=int(tokens_out),
-            cost_usd=Decimal(str(cost)).quantize(Decimal("0.000001")),
+            cost_usd=Decimal(str(cost)).quantize(COST_PRECISION),
         )

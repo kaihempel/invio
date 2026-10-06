@@ -31,9 +31,14 @@ from invio.config.languages import language_name
 from invio.db.models import Item
 from invio.db.repositories import ItemRepository, UsageRepository
 from invio.domain import ItemStatus
-from invio.graph.budget import BudgetExceeded, BudgetTracker
+from invio.graph.budget import BudgetTracker
 from invio.graph.nodes.keyword_filter import item_text
-from invio.graph.nodes.llm_calls import PER_ITEM_ERRORS, call_structured, failure_message
+from invio.graph.nodes.llm_calls import (
+    PER_ITEM_ERRORS,
+    call_structured,
+    failure_message,
+    run_until_exceeded,
+)
 from invio.graph.nodes.prompting import document_message, neutralise
 from invio.llm.base import LLMProvider
 from invio.llm.registry import ModelRegistry
@@ -564,16 +569,6 @@ async def summarize_items(items: Iterable[Item], ctx: SummaryContext) -> list[Su
     and the rest is not started. ``budget.exceeded`` is logged once, by the stage that first
     hits the limit.
     """
-    already_exceeded = ctx.budget.exceeded
-    outcomes: list[SummaryOutcome] = []
-    for item in items:
-        try:
-            outcomes.append(await summarize_item(item, ctx))
-        except BudgetExceeded as stop:
-            if not already_exceeded:
-                logger.warning(
-                    "budget.exceeded",
-                    extra={"stage": "summarize", "used": stop.used, "limit": stop.limit},
-                )
-            break
-    return outcomes
+    return await run_until_exceeded(
+        items, lambda item: summarize_item(item, ctx), ctx, stage="summarize"
+    )

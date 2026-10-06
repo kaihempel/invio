@@ -9,16 +9,19 @@ Every call is also recorded on the run's :class:`~invio.graph.budget.BudgetTrack
 equals the rows written. A per-item call first checks the budget and raises ``BudgetExceeded``
 when it is used up (no provider call, no row); the digest call passes ``per_item=False`` so it is
 counted but never blocked. ``BudgetExceeded`` is not an ``LLMError`` and not in
-``PER_ITEM_ERRORS``: it never fails an item, only the batch loops catch it.
+``PER_ITEM_ERRORS``: it never fails an item, only :func:`run_until_exceeded` (the batch loop of
+every per-item stage) catches it.
 """
 
+import logging
+from collections.abc import Awaitable, Callable, Iterable
 from typing import Final, Protocol
 
 from pydantic import BaseModel
 
 from invio.db.repositories import UsageRepository
 from invio.db.types import utcnow
-from invio.graph.budget import BudgetTracker, UsageEntry
+from invio.graph.budget import BudgetExceeded, BudgetTracker, UsageEntry
 from invio.llm.base import (
     LLMError,
     LLMInvalidOutputError,
@@ -36,7 +39,10 @@ __all__ = [
     "CallContext",
     "call_structured",
     "failure_message",
+    "run_until_exceeded",
 ]
+
+logger = logging.getLogger("invio.graph")
 
 # LLM failures that fail one item; credential and configuration errors propagate instead.
 PER_ITEM_ERRORS: Final = (
@@ -144,3 +150,33 @@ def failure_message(err: Exception) -> str:
     if isinstance(err, LLMRateLimitError) and err.retry_after is not None:
         facts.append(f"retry after {err.retry_after:g} s")
     return f"{name}: call failed ({', '.join(facts)})"
+
+
+async def run_until_exceeded[I, O](
+    items: Iterable[I], step: Callable[[I], Awaitable[O]], ctx: CallContext, *, stage: str
+) -> list[O]:
+    """Run ``step`` on ``items`` one after the other and return the results, in input order.
+
+    Stops at the first ``BudgetExceeded`` and returns the results completed so far; the item in
+    progress and the rest are left unchanged. ``budget.exceeded`` is logged once, by the stage
+    that first hits the limit (not again when the budget was already exceeded before).
+    """
+    already_exceeded = ctx.budget.exceeded
+    results: list[O] = []
+    for item in items:
+        try:
+            results.append(await step(item))
+        except BudgetExceeded as stop:
+            if not already_exceeded:
+                logger.warning(
+                    "budget.exceeded",
+                    extra={
+                        "stage": stage,
+                        "used": stop.used,
+                        "limit": stop.limit,
+                        "job_id": ctx.job_id,
+                        "db_run_id": ctx.run_id,
+                    },
+                )
+            break
+    return results

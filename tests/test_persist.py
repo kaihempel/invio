@@ -33,6 +33,7 @@ from invio.domain import ItemStatus, RunStatus
 from invio.graph.budget import BudgetExceeded, BudgetTracker, UsageEntry
 from invio.graph.nodes.llm_calls import call_structured, failure_message
 from invio.graph.nodes.persist import (
+    ALL_FAILED_ERROR,
     DigestDraft,
     RunResult,
     StageCounts,
@@ -279,6 +280,7 @@ async def test_finalize_run_commits_items_digest_usage_and_run(
 
     (event,) = _events(caplog, "run.persisted")
     assert event.status == status.value
+    assert (event.job_id, event.db_run_id) == (seed.job_id, seed.run_id)
     assert event.tokens == 720
     assert event.estimated_cost_usd == "0.000840"
 
@@ -324,9 +326,14 @@ async def test_failed_save_rolls_everything_back_and_keeps_usage(
         "cost_complete": True,
         "budget_limit": 1_000_000,
         "budget_exceeded": False,
+        "over_budget": False,
     }
     (event,) = _events(caplog, "run.persist_failed")
-    assert event.error == "IntegrityError"
+    assert (event.error, event.job_id, event.db_run_id) == (
+        "IntegrityError",
+        seed.job_id,
+        seed.run_id,
+    )
     assert _events(caplog, "run.persisted") == []
 
 
@@ -342,6 +349,63 @@ async def test_failed_commit_is_recovered_like_a_failed_write(
     run = _run_row(factory, seed.run_id)
     assert (run.status, run.error) == (RunStatus.FAILED, "OperationalError: run failed")
     assert len(_usage_rows(factory, seed.run_id)) == 4
+
+
+async def test_a_commit_applied_before_it_failed_is_not_replayed(
+    db_engine: Engine,
+    clean_jobs: None,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Lost connection after the database applied the commit: no duplicate rows, status kept."""
+    factory = session_factory(db_engine)
+    seed = _seed(factory)
+    session, result = await _run_stages(factory, seed)
+    real_commit = session.commit
+
+    def _commit_then_fail() -> None:
+        real_commit()
+        raise _injected_error(OperationalError)
+
+    monkeypatch.setattr(session, "commit", _commit_then_fail)
+    with caplog.at_level(logging.INFO, logger="invio.graph"):
+        status = finalize_run(factory, session, result)
+    session.close()
+    assert status == RunStatus.SUCCEEDED
+    run = _run_row(factory, seed.run_id)
+    assert (run.status, run.error) == (RunStatus.SUCCEEDED, None)
+    assert run.stats is not None
+    assert "found" in run.stats  # the saved layout, not the recovery layout
+    assert len(_usage_rows(factory, seed.run_id)) == 4
+    assert len(_digests(factory)) == 1
+    (event,) = _events(caplog, "run.already_finished")
+    assert (event.status, event.job_id, event.db_run_id) == (
+        RunStatus.SUCCEEDED,
+        seed.job_id,
+        seed.run_id,
+    )
+
+
+def test_record_failed_run_leaves_a_finished_run_alone(db_engine: Engine, clean_jobs: None) -> None:
+    factory = session_factory(db_engine)
+    seed = _seed(factory, count=1)
+    with session_scope(factory) as session:
+        run = RunRepository(session).get(seed.run_id)
+        assert run is not None
+        RunRepository(session).finish(run, RunStatus.PARTIAL, stats={"version": 1})
+    budget = BudgetTracker(100)
+    budget.record(_entry())
+    status = record_failed_run(
+        factory, job_id=seed.job_id, run_id=seed.run_id, budget=budget, error=RuntimeError("x")
+    )
+    assert status == RunStatus.PARTIAL
+    finished = _run_row(factory, seed.run_id)
+    assert (finished.status, finished.error, finished.stats) == (
+        RunStatus.PARTIAL,
+        None,
+        {"version": 1},
+    )
+    assert _usage_rows(factory, seed.run_id) == []
 
 
 async def test_a_failing_rollback_is_logged_and_recovery_continues(
@@ -435,6 +499,7 @@ def test_record_failed_run_replays_usage_and_marks_the_run_failed(
         "cost_complete": False,
         "budget_limit": 100,
         "budget_exceeded": False,
+        "over_budget": True,
     }
     rows = _usage_rows(factory, seed.run_id)
     assert [(r.purpose, r.input_tokens, r.cost_usd, r.created_at) for r in rows] == [
@@ -505,7 +570,11 @@ def test_a_failing_recovery_is_logged_with_its_class_only_and_re_raised(
             error=RuntimeError("stage broke"),
         )
     (event,) = _events(caplog, "run.record_failed_error")
-    assert event.error == "OperationalError"
+    assert (event.error, event.job_id, event.db_run_id) == (
+        "OperationalError",
+        seed.job_id,
+        seed.run_id,
+    )
     _assert_no_markers(caplog, "")
     monkeypatch.undo()
     run = _run_row(factory, seed.run_id)  # the recovery transaction was rolled back as a whole
@@ -594,9 +663,19 @@ def test_persist_run_stores_no_digest_without_items(
 
 
 def test_persist_run_adds_the_digest_with_the_run_id(db_session: Session) -> None:
-    result = _bare_result(db_session, digest=None)
-    ids = [item.id for item in result.taken]
-    persist_run(db_session, _with(result, DigestDraft(title="T", body="B", item_ids=ids)))
+    base = _bare_result(db_session, digest=None)
+    ids = [item.id for item in base.taken]
+    result = RunResult(
+        job_id=base.job_id,
+        run_id=base.run_id,
+        counts=base.counts,
+        taken=base.taken,
+        relevance=[_rel(item, ItemStatus.RELEVANT) for item in base.taken],
+        summaries=[_sum(item, ItemStatus.SUMMARIZED) for item in base.taken],
+        digest=DigestDraft(title="T", body="B", item_ids=ids),
+        budget=base.budget,
+    )
+    persist_run(db_session, result)
     (digest,) = db_session.scalars(select(Digest)).all()
     assert (digest.run_id, digest.job_id, digest.item_ids) == (result.run_id, result.job_id, ids)
 
@@ -845,6 +924,7 @@ _STATS_KEYS = [
     "cost_complete",
     "budget_limit",
     "budget_exceeded",
+    "over_budget",
 ]
 
 
@@ -915,6 +995,7 @@ def test_build_stats_counts_outcomes_and_ledger_figures(db_session: Session) -> 
         "cost_complete": True,
         "budget_limit": 1_000_000,
         "budget_exceeded": False,
+        "over_budget": False,
     }
 
 
@@ -1010,11 +1091,18 @@ async def test_stored_stats_equal_the_usage_totals_of_the_run(
 def test_digest_calls_after_a_budget_stop_may_overshoot_without_the_flag(
     db_session: Session,
 ) -> None:
-    """``budget_exceeded`` is set by a failed check only: the last call may overshoot."""
+    """``budget_exceeded`` is set by a failed check only; ``over_budget`` shows the overshoot."""
     budget = BudgetTracker(10)
     budget.record(_call_entry("fast-model", 50, 5))  # no check afterwards, like the digest call
     stats = build_stats(_mixed_result(db_session, budget))
     assert (stats["tokens"], stats["budget_limit"], stats["budget_exceeded"]) == (55, 10, False)
+    assert stats["over_budget"] is True
+
+
+def test_a_run_landing_exactly_on_the_limit_is_not_over_budget(db_session: Session) -> None:
+    budget = BudgetTracker(55)
+    budget.record(_call_entry("fast-model", 50, 5))
+    assert build_stats(_mixed_result(db_session, budget))["over_budget"] is False
 
 
 # --- Run status (US4) ----------------------------------------------------------------------
@@ -1098,7 +1186,7 @@ async def test_all_items_failing_is_saved_through_the_normal_path(
     assert _events(caplog, "run.persist_failed") == []
     run = _run_row(factory, seed.run_id)
     assert run.status == RunStatus.FAILED
-    assert run.error is None  # no save error: the items failed, the save worked
+    assert run.error == ALL_FAILED_ERROR  # no save error: the items failed, the save worked
     assert run.stats is not None
     assert (run.stats["found"], run.stats["failed"], run.stats["relevant"]) == (10, 2, 0)
     for item in _item_rows(factory, seed.item_ids):  # the item failures are committed
@@ -1169,7 +1257,7 @@ def test_persist_run_rejects_a_digest_naming_an_unrated_item_after_a_budget_stop
 ) -> None:
     result = _bare_result(db_session, digest=None, budget=_exceeded_budget())
     draft = DigestDraft(title="t", body="b", item_ids=[result.taken[0].id])
-    with pytest.raises(ValueError, match="not processed by the run") as caught:
+    with pytest.raises(ValueError, match="not summarized by the run") as caught:
         persist_run(db_session, _with(result, draft))
     assert str(result.taken[0].id) in str(caught.value)
     assert db_session.scalars(select(Digest)).all() == []
@@ -1190,7 +1278,7 @@ def test_persist_run_rejects_a_digest_naming_a_relevant_unsummarized_item(
         digest=DigestDraft(title="t", body="b", item_ids=[done.id, pending.id]),
         budget=base.budget,
     )
-    with pytest.raises(ValueError, match=rf"not processed by the run: \[{pending.id}\]"):
+    with pytest.raises(ValueError, match=rf"not summarized by the run: \[{pending.id}\]"):
         persist_run(db_session, result)
 
 
@@ -1214,14 +1302,34 @@ def test_persist_run_accepts_processed_items_after_a_budget_stop(db_session: Ses
     assert (pending.status, pending.run_id, pending.attempts) == (ItemStatus.NEW, None, 0)
 
 
-def test_persist_run_without_budget_stop_accepts_a_digest_of_unprocessed_items(
-    db_session: Session,
+@pytest.mark.parametrize(
+    ("rated", "summarized"),
+    [
+        pytest.param(None, None, id="unprocessed"),
+        pytest.param(ItemStatus.SKIPPED_IRRELEVANT, None, id="irrelevant"),
+        pytest.param(ItemStatus.FAILED, None, id="relevance-failed"),
+        pytest.param(ItemStatus.RELEVANT, ItemStatus.FAILED, id="summary-failed"),
+    ],
+)
+def test_persist_run_without_budget_stop_rejects_a_digest_of_unsummarized_items(
+    db_session: Session, rated: ItemStatus | None, summarized: ItemStatus | None
 ) -> None:
-    """The released-item check only applies after a budget stop (nothing is released before)."""
-    result = _bare_result(db_session, digest=None)
-    ids = [item.id for item in result.taken]
-    persist_run(db_session, _with(result, DigestDraft(title="t", body="b", item_ids=ids)))
-    assert len(db_session.scalars(select(Digest)).all()) == 1
+    """A digest uses successfully processed items only (FR-005), with or without a budget stop."""
+    base = _bare_result(db_session, digest=None, item_count=1)
+    (item,) = base.taken
+    result = RunResult(
+        job_id=base.job_id,
+        run_id=base.run_id,
+        counts=base.counts,
+        taken=base.taken,
+        relevance=[_rel(item, rated)] if rated else [],
+        summaries=[_sum(item, summarized)] if summarized else [],
+        digest=DigestDraft(title="t", body="b", item_ids=[item.id]),
+        budget=base.budget,
+    )
+    with pytest.raises(ValueError, match=rf"not summarized by the run: \[{item.id}\]"):
+        persist_run(db_session, result)
+    assert db_session.scalars(select(Digest)).all() == []
 
 
 async def test_finalize_run_turns_a_digest_with_a_released_item_into_a_failed_run(
@@ -1290,6 +1398,7 @@ async def test_scenario_1_three_items_two_in_digest_succeeds(
         "cost_complete": True,
         "budget_limit": 1_000_000,
         "budget_exceeded": False,
+        "over_budget": False,
     }
 
 

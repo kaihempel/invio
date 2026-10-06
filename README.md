@@ -484,12 +484,17 @@ always runs and is counted. Limits and known behaviour:
 
 - The check happens before a call, so the last call and the digest call can push `tokens` above
   `budget_limit`; `budget_exceeded` is only set when a check failed, so it can be `false` while
-  `tokens > budget_limit`.
+  `tokens > budget_limit`. `over_budget` in `runs.stats` shows that case (`tokens > budget_limit`).
 - Released items are rated again by the next run, so their relevance tokens are spent twice.
 - A killed process leaves the run `running` and only the `llm.call` log lines as usage record.
 - The orchestrator (#21) must commit the run start and `mark_taken` before the LLM stages, must
   not commit `llm_usage` rows before `finalize_run` (the recovery replays the whole ledger), and
   must call `record_failed_run` when a stage raises.
+- A digest may only name items the run summarized; any other id fails the save.
+- A run `failed` because every attempted item failed gets `runs.error`
+  `"all attempted items failed"`. A commit that fails after the database applied it is detected
+  by the recovery (the run is no longer `running`): nothing is replayed and the stored status is
+  kept.
 
 ## Notifications
 

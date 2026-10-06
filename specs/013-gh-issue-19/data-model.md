@@ -14,7 +14,7 @@ No schema migration: every column used already exists (`runs.status` includes `p
 | `status` | `running` → `succeeded` / `partial` / `failed` (see state machine below) |
 | `finished_at` | always set when the run leaves `running` (FR-011) |
 | `stats` | versioned run statistics, [contracts/run-stats.md](contracts/run-stats.md) |
-| `error` | sanitized error text for `failed` runs (research R8); `NULL` otherwise |
+| `error` | sanitized error text for `failed` runs (research R8), `"all attempted items failed"` when the items failed; `NULL` otherwise |
 
 State transitions (one write, inside the atomic save or the recovery step):
 

@@ -17,9 +17,9 @@ from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 
-__all__ = ["BudgetExceeded", "BudgetTracker", "UsageEntry"]
+from invio.domain import COST_PRECISION
 
-_COST_PRECISION = Decimal("0.000001")
+__all__ = ["BudgetExceeded", "BudgetTracker", "UsageEntry"]
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -91,7 +91,7 @@ class BudgetTracker:
     def cost_usd(self) -> Decimal:
         """Sum of the known costs (6 places); unpriced calls add nothing."""
         total = sum((e.cost_usd for e in self._ledger if e.cost_usd is not None), Decimal(0))
-        return total.quantize(_COST_PRECISION)
+        return total.quantize(COST_PRECISION)
 
     @property
     def cost_complete(self) -> bool:
