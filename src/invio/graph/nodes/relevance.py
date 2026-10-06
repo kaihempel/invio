@@ -11,8 +11,9 @@ backstop: even a successful injection can only yield a valid 0..1 score.
 
 Each call records one ``llm_usage`` row, also when the answer stays invalid. Per-item LLM
 failures mark the item ``failed`` and scoring continues; credential and configuration errors
-stop the step. Persistence is flush-only (the caller commits). The prompt and call helpers are
-shared with the other LLM nodes (:mod:`invio.graph.nodes.prompting`,
+stop the step; an exhausted token budget stops the batch (the rest stays untouched, see
+:mod:`invio.graph.budget`). Persistence is flush-only (the caller commits). The prompt and call
+helpers are shared with the other LLM nodes (:mod:`invio.graph.nodes.prompting`,
 :mod:`invio.graph.nodes.llm_calls`).
 """
 
@@ -28,8 +29,14 @@ from invio.config.job import SearchConfig
 from invio.db.models import Item
 from invio.db.repositories import ItemRepository, UsageRepository
 from invio.domain import ItemStatus
+from invio.graph.budget import BudgetTracker
 from invio.graph.nodes.keyword_filter import item_text
-from invio.graph.nodes.llm_calls import PER_ITEM_ERRORS, call_structured, failure_message
+from invio.graph.nodes.llm_calls import (
+    PER_ITEM_ERRORS,
+    call_structured,
+    failure_message,
+    run_until_exceeded,
+)
 from invio.graph.nodes.prompting import document_message, neutralise
 from invio.llm.base import LLMProvider
 from invio.llm.registry import ModelRegistry
@@ -90,6 +97,7 @@ class ScoringContext:
     registry: ModelRegistry
     items: ItemRepository
     usage: UsageRepository
+    budget: BudgetTracker
 
 
 _SYSTEM_TEMPLATE = """\
@@ -147,7 +155,8 @@ async def score_item(item: Item, ctx: ScoringContext) -> RelevanceOutcome:
     ``search.min_relevance``. Writes are flushed, not committed.
 
     An invalid, unavailable, rate-limited or rejected call marks the item ``failed`` and returns
-    a failed outcome; credential and configuration errors (and bugs) propagate unchanged.
+    a failed outcome; credential and configuration errors (and bugs) propagate unchanged, and so
+    does ``BudgetExceeded`` (the item is left unchanged).
     """
     system, user = build_messages(
         item.title, item.teaser, item.raw_content, ctx.search.semantic_description
@@ -175,5 +184,12 @@ async def score_item(item: Item, ctx: ScoringContext) -> RelevanceOutcome:
 
 
 async def score_items(items: Iterable[Item], ctx: ScoringContext) -> list[RelevanceOutcome]:
-    """Score ``items`` one after the other and return one outcome per item, in input order."""
-    return [await score_item(item, ctx) for item in items]
+    """Score ``items`` one after the other and return one outcome per item, in input order.
+
+    Stops at the first ``BudgetExceeded`` and returns the outcomes completed so far; the item in
+    progress and the rest are left unchanged. ``budget.exceeded`` is logged once, by the stage
+    that first hits the limit (not again when the budget was already exceeded before this stage).
+    """
+    return await run_until_exceeded(
+        items, lambda item: score_item(item, ctx), ctx, stage="relevance"
+    )

@@ -12,9 +12,10 @@ them. Every answer is schema-validated.
 
 Each provider call records one ``llm_usage`` row, also when the answer stays invalid. Per-item LLM
 failures mark the item ``failed`` (no partial summary) and summarizing continues; credential and
-configuration errors stop the step. Persistence is flush-only (the caller commits). The prompt
-and call helpers are shared with the other LLM nodes (:mod:`invio.graph.nodes.prompting`,
-:mod:`invio.graph.nodes.llm_calls`).
+configuration errors stop the step; an exhausted token budget stops the batch (the item in
+progress and the rest stay unchanged, see :mod:`invio.graph.budget`). Persistence is flush-only
+(the caller commits). The prompt and call helpers are shared with the other LLM nodes
+(:mod:`invio.graph.nodes.prompting`, :mod:`invio.graph.nodes.llm_calls`).
 """
 
 import logging
@@ -30,8 +31,14 @@ from invio.config.languages import language_name
 from invio.db.models import Item
 from invio.db.repositories import ItemRepository, UsageRepository
 from invio.domain import ItemStatus
+from invio.graph.budget import BudgetTracker
 from invio.graph.nodes.keyword_filter import item_text
-from invio.graph.nodes.llm_calls import PER_ITEM_ERRORS, call_structured, failure_message
+from invio.graph.nodes.llm_calls import (
+    PER_ITEM_ERRORS,
+    call_structured,
+    failure_message,
+    run_until_exceeded,
+)
 from invio.graph.nodes.prompting import document_message, neutralise
 from invio.llm.base import LLMProvider
 from invio.llm.registry import ModelRegistry
@@ -110,6 +117,7 @@ class SummaryContext:
     registry: ModelRegistry
     items: ItemRepository
     usage: UsageRepository
+    budget: BudgetTracker
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
@@ -498,7 +506,8 @@ async def summarize_item(item: Item, ctx: SummaryContext) -> SummaryOutcome:
 
     An invalid, unavailable, rate-limited or rejected call marks the item ``failed`` (no partial
     summary, remaining calls skipped) and returns a failed outcome; credential and configuration
-    errors (and bugs) propagate unchanged.
+    errors (and bugs) propagate unchanged, and so does ``BudgetExceeded`` from any chunk or
+    combine call (the item is left unchanged, never failed).
     """
     # Neutralised once here (length-preserving and idempotent); build_messages does it again.
     body = neutralise(item_text(None, item.teaser, item.raw_content))
@@ -554,5 +563,12 @@ async def summarize_items(items: Iterable[Item], ctx: SummaryContext) -> list[Su
     limit therefore fails each remaining item in turn (known limitation). Credential and
     configuration errors propagate: the item being processed is left unchanged, usage rows of
     its earlier calls are already flushed, and the caller decides whether to commit or roll back.
+
+    The batch stops at the first ``BudgetExceeded`` (also from a later chunk or combine call of
+    one item) and returns the outcomes completed so far; the item in progress is left unchanged
+    and the rest is not started. ``budget.exceeded`` is logged once, by the stage that first
+    hits the limit.
     """
-    return [await summarize_item(item, ctx) for item in items]
+    return await run_until_exceeded(
+        items, lambda item: summarize_item(item, ctx), ctx, stage="summarize"
+    )

@@ -429,6 +429,57 @@ def test_item_mark_taken_links_run_and_increments_attempts(db_session: Session) 
     ItemRepository(db_session).mark_taken([], run.id)
 
 
+def test_item_release_undoes_the_take(db_session: Session) -> None:
+    job = make_job(db_session)
+    run = make_run(db_session, job)
+    rated = make_item(db_session, job, "https://example.com/1", status=ItemStatus.RELEVANT)
+    fresh = make_item(db_session, job, "https://example.com/2")
+    ItemRepository(db_session).mark_taken([rated, fresh], run.id)
+    ItemRepository(db_session).release([rated, fresh])
+    for item in (rated, fresh):
+        assert (item.attempts, item.run_id, item.status) == (0, None, ItemStatus.NEW)
+
+
+def test_item_release_never_goes_below_zero_attempts(db_session: Session) -> None:
+    job = make_job(db_session)
+    item = make_item(db_session, job, attempts=0, status=ItemStatus.RELEVANT)
+    ItemRepository(db_session).release([item])
+    assert item.attempts == 0
+
+
+def test_item_release_keeps_an_untouched_failed_item_failed(db_session: Session) -> None:
+    job = make_job(db_session)
+    run = make_run(db_session, job)
+    item = make_item(db_session, job, attempts=1, status=ItemStatus.FAILED)
+    ItemRepository(db_session).mark_taken([item], run.id)
+    ItemRepository(db_session).release([item])
+    assert (item.attempts, item.run_id, item.status) == (1, None, ItemStatus.FAILED)
+
+
+def test_released_items_are_pending_again(db_session: Session) -> None:
+    job = make_job(db_session)
+    run = make_run(db_session, job)
+    other = make_run(db_session, job)
+    item = make_item(db_session, job, status=ItemStatus.RELEVANT)
+    repo = ItemRepository(db_session)
+    repo.mark_taken([item], run.id)
+    repo.release([item])
+    assert repo.list_pending(job.id, run_id=other.id, max_attempts=3, limit=10) == [item]
+
+
+def test_release_clears_the_relevance_of_a_rated_item(db_session: Session) -> None:
+    job = make_job(db_session)
+    run = make_run(db_session, job)
+    rated = make_item(db_session, job, "https://example.com/1", status=ItemStatus.RELEVANT)
+    retry = make_item(db_session, job, "https://example.com/2", status=ItemStatus.FAILED)
+    rated.relevance = retry.relevance = Decimal("0.80")
+    repo = ItemRepository(db_session)
+    repo.mark_taken([rated, retry], run.id)
+    repo.release([rated, retry])
+    assert (rated.status, rated.relevance) == (ItemStatus.NEW, None)
+    assert (retry.status, retry.relevance) == (ItemStatus.FAILED, Decimal("0.80"))
+
+
 def test_item_mark_status_sets_status(db_session: Session) -> None:
     job = make_job(db_session)
     one = make_item(db_session, job, "https://example.com/1")
@@ -594,6 +645,21 @@ def test_usage_totals_for_run_and_job(db_session: Session) -> None:
     repo.add(b.id, "openai", "m", 1000, 1000, cost_usd=Decimal("9"))
     assert repo.totals_for_run(run.id) == UsageTotals(60, 6, Decimal("0.003500"))
     assert repo.totals_for_job(a.id) == UsageTotals(66, 12, Decimal("1.003500"))
+
+
+def test_usage_add_defaults_created_at_to_now(db_session: Session) -> None:
+    job = make_job(db_session)
+    before = datetime.now(UTC)
+    usage = UsageRepository(db_session).add(job.id, "openai", "m", 1, 1)
+    assert before <= usage.created_at <= datetime.now(UTC)
+
+
+def test_usage_add_stores_an_explicit_created_at(db_session: Session) -> None:
+    job = make_job(db_session)
+    when = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
+    usage = UsageRepository(db_session).add(job.id, "openai", "m", 1, 1, created_at=when)
+    db_session.expire(usage)
+    assert usage.created_at == when
 
 
 @decimals
