@@ -5,6 +5,7 @@ def new_scope(
     deps: RunDeps, *, job_id: int, run_id: int, token: datetime, dry_run: bool
 ) -> RunScope: ...
 
+
 def build_graph(deps: RunDeps, scope: RunScope) -> CompiledStateGraph[RunState]: ...
 ```
 
