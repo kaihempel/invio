@@ -21,14 +21,14 @@ DB_PASSWORD = "db-pa55word"
 def test_loads_from_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("INVIO_OPENAI_API_KEY", SECRET)
     monkeypatch.setenv("INVIO_SMTP_PORT", "2525")
-    monkeypatch.setenv("INVIO_SMTP_STARTTLS", "false")
+    monkeypatch.setenv("INVIO_SMTP_SECURITY", "ssl")
     monkeypatch.setenv("INVIO_OLLAMA_BASE_URL", "http://ollama:11434")
 
     settings = Settings()
 
     assert settings.require_secret("openai_api_key") == SECRET
     assert settings.smtp_port == 2525
-    assert settings.smtp_starttls is False
+    assert settings.smtp_security == "ssl"
     assert settings.ollama_base_url == "http://ollama:11434"
 
 
@@ -60,7 +60,8 @@ def test_defaults_without_any_configuration() -> None:
     assert settings.openai_api_key is None
     assert settings.ollama_base_url == "http://localhost:11434"
     assert settings.smtp_port == 587
-    assert settings.smtp_starttls is True
+    assert settings.smtp_security == "starttls"
+    assert settings.smtp_timeout_seconds == 30.0
     assert settings.log_level == "INFO"
     assert settings.archive_dir is None
     assert settings.youtube_cookies_file is None
@@ -133,6 +134,42 @@ def test_invalid_llm_timeout_is_rejected(monkeypatch: pytest.MonkeyPatch, raw: s
 
     with pytest.raises(ValidationError, match="llm_timeout_seconds"):
         Settings()
+
+
+@pytest.mark.parametrize("value", ["starttls", "ssl", "none"])
+def test_smtp_security_accepts_known_modes(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
+    monkeypatch.setenv("INVIO_SMTP_SECURITY", value)
+
+    assert Settings().smtp_security == value
+
+
+def test_smtp_security_rejects_unknown(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("INVIO_SMTP_SECURITY", "tls")
+
+    with pytest.raises(ValidationError) as exc_info:
+        Settings()
+
+    message = str(exc_info.value)
+    assert "smtp_security" in message
+    assert "'starttls', 'ssl' or 'none'" in message
+
+
+def test_smtp_timeout_defaults_to_thirty_seconds() -> None:
+    assert Settings().smtp_timeout_seconds == 30.0
+
+
+@pytest.mark.parametrize("raw", ["0", "-1", "inf", "nan"])
+def test_invalid_smtp_timeout_is_rejected(monkeypatch: pytest.MonkeyPatch, raw: str) -> None:
+    monkeypatch.setenv("INVIO_SMTP_TIMEOUT_SECONDS", raw)
+
+    with pytest.raises(ValidationError, match="smtp_timeout_seconds"):
+        Settings()
+
+
+def test_leftover_smtp_starttls_is_reported_as_unknown(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("INVIO_SMTP_STARTTLS", "true")
+
+    assert unknown_env_keys() == ["INVIO_SMTP_STARTTLS"]
 
 
 def test_get_settings_is_cached(monkeypatch: pytest.MonkeyPatch) -> None:

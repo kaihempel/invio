@@ -61,6 +61,13 @@ settings = get_settings()  # cached instance
 api_key = settings.require_secret("openai_api_key")  # raises "INVIO_OPENAI_API_KEY is not set"
 ```
 
+E-mail settings: `INVIO_SMTP_HOST`, `INVIO_SMTP_PORT` (default `587`), `INVIO_SMTP_USER` /
+`INVIO_SMTP_PASSWORD` (login only when both are set), `INVIO_SMTP_FROM`,
+`INVIO_SMTP_SECURITY` (`starttls` (default), `ssl` or `none`; replaces `INVIO_SMTP_STARTTLS`,
+and a leftover old name is reported by the "unknown setting ignored" warning) and
+`INVIO_SMTP_TIMEOUT_SECONDS` (default `30`, must be > 0, per SMTP operation). `starttls` fails
+when the server does not offer it; the port is not derived from the mode (use `465` for `ssl`).
+
 Every `invio` sub-command configures logging on startup: one JSON object per line on stderr,
 level from `INVIO_LOG_LEVEL`. Unknown `INVIO_*` keys (usually typos) are logged as warnings, and
 configuration errors end the command with exit code 2. Wrap a job run in `run_context` to tag
@@ -451,11 +458,38 @@ use `structured_with_repair`), plus one `models.d/<name>.yaml` file. Modules are
 automatically; no shared file changes. A provider beyond the five in the job schema also needs
 the `LLMProvider` enum in `invio.config.job` extended.
 
+## Notifications
+
+`invio.notify.deliver_digest(session_factory, digest_id, settings=...)` e-mails a stored digest
+to the job's `notification.to` recipients. Each distinct address gets its own mail
+(`multipart/alternative`: plain text and HTML) and its own row in `notifications`. In the
+`notification.subject` template `{job_name}` and `{date}` (the run date in the job's time zone,
+`YYYY-MM-DD`) are replaced; other braces stay and line breaks become spaces. The HTML part is
+the digest Markdown rendered and sanitized against an allowlist (no scripts, images, styles or
+unsafe links). An empty digest sends nothing unless `notification.send_if_empty` is `true`,
+in which case the mail says that no new items were found.
+
+Delivery never raises. Each row ends `sent`, `failed` (with a scrubbed error text, never the
+SMTP credentials) or `skipped` after the fifth failed attempt. `run_status_after_delivery`
+turns a planned `succeeded` run into `partial` when any notification failed.
+
+```bash
+uv run invio notify retry
+```
+
+re-sends every `failed` notification, and every `pending` one whose last attempt is more than
+an hour old (a crashed process), from the stored digest and payload, so the mail matches the
+first attempt. Output is one line per notification (`sent`, `failed` or `given up`) and the
+summary `retried N, sent S, failed F, given up G`, or `nothing to retry`. Exit codes: `0` nothing
+failed, `1` a notification failed or was given up, `2` configuration error (database URL, SMTP
+host or sender). A crashed first attempt may have reached the recipient before the row was
+marked, so recovering a stale `pending` row can send a duplicate mail.
+
 ## Layout
 
 ```
 src/invio/
-  cli/          Typer app (main.py) and auto-discovered commands/ (db.py, job.py);
+  cli/          Typer app (main.py) and auto-discovered commands/ (db.py, job.py, notify.py);
                 wizard.py, prompts.py (prompt seam), source_check.py, editor.py
   config/       settings, job.py (job file models + YAML load/save)
   domain.py     shared records, status enums, url_hash (stdlib only)
@@ -466,7 +500,7 @@ src/invio/
                 lazily); http.py (SafeHttpClient) with netguard, robots, ratelimit;
                 extract.py (article text); text.py, urls.py
   llm/          base, registry, factory, fake, models.d/ (LLM layer)
-  notify/       notifications
+  notify/       e-mail notifier: payload, render (Markdown, sanitizer, MIME), email (SMTP, retry)
   scheduling/   next-run calculation (next_run.py)
 alembic.ini     developer entry point for `uv run alembic ...`
 tests/

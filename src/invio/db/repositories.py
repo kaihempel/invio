@@ -7,11 +7,11 @@ errors surface immediately, and never commit or roll back (see ``session_scope``
 import builtins
 from collections.abc import Collection, Iterable, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import ColumnElement, Select, and_, case, exists, func, insert, or_, select
+from sqlalchemy import ColumnElement, Select, and_, case, exists, func, insert, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -370,6 +370,10 @@ class DigestRepository:
         self._session.flush()
         return digest
 
+    def get(self, digest_id: int) -> Digest | None:
+        """Return the digest with this id, or ``None``."""
+        return self._session.get(Digest, digest_id)
+
     def list_for_job(self, job_id: int) -> builtins.list[Digest]:
         """Return the job's digests, newest first."""
         stmt = (
@@ -418,13 +422,91 @@ class NotificationRepository:
         error: str | None = None,
         sent_at: datetime | None = None,
     ) -> Notification:
-        """Set the delivery status; ``sent_at`` is only set for ``sent`` (default now)."""
+        """Set the delivery status and error (``sent`` passes none, which clears it).
+
+        ``sent_at`` is only set for ``sent`` (default now).
+        """
         notification.status = status
         notification.error = error
         if status is NotificationStatus.SENT:
             notification.sent_at = sent_at or utcnow()
         self._session.flush()
         return notification
+
+    def begin_attempt(self, notification: Notification, *, now: datetime) -> Notification:
+        """Count a send attempt and stamp its start; the status stays ``pending``."""
+        notification.attempts += 1
+        notification.last_attempt_at = now
+        self._session.flush()
+        return notification
+
+    @staticmethod
+    def _retryable(now: datetime, stale_after: timedelta) -> ColumnElement[bool]:
+        """Predicate: ``failed``, or ``pending`` with its latest activity older than the cutoff."""
+        last_activity = func.coalesce(Notification.last_attempt_at, Notification.created_at)
+        return or_(
+            Notification.status == NotificationStatus.FAILED,
+            and_(
+                Notification.status == NotificationStatus.PENDING, last_activity < now - stale_after
+            ),
+        )
+
+    def retry_candidates(
+        self, *, now: datetime, stale_after: timedelta
+    ) -> builtins.list[Notification]:
+        """Return ``failed`` and stale ``pending`` notifications by id (crash recovery)."""
+        stmt = (
+            select(Notification).where(self._retryable(now, stale_after)).order_by(Notification.id)
+        )
+        return _all(self._session, stmt)
+
+    def claim_for_retry(
+        self, notification_id: int, *, now: datetime, stale_after: timedelta
+    ) -> bool:
+        """Atomically take a retryable notification: ``pending``, one more attempt, stamped.
+
+        A single conditional UPDATE, so of several concurrent callers exactly one gets ``True``.
+        """
+        result = self._session.execute(
+            update(Notification)
+            .where(Notification.id == notification_id, self._retryable(now, stale_after))
+            .values(
+                status=NotificationStatus.PENDING,
+                attempts=Notification.attempts + 1,
+                last_attempt_at=now,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        self._session.flush()
+        return result.rowcount == 1  # type: ignore[attr-defined, no-any-return]
+
+    def give_up_stale(
+        self,
+        notification_id: int,
+        *,
+        now: datetime,
+        stale_after: timedelta,
+        max_attempts: int,
+        error: str,
+    ) -> bool:
+        """Atomically mark a stale ``pending`` row that used its attempts as ``skipped``.
+
+        A single conditional UPDATE, so of several concurrent callers exactly one gets ``True``.
+        """
+        cutoff = now - stale_after
+        result = self._session.execute(
+            update(Notification)
+            .where(
+                Notification.id == notification_id,
+                Notification.status == NotificationStatus.PENDING,
+                Notification.attempts >= max_attempts,
+                func.coalesce(Notification.last_attempt_at, Notification.created_at) < cutoff,
+            )
+            .values(status=NotificationStatus.SKIPPED, error=error)
+            .execution_options(synchronize_session=False)
+        )
+        self._session.flush()
+        return result.rowcount == 1  # type: ignore[attr-defined, no-any-return]
 
     def list_for_job(
         self, job_id: int, *, status: NotificationStatus | None = None

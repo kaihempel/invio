@@ -4,13 +4,11 @@ import logging
 from typing import Annotated
 
 import typer
-from sqlalchemy.engine import URL
-from sqlalchemy.exc import ArgumentError
 
 from invio.cli.errors import fail
 from invio.config.settings import MissingSettingError, get_settings
 from invio.db import migrate
-from invio.db.session import normalize_url, redact
+from invio.db.session import DatabaseConfigError, check_database_url, scrub_database_url
 
 logger = logging.getLogger(__name__)
 
@@ -26,25 +24,14 @@ def upgrade(
     DDL is not transactional on MariaDB/MySQL: a failed upgrade may leave partially applied
     changes that need manual cleanup.
     """
-    raw: str | None = None
-    url: URL | None = None
     try:
         raw = get_settings().require_secret("database_url")
-        url = normalize_url(raw)
-        # Unknown dialect/driver -> ArgumentError (NoSuchModuleError); uninstalled DBAPI module
-        # -> ImportError. Both are configuration errors, so check them before connecting.
-        url.get_dialect().import_dbapi()
-    except MissingSettingError as exc:
+        url = check_database_url(raw)
+    except (MissingSettingError, DatabaseConfigError) as exc:
         raise fail(f"Configuration error: {exc}", 2) from exc
-    except ArgumentError as exc:
-        message = redact(str(exc), raw or "")
-        raise fail(f"Configuration error: invalid database URL: {message}", 2) from exc
-    except ImportError as exc:
-        message = redact(str(exc), raw or "")
-        raise fail(f"Configuration error: database driver not installed: {message}", 2) from exc
 
     def scrub(text: str) -> str:
-        return redact(redact(text, raw), url)
+        return scrub_database_url(text, raw)
 
     try:
         logger.info("migration started", extra={"revision": revision})

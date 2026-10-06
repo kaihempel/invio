@@ -103,7 +103,8 @@ class Settings(BaseSettings):
     smtp_user: str | None = None
     smtp_password: SecretStr | None = None
     smtp_from: str | None = None
-    smtp_starttls: bool = True
+    smtp_security: Literal["starttls", "ssl", "none"] = "starttls"
+    smtp_timeout_seconds: float = Field(default=30.0, gt=0, allow_inf_nan=False)
 
     # Operations
     log_level: str = "INFO"
