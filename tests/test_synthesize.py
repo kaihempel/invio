@@ -207,14 +207,17 @@ def test_destination_encodes_and_wraps_only_when_needed() -> None:
 
 def test_bullet_formats_an_entry_and_labels_an_empty_title() -> None:
     entry = _entry(1, title="A *bold* [title]")
-    assert _bullet(entry, "Takeaway.") == (
+    assert _bullet(entry, "Takeaway.", _texts("en")) == (
         r"- [A \*bold\* \[title\]](https://example.org/a) — Takeaway."
     )
-    assert _bullet(_entry(1, title="https://x.example/y"), "T.").startswith(
+    assert _bullet(_entry(1, title="https://x.example/y"), "T.", _texts("en")).startswith(
         "- [(untitled)](https://example.org/a) — T."
     )
-    assert _bullet(entry, "https://x.example/y") == (
+    assert _bullet(entry, "https://x.example/y", _texts("en")) == (
         r"- [A \*bold\* \[title\]](https://example.org/a)"
+    )
+    assert _bullet(_entry(1, title="   "), "T.", _texts("de")).startswith(
+        "- [(ohne Titel)](https://example.org/a)"
     )
 
 
@@ -230,7 +233,10 @@ def test_render_closing_lists_the_top_entries_in_order() -> None:
         "- [Title c",
     ]
     assert closing == "\n".join(
-        ["## Worth a closer look", *(_bullet(e, e.summary.why_relevant) for e in ordered[:3])]
+        [
+            "## Worth a closer look",
+            *(_bullet(e, e.summary.why_relevant, _texts("en")) for e in ordered[:3]),
+        ]
     )
     both = render_closing(ordered[:2], "en")
     assert both.count("\n- [") == 2
@@ -510,7 +516,9 @@ async def test_us2_unlinked_items_go_to_more_items_before_the_closing_section(
     entries = [_entry(i, relevance=1 - i / 10) for i in range(1, 6)]
     result = await synthesize_digest(entries, _context(db_session, fake))
     assert result.missing_items == 2
-    more = "## More items\n" + "\n".join(_bullet(e, e.summary.why_relevant) for e in entries[3:])
+    more = "## More items\n" + "\n".join(
+        _bullet(e, e.summary.why_relevant, _texts("en")) for e in entries[3:]
+    )
     closing = render_closing(sort_entries(entries), "en")
     assert result.body.endswith("\n\n" + more + "\n\n" + closing + "\n")
     assert result.body.index("## More items") < result.body.index("## Worth a closer look")
@@ -593,7 +601,7 @@ async def test_us2_render_more_items_lists_the_given_entries(db_session: Session
     entries = [_entry(2), _entry(1)]
     text = render_more_items(entries, "en")
     assert text == "## More items\n" + "\n".join(
-        _bullet(e, e.summary.why_relevant) for e in entries
+        _bullet(e, e.summary.why_relevant, _texts("en")) for e in entries
     )
 
 
@@ -808,6 +816,23 @@ async def test_us6_an_unusable_answer_gives_the_fallback_but_costs_are_recorded(
     assert len(_usage_rows(db_session)) == 1
     (record,) = _records(caplog, "synthesize.fallback")
     assert _extra(record, "error") == "unusable_answer"
+    assert result.removed_urls == 0
+
+
+async def test_us6_urls_removed_from_a_rejected_answer_are_counted_and_logged(
+    db_session: Session, caplog: pytest.LogCaptureFixture
+) -> None:
+    answer = "Intro with [bad](https://evil.example/x) and https://evil.example/y only."
+    fake = FakeProvider([FakeReply(answer)])
+    with caplog.at_level(logging.DEBUG, logger="invio.graph"):
+        result = await synthesize_digest(_five(), _context(db_session, fake))
+    assert result.fallback is True
+    assert result.error == "unusable answer: no heading"
+    assert result.removed_urls == 2
+    (removed,) = _records(caplog, "synthesize.urls_removed")
+    assert _extra(removed, "count") == 2
+    (done,) = _records(caplog, "synthesize.done")
+    assert _extra(done, "removed_urls") == 2
 
 
 class _BrokenConfig(FakeProvider):
@@ -924,7 +949,7 @@ async def test_sneaky_links_are_removed_and_counted(db_session: Session) -> None
     fake = FakeProvider([FakeReply(_SNEAKY_ANSWER)])
     result = await synthesize_digest([_entry(1)], _context(db_session, fake))
     assert result.fallback is False
-    assert result.removed_urls >= 4
+    assert result.removed_urls == 4
     assert result.missing_items == 0
     assert "## Topic" in result.body
 
@@ -985,7 +1010,7 @@ def test_property_inserted_item_text_cannot_add_links_or_structure(
         )
         headings = [t for t in ORACLE.parse(text) if t.type == "heading_open"]
         assert len(headings) == text.count("\n## ") + text.startswith("## ")
-    bullet = _bullet(entries[0], why)
+    bullet = _bullet(entries[0], why, _texts("en"))
     assert "\n" not in bullet
     assert rendered(bullet) == (["https://example.org/a"], 0)
 

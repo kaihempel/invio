@@ -7,8 +7,10 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 import invio.graph.nodes.synthesize as synthesize_module
+import invio.notify.render as render_module
 from invio.graph.nodes.synthesize import filter_urls
-from tests.markdown_oracle import assert_renders_only_allowed, token_signature
+from invio.markdown import MARKDOWN
+from tests.markdown_oracle import assert_renders_only_allowed
 
 A = "https://example.org/a"
 B = "https://example.org/b"
@@ -532,22 +534,9 @@ def test_property_rendered_output_links_only_allowed_urls(text: str) -> None:
 
 
 # --- Parity with the notifier's renderer -----------------------------------------------------
-# synthesize cannot import the notifier (layering), so it keeps its own renderer. It must
-# tokenise links, images and raw HTML exactly like the notifier does.
-
-_PARITY_INPUTS = [
-    "[a [b] c](https://example.org/a)",
-    "[a](https:evil.example) and [b](mailto:x@e.example)",
-    "- item\n  - [r]: https:evil.example/3\n\n[click][r]",
-    '<a title="<" href=https:evil.example/4>tag</a>',
-    "<https://example.org/auto> and <mailto:x@e.example>",
-    "![img](https://example.org/i.png) ![x][r]\n\n[r]: //evil.example/x",
-    "> [q]: https:evil.example\n\n[q]",
-    "[a](<https://example.org/a b> (t)) <b>bold</b>",
-    "plain text without any markup",
-]
+# synthesize cannot import the notifier (layering); both use the shared parser instead, so the
+# post-check tokenises links, images and raw HTML exactly like the mail renderer.
 
 
-@pytest.mark.parametrize("markdown", _PARITY_INPUTS)
-def test_renderer_matches_the_notifiers(markdown: str) -> None:
-    assert token_signature(markdown, synthesize_module._RENDERER) == token_signature(markdown)
+def test_post_check_and_notifier_share_one_parser() -> None:
+    assert synthesize_module.MARKDOWN is render_module.MARKDOWN is MARKDOWN

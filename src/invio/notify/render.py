@@ -10,9 +10,9 @@ from email.utils import format_datetime, make_msgid, parseaddr
 
 import nh3
 from jinja2 import Environment, PackageLoader, StrictUndefined, select_autoescape
-from markdown_it import MarkdownIt
 from markupsafe import Markup
 
+from invio.markdown import MARKDOWN
 from invio.notify.payload import NotificationPayload
 
 __all__ = [
@@ -59,21 +59,6 @@ class RenderedMail:
     html: str
 
 
-class _Markdown(MarkdownIt):
-    """Markdown-it that accepts every link target.
-
-    The stock validator prints links with unsafe schemes as literal text, which would keep
-    ``javascript:...`` in the output. Accepting them makes them real links, so the sanitizer
-    drops the ``href`` and only the link text stays (contracts/email-message.md).
-    """
-
-    def validateLink(self, url: str) -> bool:
-        return True
-
-
-_MARKDOWN = _Markdown("commonmark", {"html": True, "linkify": False}).enable("table")
-
-
 def markdown_to_safe_html(markdown: str) -> str:
     """Render ``markdown`` to HTML and strip everything outside the allowlist.
 
@@ -82,7 +67,7 @@ def markdown_to_safe_html(markdown: str) -> str:
     ``nh3``. Images are deliberately excluded (remote images in mail act as tracking beacons).
     """
     return nh3.clean(
-        _MARKDOWN.render(markdown),
+        MARKDOWN.render(markdown),
         tags=_ALLOWED_TAGS,
         attributes=_ALLOWED_ATTRIBUTES,
         url_schemes=_ALLOWED_URL_SCHEMES,

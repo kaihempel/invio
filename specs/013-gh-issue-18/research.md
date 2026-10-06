@@ -87,7 +87,8 @@ Each section records the decision, its rationale and the alternatives considered
   Steps 1–5 repeat until the text stops changing, because removing one construct can splice a
   new one together (`[[a](bad)](ok)`).
   6. **Rendered check** (added after QA found a leak): the settled text is parsed with
-     markdown-it-py using the notifier's settings (raw HTML on). The regex passes only cover a
+     the markdown-it-py parser the notifier renders with (`invio.markdown.MARKDOWN`, raw HTML
+     on), shared so the check and the mail cannot drift apart. The regex passes only cover a
      subset of CommonMark (nested/escaped brackets in link text, `(title)` titles, definitions
      inside list items, `<` inside HTML attributes, destinations without `//` such as
      `https:host` or `mailto:`). If the parse still yields a link to a non-allowed

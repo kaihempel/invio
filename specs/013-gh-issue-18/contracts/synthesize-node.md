@@ -39,7 +39,7 @@ def filter_urls(markdown: str, allowed: Collection[str]) -> UrlFilterResult
 Pure post-check (research R5). Guarantees: every URL-like string left in `text` is exactly an
 element of `allowed`; an inline link with an unknown destination keeps its text; images are
 replaced by their alt text; idempotent (`filter_urls(r.text, allowed).text == r.text`); when
-`text` is parsed with the notifier's CommonMark settings, every link destination is an element
+`text` is parsed with the shared parser the notifier renders with (`invio.markdown.MARKDOWN`), every link destination is an element
 of `allowed` and no image or raw HTML remains (fails closed otherwise). `linked` is the set of
 allowed URLs that are link destinations in that parsed output (so a link inside a code span does
 not count, a used reference link to an allowed URL does).
@@ -50,7 +50,8 @@ def render_more_items(entries: Sequence[DigestEntry], language: str) -> str
 def render_fallback(entries: Sequence[DigestEntry], language: str) -> str
 ```
 Pure; titles/takeaways/headlines cleaned by `_escape` (URL-like runs removed, `` \ ` * _ [ ] < > & `` backslash-escaped), URLs bare or in `<…>` form when they contain parentheses; headings and fixed texts
-from the `en`/`de` table, English for any other code. `render_closing` lists the first
+(including the `(untitled)` link text for an empty title) from the `en`/`de` table, English for
+any other code. `render_closing` lists the first
 `CLOSER_LOOK_COUNT` of the (already sorted) entries.
 
 ```python
@@ -65,6 +66,8 @@ async def synthesize_digest(entries: Sequence[DigestEntry], ctx: SynthesisContex
   `render_more_items` (if any entry URL not in `linked`) and `render_closing`.
 - `PER_ITEM_ERRORS` or an unusable answer → `render_fallback(...)` with `fallback=True`,
   `error` set, log `synthesize.fallback` (`error` = class name or `unusable_answer`).
+  `removed_urls` is 0 after an LLM error and the post-check count for a rejected answer
+  (also logged as `synthesize.urls_removed`).
 - `LLMAuthError`, `LLMConfigError` and other exceptions propagate unchanged.
 - Logs `synthesize.done` (`items`, `removed_urls`, `missing_items`, `fallback`); never digest
   text, item text or URLs.

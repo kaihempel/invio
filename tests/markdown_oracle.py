@@ -1,12 +1,12 @@
 """Shared CommonMark oracle for the digest tests.
 
-Built from the notifier's own renderer (raw HTML on, every destination accepted), so the tests
-parse a digest exactly as the e-mail is rendered.
+Uses the shared parser the notifier renders with (raw HTML on, every destination accepted), so
+the tests parse a digest exactly as the e-mail is rendered.
 """
 
 from markdown_it.token import Token
 
-from invio.notify.render import _MARKDOWN as ORACLE
+from invio.markdown import MARKDOWN as ORACLE
 
 
 def walk(markdown: str) -> list[Token]:
@@ -49,18 +49,3 @@ def assert_renders_only_allowed(text: str, allowed: set[str]) -> None:
     targets = {ORACLE.normalizeLink(u) for u in allowed}
     for target in rendered_targets(text):
         assert target in targets, (target, text)
-
-
-def token_signature(markdown: str, renderer: object = ORACLE) -> list[tuple[str, str]]:
-    """Return (type, href/src/content) of every link, image and raw HTML token, sorted."""
-    parse = renderer.parse  # type: ignore[attr-defined]
-    signature: list[tuple[str, str]] = []
-    stack: list[Token] = list(parse(markdown))
-    while stack:
-        token = stack.pop()
-        if token.type in ("link_open", "image"):
-            signature.append((token.type, str(token.attrGet("href") or token.attrGet("src"))))
-        elif token.type in ("html_inline", "html_block"):
-            signature.append((token.type, token.content))
-        stack.extend(token.children or ())
-    return sorted(signature)
