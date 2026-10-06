@@ -14,6 +14,7 @@ from typing import Any, NamedTuple
 import httpx2
 
 from invio.llm.mistral import MistralProvider, RetryPolicy
+from tests.async_helpers import RecordingSleep
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "mistral"
 API_KEY = "sk-test-SECRET123"
@@ -89,17 +90,13 @@ def recording_options(recorder: Recorder) -> tuple[dict[str, Any], list[float]]:
     The HTTP transport is the recorder, the retry sleep only records its argument and the
     jitter is zero.
     """
-    waits: list[float] = []
-
-    async def record_sleep(seconds: float) -> None:
-        waits.append(seconds)
-
+    sleep = RecordingSleep()
     options: dict[str, Any] = {
         "client_factory": recorder.client_factory,
-        "sleep": record_sleep,
+        "sleep": sleep,
         "uniform": lambda a, b: 0.0,
     }
-    return options, waits
+    return options, sleep.calls
 
 
 def make_provider(

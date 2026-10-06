@@ -10,6 +10,7 @@ dependencies = [
     "feedparser>=6.0.14",
     "httpx2>=2.13",
     "jinja2>=3.1",
+    "langgraph>=1.0,<2",
     "markdown-it-py>=3",
     "mistralai>=3.0,<4",
     "nh3>=0.2.18",

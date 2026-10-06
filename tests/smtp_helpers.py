@@ -256,7 +256,7 @@ def seed_digest(
     session.flush()
     runs = RunRepository(session)
     run: Run = runs.start(job.id, started_at=started_at or datetime(2026, 10, 4, 12, 0, tzinfo=UTC))
-    stats = {"items_found": 7} if run_stats is None else run_stats
+    stats = {"found": 7} if run_stats is None else run_stats
     runs.finish(run, RunStatus.SUCCEEDED, stats=stats, finished_at=run.started_at)
     digest = DigestRepository(session).add(
         job.id, "digest", body, [1, 2] if item_ids is None else item_ids, run_id=run.id

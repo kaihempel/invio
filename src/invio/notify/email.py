@@ -155,7 +155,8 @@ def _digest_date(started_at: datetime, timezone: str) -> date:
 
 
 def _items_found(stats: dict[str, Any] | None) -> int | None:
-    value = (stats or {}).get("items_found")
+    # ``runs.stats["found"]`` is what the pipeline writes (runs.stats layout, #19).
+    value = (stats or {}).get("found")
     return value if type(value) is int and value >= 0 else None
 
 

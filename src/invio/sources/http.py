@@ -395,16 +395,22 @@ class SafeHttpClient:
             yield
 
     async def get(
-        self, url: str, *, headers: Mapping[str, str] | None = None
+        self, url: str, *, headers: Mapping[str, str] | None = None, conditional: bool = True
     ) -> FetchResult | NotModified:
         """GET ``url``, following redirects; raises :class:`FetchError` on any failure.
+
+        ``conditional=False`` sends no remembered validators (``If-None-Match`` and
+        ``If-Modified-Since``) and does not remember the validators of the response, so it
+        never returns :class:`NotModified` and leaves later conditional requests alone. It is
+        for pages whose URL was already fetched as a source (a ``web`` page-mode item has the
+        URL of its source) and that must come back with a body.
 
         This is the only place that classifies the outcome and logs failures, so each failed
         fetch is logged exactly once.
         """
         requested_url = redact_url(url)
         cache_key = self._cache_key(requested_url)
-        sent = self._with_validators(cache_key, headers or {})
+        sent = self._with_validators(cache_key, headers or {}) if conditional else headers or {}
         try:
             hop = await self._fetch(
                 url,
@@ -413,7 +419,13 @@ class SafeHttpClient:
                 max_bytes=self._config.max_response_bytes,
                 truncate=False,
             )
-            return self._classify(hop, requested_url=requested_url, cache_key=cache_key, sent=sent)
+            return self._classify(
+                hop,
+                requested_url=requested_url,
+                cache_key=cache_key,
+                sent=sent,
+                remember=conditional,
+            )
         except FetchError as error:
             self._log_failure(error)
             raise
@@ -682,7 +694,13 @@ class SafeHttpClient:
         return merged
 
     def _classify(
-        self, hop: _Hop, *, requested_url: str, cache_key: str, sent: Mapping[str, str]
+        self,
+        hop: _Hop,
+        *,
+        requested_url: str,
+        cache_key: str,
+        sent: Mapping[str, str],
+        remember: bool = True,
     ) -> FetchResult | NotModified:
         """Map a final (non-redirect) hop to a result, ``NotModified`` or an error.
 
@@ -698,7 +716,7 @@ class SafeHttpClient:
         if not 200 <= hop.status < 300:
             raise FetchError("http_status", url=str(hop.url), status=hop.status)
         etag, last_modified = hop.headers.get("etag"), hop.headers.get("last-modified")
-        if etag or last_modified:
+        if remember and (etag or last_modified):
             self._validators[cache_key] = _Validators(etag, last_modified)
             self._validators.move_to_end(cache_key)
             if len(self._validators) > _MAX_VALIDATORS:

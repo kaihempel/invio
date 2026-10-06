@@ -169,3 +169,15 @@ def test_item_may_reference_a_run(db_session: Session) -> None:
     item = make_item(db_session, job, run_id=run.id)
 
     assert item.run_id == run.id
+
+
+def test_set_extracted_stores_text_and_status(db_session: Session) -> None:
+    from invio.db.repositories import ItemRepository
+
+    item = make_item(db_session, make_job(db_session))
+
+    ItemRepository(db_session).set_extracted(item, "Full article text, ünïcode ✓")
+    db_session.expire(item)
+
+    assert item.raw_content == "Full article text, ünïcode ✓"
+    assert item.status == ItemStatus.EXTRACTED

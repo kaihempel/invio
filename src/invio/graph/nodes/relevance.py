@@ -82,6 +82,7 @@ class RelevanceOutcome:
     relevance: Decimal | None
     result: RelevanceResult | None
     error: str | None
+    error_class: str | None = None  # class name of the failure, set with ``error``
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
@@ -144,7 +145,12 @@ def _fail(item: Item, ctx: ScoringContext, err: Exception) -> RelevanceOutcome:
     ctx.items.mark_failed(item, error)
     logger.warning("relevance.failed", extra={"item_id": item.id, "error": type(err).__name__})
     return RelevanceOutcome(
-        item_id=item.id, status=ItemStatus.FAILED, relevance=None, result=None, error=error
+        item_id=item.id,
+        status=ItemStatus.FAILED,
+        relevance=None,
+        result=None,
+        error=error,
+        error_class=type(err).__name__,
     )
 
 

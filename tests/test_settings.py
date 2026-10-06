@@ -274,3 +274,40 @@ def test_http_total_timeout_must_cover_read_timeout(monkeypatch: pytest.MonkeyPa
 
     with pytest.raises(ValidationError, match="http_total_timeout_seconds"):
         Settings()
+
+
+def test_run_orchestration_defaults() -> None:
+    settings = Settings()
+
+    assert settings.max_parallel_items == 4
+    assert settings.run_lock_seconds == 7200
+
+
+def test_run_orchestration_settings_are_read_from_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("INVIO_MAX_PARALLEL_ITEMS", "9")
+    monkeypatch.setenv("INVIO_RUN_LOCK_SECONDS", "60")
+
+    settings = Settings()
+
+    assert settings.max_parallel_items == 9
+    assert settings.run_lock_seconds == 60
+
+
+@pytest.mark.parametrize(
+    ("name", "raw"),
+    [
+        ("INVIO_MAX_PARALLEL_ITEMS", "0"),
+        ("INVIO_MAX_PARALLEL_ITEMS", "-3"),
+        ("INVIO_RUN_LOCK_SECONDS", "59"),
+        ("INVIO_RUN_LOCK_SECONDS", "0"),
+    ],
+)
+def test_invalid_run_orchestration_settings_are_rejected(
+    monkeypatch: pytest.MonkeyPatch, name: str, raw: str
+) -> None:
+    monkeypatch.setenv(name, raw)
+
+    with pytest.raises(ValidationError, match=name.removeprefix("INVIO_").lower()):
+        Settings()

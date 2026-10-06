@@ -141,6 +141,7 @@ class SummaryOutcome:
     calls: int
     chunks: int
     truncated: bool
+    error_class: str | None = None  # class name of the failure, set with ``error``
 
 
 def estimate_tokens(text: str) -> int:
@@ -372,6 +373,7 @@ def _fail(
         calls=calls,
         chunks=chunks,
         truncated=truncated,
+        error_class=type(err).__name__,
     )
 
 

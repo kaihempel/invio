@@ -178,3 +178,34 @@ async def test_least_recently_used_validators_are_dropped_beyond_the_cap(
 
     assert isinstance(again_a, NotModified)
     assert isinstance(again_b, FetchResult)
+
+
+async def test_unconditional_get_sends_no_validators_and_keeps_the_remembered_ones(
+    server: LoopbackServer,
+) -> None:
+    url = validated(server)
+
+    async with make_client() as client:
+        await client.get(url)  # remembers the validators
+        plain = await client.get(url, conditional=False)
+        again = await client.get(url)  # still conditional with the original validators
+
+    assert isinstance(plain, FetchResult)
+    assert "if-none-match" not in server.requests[1].headers
+    assert "if-modified-since" not in server.requests[1].headers
+    assert server.requests[2].headers["if-none-match"] == ETAG
+    assert again == NotModified(url, ETAG, MODIFIED)
+
+
+async def test_unconditional_get_does_not_remember_the_validators_of_its_response(
+    server: LoopbackServer,
+) -> None:
+    url = validated(server)
+
+    async with make_client() as client:
+        first = await client.get(url, conditional=False)
+        second = await client.get(url)
+
+    assert isinstance(first, FetchResult)
+    assert isinstance(second, FetchResult)  # nothing was remembered, so no conditional request
+    assert "if-none-match" not in server.requests[1].headers

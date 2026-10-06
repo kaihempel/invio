@@ -6,6 +6,7 @@ work in a session of their own as a real run would, and assert in a fresh sessio
 commits the run row and the taken items first, as the orchestrator does (research R7).
 """
 
+import dataclasses
 import json
 import logging
 from collections.abc import Sequence
@@ -34,12 +35,14 @@ from invio.graph.budget import BudgetExceeded, BudgetTracker, UsageEntry
 from invio.graph.nodes.llm_calls import call_structured, failure_message
 from invio.graph.nodes.persist import (
     ALL_FAILED_ERROR,
+    ALL_SOURCES_FAILED_ERROR,
     DigestDraft,
-    RunResult,
+    RunDraft,
     StageCounts,
     build_stats,
     decide_status,
     finalize_run,
+    finish_dry_run,
     persist_run,
     record_failed_run,
     unprocessed,
@@ -151,7 +154,7 @@ async def _run_stages(
     *,
     budget_limit: int = 1_000_000,
     digest: bool = True,
-) -> tuple[Session, RunResult]:
+) -> tuple[Session, RunDraft]:
     """Open the work session and run relevance and summarization like the pipeline would."""
     session = factory()
     items = _load_items(session, seed.item_ids)
@@ -160,7 +163,7 @@ async def _run_stages(
     scoring, summary = _contexts(session, seed, fake, budget)
     relevance = await score_items(items, scoring)
     summaries = await summarize_items(items, summary)
-    result = RunResult(
+    result = RunDraft(
         job_id=seed.job_id,
         run_id=seed.run_id,
         counts=_COUNTS,
@@ -606,12 +609,12 @@ def _bare_result(
     digest: DigestDraft | None,
     item_count: int = 2,
     budget: BudgetTracker | None = None,
-) -> RunResult:
+) -> RunDraft:
     job = make_job(db_session)
     run = make_run(db_session, job)
     items = [make_item(db_session, job, url=f"https://example.com/{n}") for n in range(item_count)]
     ItemRepository(db_session).mark_taken(items, run.id)
-    return RunResult(
+    return RunDraft(
         job_id=job.id,
         run_id=run.id,
         counts=_COUNTS,
@@ -638,8 +641,8 @@ def test_persist_run_rejects_duplicate_digest_item_ids(db_session: Session) -> N
         persist_run(db_session, _with(result, draft))
 
 
-def _with(result: RunResult, digest: DigestDraft | None) -> RunResult:
-    return RunResult(
+def _with(result: RunDraft, digest: DigestDraft | None) -> RunDraft:
+    return RunDraft(
         job_id=result.job_id,
         run_id=result.run_id,
         counts=result.counts,
@@ -662,10 +665,34 @@ def test_persist_run_stores_no_digest_without_items(
     assert run.finished_at is not None
 
 
+@pytest.mark.parametrize(("store_empty", "expected"), [(False, 0), (True, 1)])
+def test_persist_run_stores_an_empty_digest_only_when_asked(
+    db_session: Session, store_empty: bool, expected: int
+) -> None:
+    base = _bare_result(
+        db_session, digest=DigestDraft(title="Daily", body="", item_ids=()), item_count=0
+    )
+    result = dataclasses.replace(base, store_empty_digest=store_empty)
+
+    persist_run(db_session, result)
+
+    digests = db_session.scalars(select(Digest)).all()
+    assert len(digests) == expected
+    if store_empty:
+        assert (digests[0].title, digests[0].item_ids) == ("Daily", [])
+
+
+def test_run_draft_defaults_keep_existing_callers_valid(db_session: Session) -> None:
+    result = _bare_result(db_session, digest=None)
+
+    assert (result.dry_run, result.store_empty_digest) == (False, False)
+    assert (result.counts.sources, result.counts.sources_failed) == (0, 0)
+
+
 def test_persist_run_adds_the_digest_with_the_run_id(db_session: Session) -> None:
     base = _bare_result(db_session, digest=None)
     ids = [item.id for item in base.taken]
-    result = RunResult(
+    result = RunDraft(
         job_id=base.job_id,
         run_id=base.run_id,
         counts=base.counts,
@@ -682,7 +709,7 @@ def test_persist_run_adds_the_digest_with_the_run_id(db_session: Session) -> Non
 
 def test_persist_run_for_a_missing_run_raises_lookup_error(db_session: Session) -> None:
     result = _bare_result(db_session, digest=None)
-    missing = RunResult(
+    missing = RunDraft(
         job_id=result.job_id,
         run_id=result.run_id + 1000,
         counts=result.counts,
@@ -733,7 +760,7 @@ async def _run_pipeline(
     *,
     budget_limit: int,
     digest_call: bool = False,
-) -> tuple[Session, RunResult]:
+) -> tuple[Session, RunDraft]:
     """Relevance for every item, summaries for the relevant ones, an optional digest call.
 
     The digest call passes ``per_item=False`` like the digest node (#18) and, when an item was
@@ -759,7 +786,7 @@ async def _run_pipeline(
         )
         done = [o.item_id for o in summaries if o.status == ItemStatus.SUMMARIZED]
         digest = DigestDraft(title="Weekly", body="Body", item_ids=done) if done else None
-    result = RunResult(
+    result = RunDraft(
         job_id=seed.job_id,
         run_id=seed.run_id,
         counts=_COUNTS,
@@ -807,7 +834,7 @@ def test_unprocessed_lists_taken_items_without_a_final_state(db_session: Session
             strict=True,
         )
     }
-    result = RunResult(
+    result = RunDraft(
         job_id=job.id,
         run_id=1,
         counts=_COUNTS,
@@ -912,6 +939,8 @@ _STATS_KEYS = [
     "found",
     "new",
     "after_keyword_filter",
+    "sources",
+    "sources_failed",
     "relevant",
     "summarized",
     "failed",
@@ -944,13 +973,13 @@ def _call_entry(
     )
 
 
-def _mixed_result(db_session: Session, budget: BudgetTracker) -> RunResult:
+def _mixed_result(db_session: Session, budget: BudgetTracker) -> RunDraft:
     """Five taken items: three relevant (one unsummarized later), one irrelevant, one failed."""
     job = make_job(db_session)
     names = ["a", "b", "c", "d", "e", "f"]
     items = [make_item(db_session, job, url=f"https://example.com/{n}") for n in names]
     a, b, c, d, e, _ = items
-    return RunResult(
+    return RunDraft(
         job_id=job.id,
         run_id=1,
         counts=_COUNTS,
@@ -983,6 +1012,8 @@ def test_build_stats_counts_outcomes_and_ledger_figures(db_session: Session) -> 
         "found": 10,
         "new": 4,
         "after_keyword_filter": 3,
+        "sources": 0,
+        "sources_failed": 0,
         "relevant": 3,
         "summarized": 2,
         "failed": 2,
@@ -1028,7 +1059,7 @@ def test_build_stats_counts_skipped_budget_only_after_a_budget_stop(db_session: 
 def test_build_stats_counts_an_item_failing_in_both_stages_once(db_session: Session) -> None:
     result = _mixed_result(db_session, BudgetTracker(100))
     a = result.taken[0]
-    both = RunResult(
+    both = RunDraft(
         job_id=result.job_id,
         run_id=result.run_id,
         counts=result.counts,
@@ -1052,7 +1083,7 @@ def test_build_stats_with_an_unpriced_model_is_incomplete(db_session: Session) -
 
 def test_build_stats_without_taken_items_is_all_zero(db_session: Session) -> None:
     job = make_job(db_session)
-    result = RunResult(
+    result = RunDraft(
         job_id=job.id,
         run_id=1,
         counts=StageCounts(found=0, new=0, after_keyword_filter=0),
@@ -1158,7 +1189,7 @@ def test_decide_status_table(
         budget.record(_entry(5, 5))
         with pytest.raises(BudgetExceeded):
             budget.check()
-    result = RunResult(
+    result = RunDraft(
         job_id=job.id,
         run_id=1,
         counts=_COUNTS,
@@ -1169,6 +1200,103 @@ def test_decide_status_table(
         budget=budget,
     )
     assert decide_status(result) == expected
+
+
+# --- Source outcomes in the status rule (#21, US2) ---------------------------------------------
+
+
+def _source_result(
+    db_session: Session,
+    *,
+    sources: int,
+    sources_failed: int,
+    outcomes: list[tuple[ItemStatus, ItemStatus | None]] = (),  # type: ignore[assignment]
+    exceeded: bool = False,
+) -> RunDraft:
+    job = make_job(db_session)
+    run = make_run(db_session, job)
+    items = [
+        make_item(db_session, job, url=f"https://example.com/{n}") for n in range(len(outcomes))
+    ]
+    ItemRepository(db_session).mark_taken(items, run.id)
+    relevance, summaries = [], []
+    for item, (rated, summarized) in zip(items, outcomes, strict=True):
+        relevance.append(
+            _rel(item, rated, "LLMUnavailableError: x" if rated == ItemStatus.FAILED else None)
+        )
+        if summarized is not None:
+            summaries.append(_sum(item, summarized))
+    budget = BudgetTracker(1)
+    if exceeded:
+        budget.record(_entry(5, 5))
+        with pytest.raises(BudgetExceeded):
+            budget.check()
+    return RunDraft(
+        job_id=job.id,
+        run_id=run.id,
+        counts=StageCounts(
+            found=1, new=1, after_keyword_filter=1, sources=sources, sources_failed=sources_failed
+        ),
+        taken=items,
+        relevance=relevance,
+        summaries=summaries,
+        digest=None,
+        budget=budget,
+    )
+
+
+def test_all_sources_failing_fails_the_run_with_its_own_error(db_session: Session) -> None:
+    result = _source_result(db_session, sources=2, sources_failed=2)
+
+    assert decide_status(result) == RunStatus.FAILED
+    run = persist_run(db_session, result)
+    assert (run.status, run.error) == (RunStatus.FAILED, ALL_SOURCES_FAILED_ERROR)
+    assert ALL_SOURCES_FAILED_ERROR == "all sources failed"
+
+
+def test_all_sources_failing_wins_over_items_that_succeeded(db_session: Session) -> None:
+    result = _source_result(
+        db_session,
+        sources=1,
+        sources_failed=1,
+        outcomes=[(ItemStatus.RELEVANT, ItemStatus.SUMMARIZED)],
+    )
+
+    assert decide_status(result) == RunStatus.FAILED
+    assert persist_run(db_session, result).error == ALL_SOURCES_FAILED_ERROR
+
+
+def test_some_sources_failing_makes_the_run_partial(db_session: Session) -> None:
+    result = _source_result(db_session, sources=2, sources_failed=1)
+
+    assert decide_status(result) == RunStatus.PARTIAL
+    assert persist_run(db_session, result).error is None
+
+
+def test_no_adapter_sources_do_not_fail_the_run(db_session: Session) -> None:
+    result = _source_result(db_session, sources=0, sources_failed=0)
+
+    assert decide_status(result) == RunStatus.SUCCEEDED
+
+
+def test_the_item_rules_still_apply_when_the_sources_are_healthy(db_session: Session) -> None:
+    all_failed = _source_result(
+        db_session, sources=1, sources_failed=0, outcomes=[(ItemStatus.FAILED, None)]
+    )
+    assert decide_status(all_failed) == RunStatus.FAILED
+    assert persist_run(db_session, all_failed).error == ALL_FAILED_ERROR
+
+
+def test_a_budget_stop_is_partial_with_healthy_sources(db_session: Session) -> None:
+    result = _source_result(db_session, sources=1, sources_failed=0, exceeded=True)
+
+    assert decide_status(result) == RunStatus.PARTIAL
+
+
+def test_build_stats_reports_the_source_counts(db_session: Session) -> None:
+    stats = build_stats(_source_result(db_session, sources=3, sources_failed=2))
+
+    assert (stats["sources"], stats["sources_failed"]) == (3, 2)
 
 
 async def test_all_items_failing_is_saved_through_the_normal_path(
@@ -1268,7 +1396,7 @@ def test_persist_run_rejects_a_digest_naming_a_relevant_unsummarized_item(
 ) -> None:
     base = _bare_result(db_session, digest=None, budget=_exceeded_budget())
     done, pending = base.taken
-    result = RunResult(
+    result = RunDraft(
         job_id=base.job_id,
         run_id=base.run_id,
         counts=base.counts,
@@ -1285,7 +1413,7 @@ def test_persist_run_rejects_a_digest_naming_a_relevant_unsummarized_item(
 def test_persist_run_accepts_processed_items_after_a_budget_stop(db_session: Session) -> None:
     base = _bare_result(db_session, digest=None, budget=_exceeded_budget())
     done, pending = base.taken
-    result = RunResult(
+    result = RunDraft(
         job_id=base.job_id,
         run_id=base.run_id,
         counts=base.counts,
@@ -1317,7 +1445,7 @@ def test_persist_run_without_budget_stop_rejects_a_digest_of_unsummarized_items(
     """A digest uses successfully processed items only (FR-005), with or without a budget stop."""
     base = _bare_result(db_session, digest=None, item_count=1)
     (item,) = base.taken
-    result = RunResult(
+    result = RunDraft(
         job_id=base.job_id,
         run_id=base.run_id,
         counts=base.counts,
@@ -1386,6 +1514,8 @@ async def test_scenario_1_three_items_two_in_digest_succeeds(
         "found": 10,
         "new": 4,
         "after_keyword_filter": 3,
+        "sources": 0,
+        "sources_failed": 0,
         "relevant": 3,
         "summarized": 3,
         "failed": 0,
@@ -1438,7 +1568,7 @@ async def test_scenario_3_budget_stop_blocks_calls_and_counts_skipped_items(
         summaries = await summarize_items(
             [i for i in items if i.status == ItemStatus.RELEVANT], summary
         )
-        result = RunResult(
+        result = RunDraft(
             job_id=seed.job_id,
             run_id=seed.run_id,
             counts=_COUNTS,
@@ -1557,7 +1687,7 @@ async def test_scenario_9_unpriced_model_is_stored_as_incomplete_cost(
         user="u",
         per_item=False,
     )
-    result = RunResult(
+    result = RunDraft(
         job_id=seed.job_id,
         run_id=seed.run_id,
         counts=_COUNTS,
@@ -1589,7 +1719,7 @@ async def test_scenario_11_a_run_without_items_succeeds_with_zero_usage(
     factory = session_factory(db_engine)
     seed = _seed(factory, count=0)
     session = factory()
-    result = RunResult(
+    result = RunDraft(
         job_id=seed.job_id,
         run_id=seed.run_id,
         counts=StageCounts(found=0, new=0, after_keyword_filter=0),
@@ -1626,3 +1756,143 @@ async def test_budget_stop_keeps_an_untouched_retry_item_failed_and_undoes_its_a
     run = _run_row(factory, seed.run_id)
     assert run.stats is not None
     assert (run.stats["failed"], run.stats["skipped_budget"]) == (0, 2)
+
+
+# --- Dry run finish (#21, US6) ---------------------------------------------------------------
+
+
+async def test_finish_dry_run_stores_stats_and_rolls_the_work_back(
+    db_engine: Engine, clean_jobs: None
+) -> None:
+    factory = session_factory(db_engine)
+    seed = _seed(factory)
+    session, result = await _run_stages(factory, seed)
+    result = dataclasses.replace(
+        result,
+        counts=StageCounts(found=10, new=4, after_keyword_filter=3, sources=2, sources_failed=1),
+        dry_run=True,
+    )
+
+    status = finish_dry_run(factory, session, result)
+    session.close()
+
+    assert status == RunStatus.PARTIAL
+    run = _run_row(factory, seed.run_id)
+    assert run.status == RunStatus.PARTIAL
+    assert run.stats is not None
+    assert run.stats["dry_run"] is True
+    assert (run.stats["sources"], run.stats["sources_failed"]) == (2, 1)
+    assert run.stats["llm_calls"] == 4 and run.stats["tokens"] == 720
+    assert run.finished_at is not None
+    assert _usage_rows(factory, seed.run_id) == []  # rolled back, the ledger is not replayed
+    with factory() as check:
+        assert UsageRepository(check).totals_for_run(seed.run_id).input_tokens == 0
+    assert _digests(factory) == []
+    assert _status_of(factory, seed.item_ids) == [ItemStatus.NEW] * 2  # committed take only
+
+
+async def test_finish_dry_run_failing_all_sources_stores_the_sources_error(
+    db_engine: Engine, clean_jobs: None
+) -> None:
+    factory = session_factory(db_engine)
+    seed = _seed(factory)
+    session, result = await _run_stages(factory, seed, digest=False)
+    result = dataclasses.replace(
+        result,
+        counts=StageCounts(found=0, new=0, after_keyword_filter=0, sources=1, sources_failed=1),
+    )
+
+    status = finish_dry_run(factory, session, result)
+    session.close()
+
+    run = _run_row(factory, seed.run_id)
+    assert status == RunStatus.FAILED
+    assert run.error == ALL_SOURCES_FAILED_ERROR
+
+
+async def test_finish_dry_run_that_cannot_write_falls_back_to_a_failed_run(
+    db_engine: Engine, clean_jobs: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    factory = session_factory(db_engine)
+    seed = _seed(factory)
+    session, drafted = await _run_stages(factory, seed)
+    result = dataclasses.replace(drafted, dry_run=True)
+    calls: list[int] = []
+    real_finish = RunRepository.finish
+
+    def flaky_finish(self: RunRepository, run: Run, status: RunStatus, **kw: Any) -> Run:
+        calls.append(1)
+        if len(calls) == 1:
+            raise _injected_error(OperationalError)
+        return real_finish(self, run, status, **kw)
+
+    monkeypatch.setattr(RunRepository, "finish", flaky_finish)
+
+    status = finish_dry_run(factory, session, result)
+    session.close()
+
+    assert status == RunStatus.FAILED
+    run = _run_row(factory, seed.run_id)
+    assert (run.status, run.error) == (RunStatus.FAILED, "OperationalError: run failed")
+    assert _usage_rows(factory, seed.run_id) == []  # a dry run never replays usage rows
+    assert run.stats is not None and run.stats["dry_run"] is True
+
+
+async def test_finish_dry_run_rejects_an_invalid_digest_as_a_failed_run(
+    db_engine: Engine, clean_jobs: None
+) -> None:
+    factory = session_factory(db_engine)
+    seed = _seed(factory)
+    session, result = await _run_stages(factory, seed)
+    bad = dataclasses.replace(result, digest=DigestDraft(title="t", body="b", item_ids=[999_999]))
+
+    status = finish_dry_run(factory, session, bad)
+    session.close()
+
+    assert status == RunStatus.FAILED
+    assert _run_row(factory, seed.run_id).error == "ValueError: run failed"
+
+
+def test_record_failed_run_without_replay_keeps_no_usage_rows(
+    db_engine: Engine, clean_jobs: None
+) -> None:
+    factory = session_factory(db_engine)
+    seed = _seed(factory)
+    budget = BudgetTracker(1000)
+    budget.record(_call_entry("fast-model", 100, 10))
+
+    status = record_failed_run(
+        factory,
+        job_id=seed.job_id,
+        run_id=seed.run_id,
+        budget=budget,
+        error=RuntimeError("x"),
+        replay_usage=False,
+    )
+
+    assert status == RunStatus.FAILED
+    assert _usage_rows(factory, seed.run_id) == []
+    run = _run_row(factory, seed.run_id)
+    assert run.stats is not None
+    assert run.stats["dry_run"] is True and run.stats["tokens"] == 110
+
+
+async def test_finish_dry_run_recovers_and_reraises_a_keyboard_interrupt(
+    db_engine: Engine, clean_jobs: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    factory = session_factory(db_engine)
+    seed = _seed(factory)
+    session, drafted = await _run_stages(factory, seed)
+    result = dataclasses.replace(drafted, dry_run=True)
+
+    def _interrupt(*args: object, **kwargs: object) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("invio.graph.nodes.persist.build_stats", _interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        finish_dry_run(factory, session, result)
+    session.close()
+
+    run = _run_row(factory, seed.run_id)
+    assert (run.status, run.error) == (RunStatus.FAILED, "KeyboardInterrupt: run failed")
+    assert _usage_rows(factory, seed.run_id) == []
