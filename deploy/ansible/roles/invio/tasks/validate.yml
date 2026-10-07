@@ -1,5 +1,7 @@
 ---
 # Validate every input before anything on the host changes (FR-016).
+# Values are read with lookup('vars', item) so that a value that references another variable
+# (for example "{{ vault_invio_db_password }}") is templated first and then checked.
 # Failure messages name the variable and never contain its value. No task here uses no_log:
 # the conditions only look at length, type and the absence of newlines, and an assert that
 # fails would otherwise hide the variable name from the operator.
@@ -17,9 +19,9 @@
   ansible.builtin.assert:
     that:
       - item in vars
-      - vars[item] is string
-      - vars[item] | length > 0
-      - "'\\n' not in vars[item]"
+      - lookup('vars', item) is string
+      - lookup('vars', item) | length > 0
+      - "'\\n' not in lookup('vars', item)"
     fail_msg: "{{ item }} is required and must be a non-empty single-line string"
     quiet: true
   loop:
@@ -40,8 +42,8 @@
 - name: Check the string variables that end up in the env file or in unit files
   ansible.builtin.assert:
     that:
-      - vars[item] is string or vars[item] is number
-      - "'\\n' not in (vars[item] | string)"
+      - lookup('vars', item) is string or lookup('vars', item) is number
+      - "'\\n' not in (lookup('vars', item) | string)"
     fail_msg: "{{ item }} must be a single-line string"
     quiet: true
   loop:
@@ -59,8 +61,8 @@
 - name: Check the optional string variables when they are set
   ansible.builtin.assert:
     that:
-      - vars[item] is string
-      - "'\\n' not in vars[item]"
+      - lookup('vars', item) is string
+      - "'\\n' not in lookup('vars', item)"
     fail_msg: "{{ item }} must be a single-line string"
     quiet: true
   loop:
@@ -92,10 +94,12 @@
     that:
       - invio_env_extra is mapping
       - invio_env_extra.keys() | reject('match', '^INVIO_[A-Z0-9_]+$') | list | length == 0
+      - invio_env_extra.keys() | list | intersect(invio_managed_env_keys) | length == 0
       - invio_env_extra.values() | map('string') | join('|') is not search('\n')
     fail_msg: >-
-      invio_env_extra must be a mapping whose keys match ^INVIO_[A-Z0-9_]+$ and whose values
-      are single-line strings
+      invio_env_extra must be a mapping whose keys match ^INVIO_[A-Z0-9_]+$, are not set by
+      the role itself (use the dedicated invio_* variable instead; INVIO_ENV_FILE is never set)
+      and whose values are single-line strings
     quiet: true
 
 - name: Check the database administrator for an external server

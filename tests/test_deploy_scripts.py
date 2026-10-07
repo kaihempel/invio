@@ -271,3 +271,25 @@ def test_verify_units_real_systemd_rejects_a_broken_unit(
 def test_verify_units_real_systemd_accepts_the_shipped_units() -> None:
     result = _run([BASH, str(VERIFY_UNITS)])
     assert (result.returncode, result.stdout, result.stderr) == (0, "", "")
+
+
+def test_no_secrets_all_secrets_empty_is_a_usage_error(log: Path) -> None:
+    for secrets in (("",), ("", "")):
+        result = no_secrets(log, *secrets)
+        assert result.returncode == 2, secrets
+        assert "usage" in result.stderr or "empty" in result.stderr
+
+
+def test_verify_units_verifies_every_copied_unit_not_only_invio_ones(
+    stub_analyze: Path, tmp_path: Path
+) -> None:
+    tree = tmp_path / "repo"
+    (tree / "deploy" / "scripts").mkdir(parents=True)
+    (tree / "deploy" / "systemd").mkdir()
+    (tree / "deploy" / "systemd" / "other-thing.timer").write_text("[Timer]\n", encoding="utf-8")
+    (tree / "deploy" / "systemd" / "invio-a.service").write_text("[Service]\n", encoding="utf-8")
+    script = Path(shutil.copy2(VERIFY_UNITS, tree / "deploy" / "scripts"))
+    result = verify_units(stub_analyze, tmp_path, script=script)
+    assert result.returncode == 0, result.stderr
+    args = (tmp_path / "args.txt").read_text(encoding="utf-8").splitlines()
+    assert sorted(Path(arg).name for arg in args[2:]) == ["invio-a.service", "other-thing.timer"]

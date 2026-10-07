@@ -30,3 +30,23 @@ invio_memory_overrides:
   - unit: invio-notify-retry.service
     value: "{{ invio_notify_retry_memory_max }}"
     default: 256M
+# Keys the template writes itself (plus INVIO_ENV_FILE, which must never be set on a server):
+# invio_env_extra may not repeat them. tests/test_deploy_role.py keeps this list in step with
+# templates/invio.env.j2.
+invio_managed_env_keys:
+  - INVIO_DATABASE_URL
+  - INVIO_SMTP_HOST
+  - INVIO_SMTP_PORT
+  - INVIO_SMTP_SECURITY
+  - INVIO_SMTP_FROM
+  - INVIO_SMTP_USER
+  - INVIO_SMTP_PASSWORD
+  - INVIO_MISTRAL_API_KEY
+  - INVIO_OPENAI_API_KEY
+  - INVIO_ANTHROPIC_API_KEY
+  - INVIO_GOOGLE_API_KEY
+  - INVIO_LOG_LEVEL
+  - INVIO_HTTP_CONTACT
+  - INVIO_ARCHIVE_DIR
+  - INVIO_HEALTHCHECK_URL
+  - INVIO_ENV_FILE

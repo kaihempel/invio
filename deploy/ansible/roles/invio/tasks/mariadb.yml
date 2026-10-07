@@ -1,13 +1,22 @@
 ---
 # Database and database user (research R10). Never drops anything (G8).
 # Every task that touches the database password uses no_log (FR-017).
+# A server on localhost (managed by this role or by another tool) is administered over the root
+# socket; only a remote host needs invio_db_admin_user/_password (validated first).
 - name: Check that the external MariaDB server is reachable
   ansible.builtin.wait_for:
     host: "{{ invio_db_host }}"
     port: "{{ invio_db_port }}"
     timeout: 10
     msg: "MariaDB server {{ invio_db_host }}:{{ invio_db_port }} is not reachable"
-  when: not invio_mariadb_manage_server
+  when: not invio_mariadb_manage_server and invio_db_host != 'localhost'
+
+- name: Check that the local MariaDB server that is managed elsewhere is running
+  ansible.builtin.wait_for:
+    path: /run/mysqld/mysqld.sock
+    timeout: 10
+    msg: "MariaDB server socket /run/mysqld/mysqld.sock does not exist"
+  when: not invio_mariadb_manage_server and invio_db_host == 'localhost'
 
 - name: Install the MariaDB server and the Python driver for the Ansible modules
   ansible.builtin.apt:
@@ -29,11 +38,11 @@
     encoding: utf8mb4
     collation: utf8mb4_unicode_ci
     state: present
-    login_unix_socket: "{{ '/run/mysqld/mysqld.sock' if invio_mariadb_manage_server else omit }}"
-    login_host: "{{ omit if invio_mariadb_manage_server else invio_db_host }}"
-    login_port: "{{ omit if invio_mariadb_manage_server else invio_db_port }}"
-    login_user: "{{ omit if invio_mariadb_manage_server else invio_db_admin_user }}"
-    login_password: "{{ omit if invio_mariadb_manage_server else invio_db_admin_password }}"
+    login_unix_socket: "{{ '/run/mysqld/mysqld.sock' if invio_db_host == 'localhost' else omit }}"
+    login_host: "{{ omit if invio_db_host == 'localhost' else invio_db_host }}"
+    login_port: "{{ omit if invio_db_host == 'localhost' else invio_db_port }}"
+    login_user: "{{ omit if invio_db_host == 'localhost' else invio_db_admin_user }}"
+    login_password: "{{ omit if invio_db_host == 'localhost' else invio_db_admin_password }}"
   no_log: true
 
 - name: Create the database user (the password is only updated when it differs)
@@ -44,9 +53,9 @@
     priv: "{{ invio_db_name }}.*:ALL"
     update_password: always
     state: present
-    login_unix_socket: "{{ '/run/mysqld/mysqld.sock' if invio_mariadb_manage_server else omit }}"
-    login_host: "{{ omit if invio_mariadb_manage_server else invio_db_host }}"
-    login_port: "{{ omit if invio_mariadb_manage_server else invio_db_port }}"
-    login_user: "{{ omit if invio_mariadb_manage_server else invio_db_admin_user }}"
-    login_password: "{{ omit if invio_mariadb_manage_server else invio_db_admin_password }}"
+    login_unix_socket: "{{ '/run/mysqld/mysqld.sock' if invio_db_host == 'localhost' else omit }}"
+    login_host: "{{ omit if invio_db_host == 'localhost' else invio_db_host }}"
+    login_port: "{{ omit if invio_db_host == 'localhost' else invio_db_port }}"
+    login_user: "{{ omit if invio_db_host == 'localhost' else invio_db_admin_user }}"
+    login_password: "{{ omit if invio_db_host == 'localhost' else invio_db_admin_password }}"
   no_log: true

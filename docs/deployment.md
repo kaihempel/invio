@@ -92,7 +92,7 @@ Optional (defaults in `defaults/main.yml`):
 | `invio_python_version` | `3.12.13` (full patch version) |
 | `invio_smtp_port`, `invio_smtp_security`, `invio_smtp_user`, `invio_smtp_password` | `587`, `starttls`, unset, unset |
 | `invio_log_level`, `invio_healthcheck_url` | `INFO`, unset |
-| `invio_env_extra` | `{}`: more `INVIO_*` settings, key to value |
+| `invio_env_extra` | `{}`: more `INVIO_*` settings, key to value; keys the role writes itself are rejected |
 | `invio_run_due_memory_max`, `invio_notify_retry_memory_max` | `1G`, `256M` (applied as a drop-in) |
 | `invio_update_wait_timeout` | `11100` seconds to wait for a running service before an update |
 
@@ -108,8 +108,11 @@ appears in output, also not with `-v` or on a failure.
 
 With `invio_mariadb_manage_server: true` the role installs and starts `mariadb-server` and
 administers it over the root Unix socket. With `false` the role installs no server package and
-changes no server configuration: it checks that `invio_db_host:invio_db_port` is reachable, then
-creates the database and user through `invio_db_admin_user`. Use this when another tool manages
+changes no server configuration: for a remote `invio_db_host` it checks that
+`invio_db_host:invio_db_port` is reachable, then creates the database and user through
+`invio_db_admin_user`. When `invio_db_host` is `localhost`, the server is administered over the
+root Unix socket (`/run/mysqld/mysqld.sock`) like a managed one, and no admin variables are
+needed. Use this when another tool manages
 the server, for example `debops.mariadb`. Set `invio_db_user_host: "%"` when the application host
 differs from the database host. The role never drops a database, user or table.
 

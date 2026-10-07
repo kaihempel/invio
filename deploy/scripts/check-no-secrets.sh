@@ -18,6 +18,17 @@ if [ ! -f "$log" ]; then
     exit 2
 fi
 
+has_secret=0
+for secret in "$@"; do
+    if [ -n "$secret" ]; then
+        has_secret=1
+    fi
+done
+if [ "$has_secret" -eq 0 ]; then
+    echo "usage: at least one non-empty secret is required (all arguments are empty)" >&2
+    exit 2
+fi
+
 found=0
 index=0
 for secret in "$@"; do

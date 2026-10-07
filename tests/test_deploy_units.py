@@ -574,3 +574,19 @@ def test_memory_override_template(tmp_path: Path) -> None:
     unit = parse_unit(path)
     assert unit == {"Service": {"MemoryMax": ["2G"]}}
     assert "Managed by Ansible role invio" in text.splitlines()[0]
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"invio_http_contact": "a\nINVIO_X=1"},
+        {"invio_smtp_from": "a\rb"},
+        {"invio_llm_api_keys": {"openai": "k\nINVIO_Y=2"}},
+        {"invio_env_extra": {"INVIO_Z": "v\nINVIO_W=3"}},
+        {"invio_db_password": "p\nINVIO_V=4"},
+    ],
+)
+def test_env_template_refuses_values_with_newlines(override: dict[str, object]) -> None:
+    """Defense in depth: validate.yml checks the inputs, the template refuses them too."""
+    with pytest.raises(jinja2.UndefinedError, match="newline"):
+        _render_template("invio.env.j2", **{**ENV_VARS, **override})

@@ -40,13 +40,13 @@ that changes the host.
 | `invio_db_name` / `invio_db_user` | `invio` / `invio` |
 | `invio_db_user_host` | `localhost` |
 | `invio_git_key_file` | unset (deploy key path on the target, for private repos) |
-| `invio_uv_version` / `invio_uv_sha256` | pinned values matching CI |
-| `invio_python_version` | `3.12` |
+| `invio_uv_version` / `invio_uv_sha256` | pinned uv release (matches `setup-uv` in CI); `invio_uv_sha256` is a mapping keyed by `ansible_architecture` (`x86_64`, `aarch64`), one checksum per release tarball |
+| `invio_python_version` | `3.12.13` (full patch version, so every host and re-run has the same interpreter) |
 | `invio_smtp_port` / `invio_smtp_security` | `587` / `starttls` |
 | `invio_smtp_user` / `invio_smtp_password` | unset |
 | `invio_log_level` | `INFO` |
 | `invio_healthcheck_url` | unset |
-| `invio_env_extra` | `{}` |
+| `invio_env_extra` | `{}` (keys must match `^INVIO_[A-Z0-9_]+$` and must not be a key the role writes itself, including `INVIO_ENV_FILE`) |
 | `invio_run_due_memory_max` / `invio_notify_retry_memory_max` | `1G` / `256M` |
 | `invio_update_wait_timeout` | `11100` (seconds: 3 h + 5 min) |
 

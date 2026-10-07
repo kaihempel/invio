@@ -56,7 +56,7 @@ for dir in /usr/lib/systemd/system /lib/systemd/system; do
     fi
 done
 
-targets=("$root"/etc/systemd/system/invio-*)
+targets=("$root"/etc/systemd/system/*)
 status=0
 output="$(systemd-analyze verify --root="$root" "${targets[@]}" 2>&1)" || status=$?
 if [ "$status" -ne 0 ] || [ -n "$output" ]; then

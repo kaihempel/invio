@@ -90,8 +90,7 @@ def test_contract_tables_parse() -> None:
 
 
 def test_defaults_match_the_contract_table() -> None:
-    # Documented deviations (pr-description.md): the Python pin is a full patch version (3.12.x)
-    # and the uv checksum is a mapping per architecture ("pinned values", not compared here).
+    # The uv checksum row is prose plus a per-architecture mapping and is not compared here.
     for names, raw in _contract_section("### Defaults"):
         if raw.startswith("unset"):
             for name in names:
@@ -105,10 +104,7 @@ def test_defaults_match_the_contract_table() -> None:
         if len(values) != len(names):
             continue  # prose such as "pinned values matching CI"
         for name, value in zip(names, values, strict=True):
-            if name == "invio_python_version":
-                assert str(DEFAULTS[name]).startswith(f"{value}."), DEFAULTS[name]
-            else:
-                assert DEFAULTS[name] == yaml.safe_load(value), name
+            assert DEFAULTS[name] == yaml.safe_load(value), name
 
 
 def test_defaults_define_nothing_beyond_the_contract() -> None:
@@ -474,11 +470,6 @@ def test_validate_rejects_bad_input_naming_the_variable(
 
 
 @needs_ansible
-@pytest.mark.xfail(
-    strict=True,
-    reason="defect: validate.yml checks vars[item], which is not templated, so a value that "
-    "references another variable (vault_*, as in playbook.example.yml) is never validated",
-)
 @pytest.mark.parametrize(
     ("name", "source", "named"),
     [
@@ -496,12 +487,84 @@ def test_validate_checks_values_behind_vault_style_references(
 
 
 @needs_ansible
-@pytest.mark.xfail(
-    strict=True,
-    reason="defect: validate.yml accepts invio_env_extra keys that the role already writes "
-    "(contract: 'any other INVIO_*'); the env file then has a duplicate key",
+@pytest.mark.parametrize(
+    "key",
+    [
+        "INVIO_DATABASE_URL",
+        "INVIO_ARCHIVE_DIR",
+        "INVIO_ENV_FILE",
+        "INVIO_SMTP_HOST",
+        "INVIO_LOG_LEVEL",
+        "INVIO_MISTRAL_API_KEY",
+        "INVIO_HEALTHCHECK_URL",
+    ],
 )
-@pytest.mark.parametrize("key", ["INVIO_DATABASE_URL", "INVIO_ARCHIVE_DIR", "INVIO_ENV_FILE"])
 def test_validate_rejects_env_extra_keys_the_role_manages(tmp_path: Path, key: str) -> None:
     result = run_validate(tmp_path, {**VALID, "invio_env_extra": {key: "x"}})
     _assert_fails_naming(result, "invio_env_extra")
+
+
+def test_managed_env_keys_list_matches_what_the_template_writes() -> None:
+    """validate.yml must reject exactly the keys that invio.env.j2 writes itself."""
+    template = (ROLE / "templates" / "invio.env.j2").read_text(encoding="utf-8")
+    written = set(re.findall(r"^(INVIO_[A-Z_]+)=", template, flags=re.M))
+    written.discard("INVIO_")
+    providers = yaml.safe_load((ROLE / "vars" / "main.yml").read_text(encoding="utf-8"))[
+        "invio_llm_providers"
+    ]
+    written |= {f"INVIO_{provider.upper()}_API_KEY" for provider in providers}
+    managed = yaml.safe_load((ROLE / "vars" / "main.yml").read_text(encoding="utf-8"))[
+        "invio_managed_env_keys"
+    ]
+    assert set(managed) == written | {"INVIO_ENV_FILE"}
+
+
+def _login_arguments() -> list[tuple[str, dict[str, Any]]]:
+    tasks = yaml.safe_load((ROLE / "tasks" / "mariadb.yml").read_text(encoding="utf-8"))
+    found = []
+    for task in tasks:
+        for module, args in task.items():
+            if module.startswith("ansible.mysql.") and isinstance(args, dict):
+                found.append((task["name"], args))
+    return found
+
+
+@pytest.mark.parametrize(
+    ("manage", "host", "uses_admin"),
+    [(True, "localhost", False), (False, "localhost", False), (False, "db.example.com", True)],
+)
+def test_database_login_needs_the_admin_account_only_for_a_remote_host(
+    manage: bool, host: str, uses_admin: bool
+) -> None:
+    """Contract: invio_db_admin_* are required only for a non-localhost host.
+
+    The login arguments are rendered with the admin variables undefined: for a local server
+    (managed or not) rendering must not need them and must fall back to the root socket.
+    """
+    import jinja2
+
+    omit = "__omit__"
+    env = jinja2.Environment(undefined=jinja2.StrictUndefined)
+    variables: dict[str, Any] = {
+        "omit": omit,
+        "invio_mariadb_manage_server": manage,
+        "invio_db_host": host,
+        "invio_db_port": 3306,
+        "invio_db_name": "invio",
+        "invio_db_user": "invio",
+        "invio_db_user_host": "localhost",
+        "invio_db_password": "x",
+    }
+    tasks = _login_arguments()
+    assert tasks
+    for name, args in tasks:
+        logins = {k: v for k, v in args.items() if k.startswith("login_")}
+        if uses_admin:
+            variables.update(invio_db_admin_user="root", invio_db_admin_password="pw")
+        rendered = {k: env.from_string(str(v)).render(**variables) for k, v in logins.items()}
+        if uses_admin:
+            assert rendered["login_user"] == "root", name
+            assert rendered["login_unix_socket"] == omit, name
+        else:
+            assert rendered["login_unix_socket"] == "/run/mysqld/mysqld.sock", name
+            assert {rendered[k] for k in rendered if k != "login_unix_socket"} == {omit}, name
