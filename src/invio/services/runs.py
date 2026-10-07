@@ -13,10 +13,10 @@ from typing import Any, Self
 
 from sqlalchemy.orm import Session, sessionmaker
 
-from invio.config.job import JobConfigError, validate_job
+from invio.config.job import known_timezones
 from invio.config.settings import Settings, get_settings
 from invio.db.models import Run
-from invio.db.repositories import JobRepository, RunRepository
+from invio.db.repositories import JobRepository, NotificationRepository, RunRepository
 from invio.db.session import create_db_engine, session_factory, session_scope
 from invio.domain import RunStatus
 from invio.services.jobs import JobNotFoundError
@@ -75,19 +75,28 @@ class RunErrorView:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class RunDetail(RunSummary):
-    """A run with everything ``run show`` prints; ``errors`` is ``None`` for a legacy run."""
+    """A run with everything ``run show`` prints; ``errors`` is ``None`` for a legacy run.
+
+    ``notifications`` is ``(sent, not sent)`` counted from the run's notification rows, or
+    ``None`` when the run has none (a dry run, a failed run, or nothing was delivered).
+    """
 
     error: str | None
     stats: Mapping[str, Any]
     errors: tuple[RunErrorView, ...] | None
     errors_omitted: int
+    notifications: tuple[int, int] | None
 
 
-def _timezone(config: Mapping[str, Any] | None) -> str:
-    try:
-        return validate_job(dict(config or {})).schedule.timezone
-    except JobConfigError:
-        return "UTC"
+def _timezone(zone: object) -> str:
+    """``zone`` if it is a known IANA zone name, else ``UTC`` (the stored config is unchecked)."""
+    return zone if isinstance(zone, str) and zone in known_timezones() else "UTC"
+
+
+def _stored_zone(config: Mapping[str, Any] | None) -> object:
+    """The raw ``schedule.timezone`` of a stored job config, unvalidated."""
+    schedule = (config or {}).get("schedule")
+    return schedule.get("timezone") if isinstance(schedule, Mapping) else None
 
 
 def stat_count(stats: Mapping[str, Any], key: str) -> int | None:
@@ -131,7 +140,7 @@ def _summary_fields(run: Run, job_name: str, timezone: str) -> dict[str, Any]:
     return {
         "id": run.id,
         "job_name": job_name,
-        "status": RunStatus(run.status),
+        "status": run.status,
         "dry_run": stats.get("dry_run") is True,
         "started_at": run.started_at,
         "finished_at": run.finished_at,
@@ -166,13 +175,12 @@ class RunService:
                 if row is None:
                     raise JobNotFoundError(job)
                 job_id = row.id
-            zones: dict[str, str] = {}
-            summaries: builtins.list[RunSummary] = []
-            for run, name, config in RunRepository(session).list_recent(job_id=job_id, limit=limit):
-                if name not in zones:
-                    zones[name] = _timezone(config)
-                summaries.append(RunSummary(**_summary_fields(run, name, zones[name])))
-            return summaries
+            return [
+                RunSummary(**_summary_fields(run, name, _timezone(zone)))
+                for run, name, zone in RunRepository(session).list_recent(
+                    job_id=job_id, limit=limit
+                )
+            ]
 
     def get(self, run_id: int) -> RunDetail:
         """Return one run with its stats and stored errors; ``RunNotFoundError`` if absent."""
@@ -183,11 +191,13 @@ class RunService:
             job = JobRepository(session).get(run.job_id)
             name = job.name if job is not None else ""
             stats = dict(run.stats or {})
-            zone = _timezone(job.config if job is not None else None)
+            zone = _timezone(_stored_zone(job.config if job is not None else None))
+            sent, not_sent = NotificationRepository(session).delivery_counts(run_id)
             return RunDetail(
                 **_summary_fields(run, name, zone),
                 error=run.error,
                 stats=stats,
                 errors=_parse_errors(stats),
                 errors_omitted=stat_count(stats, "errors_omitted") or 0,
+                notifications=(sent, not_sent) if sent or not_sent else None,
             )

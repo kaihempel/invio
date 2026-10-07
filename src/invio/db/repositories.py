@@ -187,22 +187,23 @@ class RunRepository:
 
     def list_recent(
         self, *, job_id: int | None = None, limit: int = 20
-    ) -> builtins.list[tuple[Run, str, dict[str, Any]]]:
-        """Return ``(run, job name, job config)`` newest first (``started_at DESC, id DESC``).
+    ) -> builtins.list[tuple[Run, str, str | None]]:
+        """Return ``(run, job name, schedule timezone)`` newest first (``started_at DESC, id
+        DESC``).
 
-        One query; ``job_id`` restricts it to one job.
+        One query that reads only ``config.schedule.timezone`` of the job config (unvalidated,
+        ``None`` if absent); ``job_id`` restricts it to one job.
         """
+        zone = Job.config["schedule"]["timezone"].as_string()
         stmt = (
-            select(Run, Job.name, Job.config)
+            select(Run, Job.name, zone)
             .join(Job, Job.id == Run.job_id)
             .order_by(Run.started_at.desc(), Run.id.desc())
             .limit(limit)
         )
         if job_id is not None:
             stmt = stmt.where(Run.job_id == job_id)
-        return [
-            (run, name, dict(config or {})) for run, name, config in self._session.execute(stmt)
-        ]
+        return [(run, name, tz) for run, name, tz in self._session.execute(stmt)]
 
     def has_successful_run(self, job_id: int) -> bool:
         """Whether the job has any run with status ``succeeded`` or ``partial``."""
@@ -647,6 +648,16 @@ class NotificationRepository:
         """Return the run's notifications by id."""
         stmt = select(Notification).where(Notification.run_id == run_id).order_by(Notification.id)
         return _all(self._session, stmt)
+
+    def delivery_counts(self, run_id: int) -> tuple[int, int]:
+        """Return ``(sent, not sent)`` of the run's notifications.
+
+        Every row that is not ``sent`` counts as not sent (a ``pending`` row was never
+        delivered), like ``deliver_digest`` counts them.
+        """
+        rows = self.list_for_run(run_id)
+        sent = sum(1 for row in rows if row.status == NotificationStatus.SENT)
+        return sent, len(rows) - sent
 
 
 @dataclass(frozen=True, slots=True)

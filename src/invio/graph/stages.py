@@ -31,9 +31,9 @@ from invio.db.repositories import (
     UsageRepository,
 )
 from invio.db.session import session_scope
-from invio.domain import Candidate, ItemStatus, NotificationStatus, RunStatus
+from invio.domain import Candidate, ItemStatus, RunStatus
 from invio.graph.budget import BudgetTracker
-from invio.graph.errors import MAX_TITLE_CHARS, stored_errors
+from invio.graph.errors import DELIVERY_ERROR, stored_errors
 from invio.graph.nodes.deduplicate import deduplicate as run_deduplicate
 from invio.graph.nodes.extract import extract_item
 from invio.graph.nodes.keyword_filter import keyword_filter
@@ -67,8 +67,6 @@ from invio.graph.state import (
 from invio.llm.retry import RetryingProvider
 from invio.retry import retrying
 from invio.sources.errors import FetchError, is_transient_fetch
-from invio.sources.urls import redact_url, without_query
-from invio.textsafe import strip_control
 
 __all__ = [
     "LockExpiredError",
@@ -90,7 +88,6 @@ __all__ = [
     "release_lock",
     "rollback_work_session",
     "score_relevance",
-    "stage_event",
     "summarize",
     "synthesize_digest",
 ]
@@ -170,15 +167,6 @@ def emit(scope: RunScope, event: ProgressEvent | Callable[[], ProgressEvent]) ->
 def emit_stage(scope: RunScope, stage: RunStage) -> None:
     """Report that ``stage`` completed."""
     emit(scope, lambda: stage_event(scope, stage))
-
-
-def item_ref(title: str, url: str) -> ItemRef:
-    """The terminal-safe reference of an item: no control characters, credentials, query or
-    fragment."""
-    return ItemRef(
-        title=strip_control(title, limit=MAX_TITLE_CHARS),
-        url=strip_control(redact_url(without_query(url))),
-    )
 
 
 def source_key(index: int, source: SourceConfig) -> str:
@@ -309,7 +297,7 @@ async def deduplicate(state: RunState, deps: RunDeps, scope: RunScope) -> RunSta
     if not scope.dry_run:
         session.commit()
     scope.item_types.update({item.id: item.type for item in result.items})
-    scope.item_refs.update({item.id: item_ref(item.title, item.url) for item in result.items})
+    scope.item_refs.update({item.id: ItemRef.of(item.title, item.url) for item in result.items})
     counts = StageCounts(found=result.stats.found, new=result.stats.new, after_keyword_filter=0)
     scope.progress.found, scope.progress.new = counts.found, counts.new
     emit_stage(scope, "deduplicate")
@@ -544,23 +532,22 @@ async def notify(state: RunState, deps: RunDeps, scope: RunScope) -> RunState:
         raise
     scope.delivery = report
     emit_stage(scope, "notify")
-    if status is RunStatus.SUCCEEDED and (report.failed > 0 or report.error is not None):
+    if report.failed == 0 and report.error is None:
+        return {}
+    # Stored in the error list so ``run show`` explains a partial run (counts only).
+    update: RunState = {"errors": [RunError(stage="notify", error_class=DELIVERY_ERROR)]}
+    if status is RunStatus.SUCCEEDED:
         _update_run_status(deps, scope, RunStatus.PARTIAL)
-        return {"status": RunStatus.PARTIAL}
-    return {}
+        update["status"] = RunStatus.PARTIAL
+    return update
 
 
 def _delivery_from_rows(deps: RunDeps, scope: RunScope) -> DeliveryReport | None:
-    """The delivery counts stored for this run; ``None`` when they cannot be read.
-
-    Counts like ``deliver_digest``: every row that is not ``sent`` failed (a ``pending`` row
-    was never delivered).
-    """
+    """The delivery counts stored for this run; ``None`` when they cannot be read."""
     try:
         with session_scope(deps.session_factory) as session:
-            rows = NotificationRepository(session).list_for_run(scope.run_id)
-            sent = sum(1 for row in rows if row.status == NotificationStatus.SENT)
-            return DeliveryReport(sent=sent, failed=len(rows) - sent)
+            sent, failed = NotificationRepository(session).delivery_counts(scope.run_id)
+            return DeliveryReport(sent=sent, failed=failed)
     except Exception as err:  # the notifier's error is the one that matters
         logger.error("run.delivery_unreadable", extra={"error": type(err).__name__})
         return None
@@ -664,14 +651,21 @@ def record_errors(
     scope: RunScope,
     errors: Sequence[RunError],
     items: Sequence[ItemResult],
-    failure: BaseException | None,
 ) -> None:
     """Store the run's error list in its stats; a failure is logged and never changes the run.
 
     Used by ``finalize`` and by the safety net of ``run_job``, which only knows the fatal error.
+    The fatal error and the delivery report are read from ``scope``.
     """
     try:
-        entries, omitted = stored_errors(errors, items, scope.item_refs, failure)
+        entries, omitted = stored_errors(
+            errors,
+            items,
+            scope.item_refs,
+            fatal=scope.fatal,
+            failure=scope.failure,
+            delivery=scope.delivery,
+        )
         with session_scope(deps.session_factory) as session:
             scope.errors_recorded = RunRepository(session).record_errors(
                 scope.run_id, [entry.to_json() for entry in entries], omitted=omitted
@@ -698,7 +692,7 @@ async def finalize(state: RunState, deps: RunDeps, scope: RunScope) -> RunState:
         status = record_failure(deps, scope, error, lower_succeeded=fatal.stage == "notify")
     if status is None:
         raise RuntimeError("finalize reached before persist set a status")
-    record_errors(deps, scope, state.get("errors", []), state.get("items", []), scope.failure)
+    record_errors(deps, scope, state.get("errors", []), state.get("items", []))
     next_run_at = release_lock(deps, scope)
     logger.info(
         "run.finalized",

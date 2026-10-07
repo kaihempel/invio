@@ -13,6 +13,7 @@ from invio.config.settings import get_settings
 from invio.db.repositories import RunRepository
 from invio.db.session import create_db_engine, session_factory, session_scope
 from invio.domain import RunStatus
+from invio.graph.ports import DeliveryReport
 from invio.services.runs import RunService
 from tests.pipeline_helpers import add_run, make_job_config, store_job
 from tests.run_cli_helpers import RunCli, run_cli  # noqa: F401
@@ -82,7 +83,10 @@ def test_list_limit(run_cli: RunCli) -> None:
     assert len(run_cli.invoke(["run", "list", "--limit", "2"]).stdout.splitlines()) == 3
     bad = run_cli.invoke(["run", "list", "--limit", "0"])
     assert bad.exit_code == 1
-    assert "--limit must be at least 1" in bad.stderr
+    assert "--limit must be between 1 and 1000" in bad.stderr
+    too_many = run_cli.invoke(["run", "list", "--limit", "1001"])
+    assert too_many.exit_code == 1
+    assert "--limit must be between 1 and 1000" in too_many.stderr
 
 
 # --- run show ------------------------------------------------------------------------------
@@ -372,3 +376,17 @@ def test_list_is_not_wrapped_on_a_narrow_pipe(run_cli: RunCli) -> None:
     lines = result.stdout.splitlines()
     assert len(lines) == 3
     assert all("succeeded (dry)" in line for line in lines[1:])
+
+
+def test_show_explains_a_partial_run_caused_by_delivery(run_cli: RunCli) -> None:
+    run_cli.env.ports.notifier.report = DeliveryReport(sent=2, failed=1, error="smtp secret")
+    run_cli.invoke(["job", "run", "research"])
+    (run,) = run_cli.runs()
+
+    result = run_cli.invoke(["run", "show", str(run.id)])
+
+    assert result.exit_code == 0, result.stderr
+    out = result.stdout
+    assert "Errors (1)" in out
+    assert "1 of 3 notification(s) not sent" in out
+    assert "smtp secret" not in out

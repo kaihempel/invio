@@ -20,11 +20,11 @@ from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, HttpUrl
-from sqlalchemy import Engine, inspect
+from sqlalchemy import Engine, inspect, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from invio.config.job import JobConfig, LLMConfig, ScheduleConfig, SourceConfig
-from invio.db.models import Digest, Item, Job, LlmUsage, Notification
+from invio.db.models import Digest, Item, Job, LlmUsage, Notification, Run
 from invio.db.repositories import JobRepository, RunRepository
 from invio.db.session import session_factory, session_scope
 from invio.domain import Candidate, RunStatus
@@ -151,6 +151,16 @@ class RoutedFakeProvider:
         self.in_flight = 0
         self.max_in_flight = 0
         self.closed = False
+
+    def route(self, purpose: str, route: Route) -> None:
+        """Replace the route of ``purpose`` (``relevance``, ``summarize`` or ``synthesize``)."""
+        if purpose not in self._routes:
+            raise KeyError(purpose)
+        self._routes[purpose] = route
+        if isinstance(route, Sequence):
+            self._queues[purpose] = deque(route)
+        else:
+            self._queues.pop(purpose, None)
 
     def requests_for(self, purpose: str) -> list[ProviderCall]:
         """The recorded requests of one purpose, in arrival order."""
@@ -608,8 +618,20 @@ __all__ = [
     "relevance_reply",
     "snapshot",
     "store_job",
+    "stored_runs",
     "summary_reply",
 ]
+
+
+def stored_runs(factory: sessionmaker[Session], job_id: int | None = None) -> list[Run]:
+    """The stored runs (of ``job_id``, if given), newest first, detached from the session."""
+    stmt = select(Run).order_by(Run.started_at.desc(), Run.id.desc())
+    if job_id is not None:
+        stmt = stmt.where(Run.job_id == job_id)
+    with session_scope(factory) as session:
+        rows = list(session.scalars(stmt))
+        session.expunge_all()
+        return rows
 
 
 def add_run(

@@ -24,6 +24,7 @@ from invio.db.repositories import JobRepository, RunRepository
 from invio.db.session import session_scope
 from invio.domain import RunStatus
 from invio.graph.build import build_graph, new_scope
+from invio.graph.errors import ordered_errors
 from invio.graph.nodes.persist import DigestDraft
 from invio.graph.ports import RunDeps, RunObserver
 from invio.graph.scope import RunScope
@@ -33,7 +34,7 @@ from invio.graph.stages import (
     release_lock,
     rollback_work_session,
 )
-from invio.graph.state import STAGE_ORDER, RunError, RunState, error_of
+from invio.graph.state import RunError, RunState, error_of
 from invio.log import run_context
 from invio.pipeline.deps import default_deps
 from invio.services.jobs import JobNotFoundError
@@ -66,7 +67,7 @@ class RunResult:
 
     ``status`` is final (after the synthesis and delivery rules) and equals ``runs.status``.
     ``digest`` is the only copy of the digest in a dry run. ``errors`` lists every recorded
-    :class:`RunError`, sorted by stage order, then item id.
+    :class:`RunError`, de-duplicated and sorted by stage order, then item id (``ordered_errors``).
     """
 
     job_id: int
@@ -81,15 +82,6 @@ class RunResult:
     error: str | None  # runs.error: the sanitized reason of a failed run
     started_at: datetime
     finished_at: datetime | None
-
-
-def _sorted_errors(errors: list[RunError]) -> tuple[RunError, ...]:
-    return tuple(
-        sorted(
-            errors,
-            key=lambda e: (STAGE_ORDER.index(e.stage), e.item_id if e.item_id is not None else -1),
-        )
-    )
 
 
 async def run_job(
@@ -226,7 +218,7 @@ async def _run(
         dry_run=dry_run,
         digest=final.get("digest"),
         stats=stats,
-        errors=_sorted_errors(final.get("errors", [])),
+        errors=tuple(ordered_errors(final.get("errors", []))),
         notifications_sent=delivery.sent if delivery is not None else 0,
         notifications_failed=delivery.failed if delivery is not None else 0,
         error=error,
@@ -247,7 +239,10 @@ def _safety_net(deps: RunDeps, scope: RunScope, error: BaseException) -> None:
         record_failure(deps, scope, error)
     if not scope.errors_recorded:
         # The graph state is gone: store the fatal error at least, so ``run show`` names it.
-        record_errors(deps, scope, [error_of(scope.stage, error)], [], error)
+        # ``error`` is what the run is recorded failed with, so it becomes the fatal record.
+        fatal = error_of(scope.stage, error)
+        scope.failure, scope.fatal = error, fatal
+        record_errors(deps, scope, [fatal], [])
     try:
         release_lock(deps, scope)
     except Exception as release_error:

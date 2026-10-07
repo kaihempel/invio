@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from sqlalchemy import Engine, select
+from sqlalchemy import Engine
 from typer.testing import CliRunner, Result
 
 from invio.cli import main as cli_main
@@ -31,6 +31,7 @@ from tests.pipeline_helpers import (
     make_candidates,
     relevance_reply,
     source_key,
+    stored_runs,
 )
 
 __all__ = ["FEED_URL", "RunCli", "run_cli"]
@@ -53,16 +54,7 @@ class RunCli:
 
     def runs(self) -> list[Run]:
         """All runs of the job, newest first."""
-        with session_scope(self.env.factory) as session:
-            rows = list(
-                session.scalars(
-                    select(Run)
-                    .where(Run.job_id == self.env.job_id)
-                    .order_by(Run.started_at.desc(), Run.id.desc())
-                )
-            )
-            session.expunge_all()
-            return rows
+        return stored_runs(self.env.factory, self.env.job_id)
 
     def job_row(self) -> Job:
         with session_scope(self.env.factory) as session:
@@ -83,11 +75,11 @@ class RunCli:
         def route(item_title: str) -> Any:
             return RuntimeError("boom secret") if item_title == title else relevance_reply()
 
-        self.env.provider._routes["relevance"] = route
+        self.env.provider.route("relevance", route)
 
     def heal_items(self) -> None:
         """Every item is rated normally again."""
-        self.env.provider._routes["relevance"] = relevance_reply()
+        self.env.provider.route("relevance", relevance_reply())
 
     def fail_every_source(self) -> None:
         """Every source raises ``FetchError`` (the run ends ``failed``)."""
@@ -97,7 +89,7 @@ class RunCli:
 
     def nothing_relevant(self) -> None:
         """Every item is rated below the minimum (no digest)."""
-        self.env.provider._routes["relevance"] = relevance_reply(score=0.0)
+        self.env.provider.route("relevance", relevance_reply(score=0.0))
 
     def with_candidates(self, count: int) -> None:
         """The source reports ``count`` candidates."""

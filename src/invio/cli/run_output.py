@@ -19,17 +19,15 @@ from invio.domain import RunStatus
 from invio.services.runs import RunErrorView, RunSummary, stat_count
 from invio.textsafe import strip_control
 
+# The building blocks of ``stats_block`` (``stats_rows``, ``stats_table``, ``format_cost``,
+# ``format_tokens``) are module-level for unit tests only; the commands use what is listed here.
 __all__ = [
     "DASH",
-    "format_cost",
     "format_duration",
     "format_errors",
     "format_time",
-    "format_tokens",
     "runs_table",
     "stats_block",
-    "stats_rows",
-    "stats_table",
 ]
 
 DASH: Final = "—"
@@ -190,7 +188,9 @@ def format_errors(errors: tuple[RunErrorView, ...] | None, omitted: int) -> list
         if error.title is not None or error.url is not None:
             title = strip_control(error.title or "")
             url = strip_control(error.url or "")
-            lines.append(f'{indent}"{title}" — {url}' if url else f'{indent}"{title}"')
+            item = f"#{error.item_id} " if error.item_id is not None else ""
+            ref = f'{item}"{title}"'
+            lines.append(f"{indent}{ref} — {url}" if url else f"{indent}{ref}")
     if omitted > 0:
         lines.append(f"  … and {omitted} more not stored")
     return lines
