@@ -1,0 +1,42 @@
+---
+# Included by side_effect.yml: records what an unchanged run must leave alone. The result is
+# stored in the fact invio_snapshot_<invio_snapshot_name> (default: before).
+- name: Read when the timers were last activated
+  ansible.builtin.command:
+    argv: [systemctl, show, -p, ActiveEnterTimestamp, --value, "{{ item }}"]
+  loop: "{{ invio_timer_names }}"
+  register: invio_snap_timers
+  changed_when: false
+
+- name: Read the state of the timers
+  ansible.builtin.command:
+    argv: [systemctl, is-active, "{{ item }}"]
+  loop: "{{ invio_timer_names }}"
+  register: invio_snap_active
+  changed_when: false
+  failed_when: false
+
+- name: Read the migrated revision
+  ansible.builtin.slurp:
+    src: /etc/invio/deployed-revision
+  register: invio_snap_revision
+
+- name: Stat the managed files
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - /etc/invio/deployed-revision
+    - /etc/invio/invio.env
+    - /etc/systemd/system/invio-run-due.service
+    - /etc/systemd/system/invio-run-due.timer
+    - /etc/systemd/system/invio-notify-retry.service
+    - /etc/systemd/system/invio-notify-retry.timer
+  register: invio_snap_files
+
+- name: Store the snapshot
+  ansible.builtin.set_fact:
+    "invio_snapshot_{{ invio_snapshot_name | default('before') }}":
+      timers: "{{ invio_snap_timers.results | map(attribute='stdout') | list }}"
+      active: "{{ invio_snap_active.results | map(attribute='stdout') | unique | list == ['active'] }}"
+      revision: "{{ invio_snap_revision.content | b64decode | trim }}"
+      mtimes: "{{ invio_snap_files.results | map(attribute='stat') | map(attribute='mtime') | list }}"

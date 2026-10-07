@@ -5,6 +5,7 @@
   hosts: all
   become: true
   vars:
+    invio_ref: "{{ lookup('env', 'INVIO_TEST_REF') }}"
     invio_timer_names:
       - invio-run-due.timer
       - invio-notify-retry.timer
@@ -12,6 +13,249 @@
       - invio-run-due.service
       - invio-notify-retry.service
   tasks:
+    # --- Memory limit drop-in (FR-008, US4 scenario 5, quickstart #22) -------------------------
+    - name: Converge with a larger memory limit for run-due
+      ansible.builtin.include_role:
+        name: invio
+      vars:
+        invio_run_due_memory_max: 2G
+
+    - name: Read the drop-in and the effective limit
+      ansible.builtin.stat:
+        path: /etc/systemd/system/invio-run-due.service.d/50-invio-role.conf
+      register: invio_dropin
+
+    - name: Read the effective MemoryMax
+      ansible.builtin.command:
+        argv: [systemctl, show, -p, MemoryMax, --value, invio-run-due.service]
+      register: invio_memory
+      changed_when: false
+
+    - name: Check that the override is in effect
+      ansible.builtin.assert:
+        that:
+          - invio_dropin.stat.exists
+          - invio_memory.stdout == '2147483648'
+        quiet: true
+
+    - name: Converge with the default limit again
+      ansible.builtin.include_role:
+        name: invio
+
+    - name: Check that the drop-in is removed
+      ansible.builtin.stat:
+        path: /etc/systemd/system/invio-run-due.service.d/50-invio-role.conf
+      register: invio_dropin_gone
+
+    - name: Read the effective MemoryMax again
+      ansible.builtin.command:
+        argv: [systemctl, show, -p, MemoryMax, --value, invio-run-due.service]
+      register: invio_memory_default
+      changed_when: false
+
+    - name: Check that the default applies again
+      ansible.builtin.assert:
+        that:
+          - not invio_dropin_gone.stat.exists
+          - invio_memory_default.stdout == '1073741824'
+        quiet: true
+
+    # --- Update path (FR-021, US6, quickstart #15, #16, #25) -----------------------------------
+    - name: Resolve the parent of the commit under test
+      ansible.builtin.command:
+        argv: [git, -C, /src, rev-parse, "{{ invio_ref }}~1"]
+      register: invio_parent
+      changed_when: false
+
+    - name: Record the state before the update
+      ansible.builtin.include_tasks: tasks/snapshot.yml
+      vars:
+        invio_snapshot_name: before
+
+    - name: Converge the parent commit
+      ansible.builtin.include_role:
+        name: invio
+      vars:
+        invio_git_version: "{{ invio_parent.stdout }}"
+
+    - name: Read the state after the update
+      ansible.builtin.include_tasks: tasks/snapshot.yml
+      vars:
+        invio_snapshot_name: after
+
+    - name: Check that the timers were restarted and the parent revision was migrated
+      ansible.builtin.assert:
+        that:
+          - invio_snapshot_after.timers != invio_snapshot_before.timers
+          - invio_snapshot_after.revision == invio_parent.stdout
+          - invio_snapshot_after.active
+        quiet: true
+
+    - name: Converge the commit under test again
+      ansible.builtin.include_role:
+        name: invio
+
+    - name: Read the state after going back
+      ansible.builtin.include_tasks: tasks/snapshot.yml
+      vars:
+        invio_snapshot_name: back
+
+    - name: Check that the revision follows
+      ansible.builtin.assert:
+        that:
+          - invio_snapshot_back.revision == invio_ref
+          - invio_snapshot_back.active
+        quiet: true
+
+    - name: Converge once more with the same ref
+      ansible.builtin.include_role:
+        name: invio
+
+    - name: Read the state after the unchanged run
+      ansible.builtin.include_tasks: tasks/snapshot.yml
+      vars:
+        invio_snapshot_name: same
+
+    # Guarantee G1/FR-021: an unchanged ref leaves the timers and every managed file alone.
+    - name: Check that nothing was touched
+      ansible.builtin.assert:
+        that:
+          - invio_snapshot_same.timers == invio_snapshot_back.timers
+          - invio_snapshot_same.mtimes == invio_snapshot_back.mtimes
+        quiet: true
+
+    # --- A ref that does not exist (spec edge case, G7, quickstart #25) ------------------------
+    - name: Converge a ref that does not exist
+      block:
+        - name: Include the role
+          ansible.builtin.include_role:
+            name: invio
+          vars:
+            invio_git_version: does-not-exist
+        - name: Remember that the role did not fail
+          ansible.builtin.set_fact:
+            invio_unknown_failed: false
+      rescue:
+        - name: Remember that the role failed and where
+          ansible.builtin.set_fact:
+            invio_unknown_failed: true
+            invio_unknown_task: "{{ ansible_failed_task.name }}"
+
+    - name: Read the state after the failed update
+      ansible.builtin.include_tasks: tasks/snapshot.yml
+      vars:
+        invio_snapshot_name: unknown
+
+    - name: Check that it failed in the probe and changed nothing
+      ansible.builtin.assert:
+        that:
+          - invio_unknown_failed
+          - "'Fail early for an unknown ref' in invio_unknown_task"
+          - invio_snapshot_unknown.active
+          - invio_snapshot_unknown.timers == invio_snapshot_same.timers
+          - invio_snapshot_unknown.revision == invio_ref
+        quiet: true
+
+    # --- A running service delays the update (US6 scenario 3, quickstart #24) ------------------
+    - name: Create the runtime drop-in directory
+      ansible.builtin.file:
+        path: /run/systemd/system/invio-run-due.service.d
+        state: directory
+        mode: "0755"
+
+    - name: Write the sleep drop-in
+      ansible.builtin.copy:
+        dest: /run/systemd/system/invio-run-due.service.d/60-sleep.conf
+        content: |
+          [Service]
+          ExecStart=
+          ExecStart=/bin/sleep 90
+        mode: "0644"
+
+    - name: Reload systemd
+      ansible.builtin.systemd_service:
+        daemon_reload: true
+
+    - name: Start the slow service without waiting
+      ansible.builtin.command:
+        argv: [systemctl, start, --no-block, invio-run-due.service]
+      changed_when: true
+
+    - name: Converge the parent commit while the service runs
+      ansible.builtin.include_role:
+        name: invio
+      vars:
+        invio_git_version: "{{ invio_parent.stdout }}"
+
+    - name: Read when the timer was stopped, when the service ended and the revision was written
+      ansible.builtin.command:
+        argv: "{{ item }}"
+      loop:
+        - [systemctl, show, -p, ActiveExitTimestamp, --value, invio-run-due.timer]
+        - [systemctl, show, -p, ExecMainExitTimestamp, --value, invio-run-due.service]
+      register: invio_wait_times
+      changed_when: false
+
+    - name: Convert them to epoch seconds
+      ansible.builtin.command:
+        argv: [date, -d, "{{ item.stdout }}", +%s]
+      loop: "{{ invio_wait_times.results }}"
+      loop_control:
+        label: "{{ item.item[3] }}"
+      register: invio_wait_epochs
+      changed_when: false
+
+    - name: Read the modification time of the revision file
+      ansible.builtin.stat:
+        path: /etc/invio/deployed-revision
+      register: invio_wait_revision
+
+    # The timer stops first, while the service still runs; the checkout (and so the revision
+    # file) comes only after the service ended.
+    - name: Check the order of events
+      ansible.builtin.assert:
+        that:
+          - invio_wait_epochs.results[0].stdout | int < invio_wait_epochs.results[1].stdout | int
+          - invio_wait_epochs.results[1].stdout | int <= invio_wait_revision.stat.mtime | int
+        quiet: true
+
+    - name: Remove the sleep drop-in
+      ansible.builtin.file:
+        path: /run/systemd/system/invio-run-due.service.d/60-sleep.conf
+        state: absent
+
+    - name: Reload systemd after removing the drop-in
+      ansible.builtin.systemd_service:
+        daemon_reload: true
+
+    - name: Converge the commit under test again after the wait test
+      ansible.builtin.include_role:
+        name: invio
+
+    # --- A half-finished update repairs itself (state: deployed-revision is stale) -------------
+    - name: Make the recorded revision stale
+      ansible.builtin.copy:
+        content: "{{ invio_parent.stdout }}\n"
+        dest: /etc/invio/deployed-revision
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Converge the unchanged ref
+      ansible.builtin.include_role:
+        name: invio
+
+    - name: Read the repaired revision
+      ansible.builtin.slurp:
+        src: /etc/invio/deployed-revision
+      register: invio_repaired
+
+    - name: Check that the migration step ran and recorded the current revision
+      ansible.builtin.assert:
+        that:
+          - (invio_repaired.content | b64decode | trim) == invio_ref
+        quiet: true
+
     # --- Catch-up after downtime (US1 scenario 3, SC-003, quickstart #20) ---------------------
     - name: Stop the timers
       ansible.builtin.systemd_service:
@@ -32,11 +276,11 @@
       changed_when: false
 
     # A slot that elapses right after the restart would be a second, legitimate start. Skip past
-    # it: if the next quarter hour is less than 180 s away, wait until 70 s after it.
+    # it: if the next quarter hour is less than 360 s away, wait until 70 s after it.
     - name: Wait out an imminent quarter hour
       ansible.builtin.wait_for:
         timeout: "{{ (900 - (invio_now.stdout | int % 900)) + 70 }}"
-      when: (900 - (invio_now.stdout | int % 900)) < 180
+      when: (900 - (invio_now.stdout | int % 900)) < 360
 
     # The container shares the kernel (and its boot id) with the Docker host, so `journalctl -b`
     # also shows earlier "boots" of this container: mark the time and count from there.

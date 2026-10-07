@@ -312,3 +312,99 @@
           - (invio_minute | int % 15) * 60 + (invio_second | int) <= 60
         fail_msg: "next elapse {{ invio_next.stdout }} is not within 60 s after a quarter hour"
         quiet: true
+
+    # --- Limits and sandbox (FR-006, FR-008, SC-008, quickstart #21, #22) ----------------------
+    - name: Read the effective limits of both services
+      ansible.builtin.command:
+        argv:
+          - systemctl
+          - show
+          - -p
+          - MemoryMax,TimeoutStartUSec,NoNewPrivileges,ProtectSystem,ProtectHome,PrivateTmp
+          - "{{ item.unit }}"
+      loop:
+        - {unit: invio-run-due.service, memory: "1073741824", timeout: 3h}
+        - {unit: invio-notify-retry.service, memory: "268435456", timeout: 15min}
+      loop_control:
+        label: "{{ item.unit }}"
+      register: invio_limits
+      changed_when: false
+
+    - name: Check the limits against the contract
+      ansible.builtin.assert:
+        that:
+          - ('MemoryMax=' ~ item.item.memory) in item.stdout_lines
+          - ('TimeoutStartUSec=' ~ item.item.timeout) in item.stdout_lines
+          - "'NoNewPrivileges=yes' in item.stdout_lines"
+          - "'ProtectSystem=strict' in item.stdout_lines"
+          - "'ProtectHome=yes' in item.stdout_lines"
+          - "'PrivateTmp=yes' in item.stdout_lines"
+        quiet: true
+      loop: "{{ invio_limits.results }}"
+      loop_control:
+        label: "{{ item.item.unit }}"
+
+    # The sandbox properties come from the unit file itself (the `# Sandbox` block plus the
+    # writable paths), not from `systemctl show`, so the probes use what the repository ships.
+    - name: Read the installed run-due unit
+      ansible.builtin.slurp:
+        src: /etc/systemd/system/invio-run-due.service
+      register: invio_unit_file
+
+    - name: Build the sandbox properties for the probes
+      ansible.builtin.set_fact:
+        invio_sandbox_props: >-
+          {{ (invio_unit_file.content | b64decode).splitlines()
+          | select('match', '^(ReadWritePaths|StateDirectory)=') | list
+          + (invio_unit_file.content | b64decode).split('# Sandbox')[1].splitlines()
+          | select('match', '^[A-Za-z]+=') | list }}
+
+    - name: Turn the properties into systemd-run arguments
+      ansible.builtin.set_fact:
+        invio_sandbox_args: >-
+          {% set out = [] %}{% for prop in invio_sandbox_props %}{% set _ = out.extend(['-p', prop]) %}{% endfor %}{{ out }}
+
+    - name: Create the paths that the sandbox must keep read-only or hidden
+      ansible.builtin.shell: |
+        set -e
+        install -d -o invio -g invio -m 0755 /srv/invio-probe
+        install -d -m 0755 /home/probe
+        printf 'secret\n' > /home/probe/secret
+        chmod 0644 /home/probe/secret
+      args:
+        executable: /bin/bash
+      changed_when: true
+
+    - name: Run the sandbox probes as the service account with the unit's properties
+      ansible.builtin.command:
+        argv: >-
+          {{ ['systemd-run', '--wait', '--pipe', '--collect', '--uid=invio', '--gid=invio']
+          + invio_sandbox_args
+          + ['/bin/sh', '-c', item.script] }}
+      loop:
+        - {name: write /opt/invio, script: "touch /opt/invio/x 2>/dev/null && echo WRITTEN || echo DENIED", want: DENIED}
+        - {name: write /etc, script: "touch /etc/x 2>/dev/null && echo WRITTEN || echo DENIED", want: DENIED}
+        - {name: write /srv owned by invio, script: "touch /srv/invio-probe/x 2>/dev/null && echo WRITTEN || echo DENIED", want: DENIED}
+        - {name: read under /home, script: "cat /home/probe/secret 2>/dev/null && echo READ || echo DENIED", want: DENIED}
+        - {name: list /home, script: "ls -A /home 2>/dev/null || true", want: ""}
+        - {name: write the state directory, script: "touch /var/lib/invio/probe && echo OK", want: OK}
+        - {name: sudo, script: "sudo -n true >/dev/null 2>&1 && echo ALLOWED || echo DENIED", want: DENIED}
+        - name: resolve localhost
+          script: >-
+            /opt/invio/.venv/bin/python -c "import socket;
+            socket.getaddrinfo('localhost', 80, flags=socket.AI_ADDRCONFIG)" && echo OK
+          want: OK
+      loop_control:
+        label: "{{ item.name }}"
+      register: invio_probes
+      changed_when: false
+      failed_when: invio_probes.rc != 0 or invio_probes.stdout | trim != item.want
+
+    - name: Remove the probe artefacts
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /var/lib/invio/probe
+        - /srv/invio-probe
+        - /home/probe

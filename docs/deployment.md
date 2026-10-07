@@ -2,6 +2,29 @@
 
 ## Overview
 
+This directory of the repository (`deploy/`) runs invio unattended on a Debian 12 or 13 server
+with systemd. Four units do the work:
+
+| Unit | Runs | Schedule |
+|---|---|---|
+| `invio-run-due.timer` / `.service` | `invio run-due` | every 15 minutes (+ up to 60 s), a missed trigger runs once after boot |
+| `invio-notify-retry.timer` / `.service` | `invio notify retry` | hourly (+ up to 5 min), a missed trigger runs once after boot |
+
+Both services run as the system account `invio`, locked down (see
+[Sandbox and limits](#sandbox-and-limits)), and log to the journal. The Ansible role
+`deploy/ansible/roles/invio` provisions everything; [Install manually](#install-manually)
+describes the same steps by hand. Paths on the host:
+
+| Path | Content |
+|---|---|
+| `/opt/invio` | Git checkout (root-owned), `/opt/invio/.venv` the virtual environment |
+| `/opt/invio-python` | uv-managed Python 3.12 |
+| `/usr/local/bin/uv` | pinned uv |
+| `/etc/invio/invio.env` | settings and secrets (`invio:invio`, mode `0600`) |
+| `/etc/invio/deployed-revision` | commit that was last migrated |
+| `/var/lib/invio` | state, cache and archive; the only path the services may write |
+| `/etc/systemd/system/invio-*` | the four units, copied unchanged from `deploy/systemd/` |
+
 ## Requirements
 
 - Target host: Debian 12 (bookworm) or 13 (trixie) with systemd, root access (`become: true`)
@@ -247,14 +270,143 @@ Result lines that commands print to stdout (for example `nothing to retry`) are 
 design (stdout is the command's result, stderr is for logs). Use `--allow-no-json` for services
 that may print only such a line.
 
+### Sandbox and limits
+
+Both services run as `invio` with `NoNewPrivileges`, `ProtectSystem=strict`, `ProtectHome`,
+`PrivateTmp`, `ReadWritePaths=/var/lib/invio` and the further restrictions in the `# Sandbox`
+block of the unit files. `/var/lib/invio` is the only writable path. Limits: `MemoryMax` 1G and
+`TimeoutStartSec` 3h (run-due), 256M and 15min (notify-retry). Check them with:
+
+```bash
+systemctl show -p MemoryMax,TimeoutStartUSec,ProtectSystem,ProtectHome,NoNewPrivileges \
+  invio-run-due.service
+systemd-analyze security invio-run-due.service      # informational only
+```
+
+To change a memory limit with the role, set `invio_run_due_memory_max` or
+`invio_notify_retry_memory_max`; the role writes
+`/etc/systemd/system/<service>.d/50-invio-role.conf` and removes it again when the value is back
+at the default. Without the role, use `systemctl edit`. Never edit the shipped unit files.
+
+CI repeats the following sandbox probes automatically (Molecule). To repeat them on your own
+host (optional), run each command as the service account with the unit's sandbox properties,
+taken from the `# Sandbox` block plus `ReadWritePaths` and `StateDirectory`:
+
+```bash
+systemd-run --wait --pipe --collect --uid=invio --gid=invio \
+  -p ReadWritePaths=/var/lib/invio -p StateDirectory=invio -p NoNewPrivileges=yes \
+  -p ProtectSystem=strict -p ProtectHome=yes -p PrivateTmp=yes -p PrivateDevices=yes \
+  /bin/sh -c 'touch /opt/invio/x 2>/dev/null && echo WRITTEN || echo DENIED'
+```
+
+Expected results: `touch /opt/invio/x` and `touch /etc/x` are denied, `ls -A /home` prints
+nothing, `touch /var/lib/invio/probe` works (remove the file afterwards) and `sudo -n true` is
+refused. The hardening does not allow Chromium's own sandbox: if the optional `render` extra is
+ever deployed, the units need a reviewed relaxation.
+
 ## Updating
 
 ### With Ansible
 
+Set `invio_git_version` to the new tag (or full commit SHA) and run the playbook again. The role
+does this, in order:
+
+1. validates the variables and prepares the database, account and env file (no change when
+   nothing differs);
+2. probes the checkout in check mode. If the ref is unchanged, the timers are not touched and
+   no migration runs;
+3. if the checkout would change on an existing installation, it checks that the new ref
+   exists (an unknown ref fails here and nothing has been stopped), stops both timers and waits
+   until `invio-run-due.service` and `invio-notify-retry.service` are no longer
+   `active`/`activating`/`deactivating`/`reloading` (up to `invio_update_wait_timeout`);
+4. checks out the new ref and runs `uv sync --locked`;
+5. runs `invio db upgrade` when `/etc/invio/deployed-revision` differs from the checked-out
+   commit (this also repairs a run that failed between checkout and migration), then writes the
+   new revision;
+6. installs the unit files and starts both timers.
+
+Any failing step fails the play and leaves the timers stopped. A lock-file mismatch shows up in
+`uv sync --locked` after the timers were stopped and before the venv changes.
+
 ### Manually
+
+Run as root. The `UV_*` environment is the one from [Install manually](#install-manually).
+
+```bash
+systemctl stop invio-run-due.timer invio-notify-retry.timer
+# wait until neither line below says active, activating, deactivating or reloading
+systemctl is-active invio-run-due.service invio-notify-retry.service
+git -C /opt/invio fetch --tags && git -C /opt/invio checkout <tag>
+cd /opt/invio
+UV_PROJECT_ENVIRONMENT=/opt/invio/.venv UV_PYTHON_INSTALL_DIR=/opt/invio-python \
+UV_PYTHON_PREFERENCE=only-managed UV_PYTHON=3.12.13 UV_CACHE_DIR=/var/cache/invio-uv \
+  uv sync --locked --no-dev --no-editable --compile-bytecode
+systemd-run --wait --pipe --collect --quiet --uid=invio --gid=invio \
+  -p EnvironmentFile=/etc/invio/invio.env -p WorkingDirectory=/var/lib/invio \
+  -p StateDirectory=invio -E PYTHONDONTWRITEBYTECODE=1 -E HOME=/var/lib/invio \
+  /opt/invio/.venv/bin/invio db upgrade
+git -C /opt/invio rev-parse HEAD > /etc/invio/deployed-revision
+cp /opt/invio/deploy/systemd/invio-*.service /opt/invio/deploy/systemd/invio-*.timer \
+  /etc/systemd/system/                 # only needed when the units changed
+systemctl daemon-reload
+systemctl start invio-run-due.timer invio-notify-retry.timer
+systemctl list-timers 'invio-*'
+systemctl start invio-notify-retry.service     # one manual run as a smoke test
+```
 
 ## Recovering from a failed update
 
+When an update fails after the timers were stopped (role or manual), they stay stopped, so no
+job runs against a half-updated installation. To recover:
+
+1. Read the error. If the cause is fixed (for example a wrong variable), run the role again or
+   continue the manual procedure: the role repeats the migration when `deployed-revision` does
+   not match the checkout.
+2. To go back: `git -C /opt/invio checkout <previous tag>`, then run the same `uv sync` as in
+   the update.
+3. MariaDB DDL is not transactional, so a failed migration may be partially applied. Check the
+   Alembic revision with `systemd-run --wait --pipe --collect --uid=invio --gid=invio -p
+   EnvironmentFile=/etc/invio/invio.env /opt/invio/.venv/bin/alembic -c /opt/invio/alembic.ini
+   current` and repair partially applied steps by hand. Restore from a backup if needed.
+4. Start the timers again (`systemctl start invio-run-due.timer invio-notify-retry.timer`) and
+   check `systemctl list-timers 'invio-*'`.
+
 ## Manual verification checklist
 
+Everything that can be automated is checked by CI (`deploy-static`, and the opt-in Molecule
+workflow). Two checks need real wall-clock time or a person:
+
+1. **Quarter-hour timing over one hour** (SC-002, observation part). On a provisioned host:
+
+   ```bash
+   journalctl -u invio-run-due -o short-iso --since -1h | grep Starting
+   ```
+
+   Expect 4 starts, each at most 60 s after :00, :15, :30 and :45.
+   `systemd-analyze calendar '*:0/15'` lists the slots.
+2. **Timed manual update** (SC-009, manual part). On a second host, follow
+   [Updating, Manually](#manually) and time it. The goal is less than 10 minutes.
+
+For information only: after a real host reboot `systemctl list-timers 'invio-*'` shows LAST right
+after boot for a trigger that was missed during the downtime (catch-up). CI proves the same with
+a container restart.
+
 ## Troubleshooting
+
+- **The unit fails at once with "Failed to load environment files".** `/etc/invio/invio.env` is
+  missing (the `EnvironmentFile=` has no `-` on purpose). Create it or run the role.
+- **"unknown setting ignored" in the log.** A key in the env file is not a known setting (often a
+  typo). Compare with `deploy/env/invio.env.example`.
+- **The database is unreachable.** The run fails with a configuration or connection error and
+  the next trigger retries. Check `INVIO_DATABASE_URL` and that MariaDB is running
+  (`systemctl status mariadb`).
+- **A job is skipped as locked or runs twice after a long run.** A run holds its job lock for
+  `INVIO_RUN_LOCK_SECONDS` (default 7200). systemd kills a run at `TimeoutStartSec` (3 h) and
+  the lock then expires on its own. Set `INVIO_RUN_LOCK_SECONDS` at least as long as your
+  longest job.
+- **`No such command 'run-due'`.** `invio run-due` comes from issue #23; deploy a revision that
+  contains it.
+- **A run right after boot cannot reach the network.** `network-online.target` only waits when
+  a wait-online service is enabled on the host.
+- **`systemd-run` says "Failed to connect to bus".** `dbus` is not running; the role installs it
+  and starts `dbus.socket`.

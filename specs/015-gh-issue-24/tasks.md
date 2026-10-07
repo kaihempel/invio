@@ -262,23 +262,23 @@ ceilings and timeouts are enforced and can be changed through a role drop-in.
 
 ### Tests for User Story 4 ⚠️
 
-- [ ] T051 [P] [US4] Extend the shared service base in `tests/test_deploy_units.py` with the hardening directives from contracts/systemd-units.md:
+- [X] T051 [P] [US4] Extend the shared service base in `tests/test_deploy_units.py` with the hardening directives from contracts/systemd-units.md:
   - required: `NoNewPrivileges=yes`, `ProtectSystem=strict`, `ProtectHome=yes`, `PrivateTmp=yes`;
   - additional: `PrivateDevices=yes`, `ProtectKernelTunables=yes`, `ProtectKernelModules=yes`, `ProtectKernelLogs=yes`, `ProtectControlGroups=yes`, `ProtectClock=yes`, `ProtectHostname=yes`, `RestrictSUIDSGID=yes`, `RestrictRealtime=yes`, `RestrictNamespaces=yes`, `LockPersonality=yes`, `SystemCallArchitectures=native`, `RestrictAddressFamilies={AF_UNIX, AF_INET, AF_INET6}`, `CapabilityBoundingSet=` (empty).
 
   Add `test_services_have_no_unlisted_directives`: every `[Service]` key in both services is in the allowlist (base + journal + hardening). None of the forbidden keys `MemoryDenyWriteExecute`, `PrivateNetwork`, `IPAddressDeny`, `DynamicUser` appears, `User` isn't `root`, and no `ExecStart*` value starts with `+` or `!` (contracts/systemd-units.md "Forbidden")
-- [ ] T052 [P] [US4] Add `test_memory_override_template` to `tests/test_deploy_units.py`. It renders `deploy/ansible/roles/invio/templates/memory-override.conf.j2` with Jinja2 (already a runtime dependency) for `memory_max="2G"`, parses the result with `parse_unit`, and asserts that the only content is `[Service] MemoryMax=2G` (contracts/systemd-units.md "Role overrides")
-- [ ] T053 [US4] Extend `deploy/ansible/molecule/default/verify.yml` and `side_effect.yml`:
+- [X] T052 [P] [US4] Add `test_memory_override_template` to `tests/test_deploy_units.py`. It renders `deploy/ansible/roles/invio/templates/memory-override.conf.j2` with Jinja2 (already a runtime dependency) for `memory_max="2G"`, parses the result with `parse_unit`, and asserts that the only content is `[Service] MemoryMax=2G` (contracts/systemd-units.md "Role overrides")
+- [X] T053 [US4] Extend `deploy/ansible/molecule/default/verify.yml` and `side_effect.yml`:
   - verify: `systemctl show -p MemoryMax,TimeoutStartUSec,NoNewPrivileges,ProtectSystem,ProtectHome,PrivateTmp` for both services, compared with the contract values (`MemoryMax=1073741824` / `268435456`, `TimeoutStartUSec=3h` / `15min`).
   - verify, **sandbox probes** (SC-008, US4 scenarios 1–3 and 6, research R13): run `systemd-run --wait --pipe --collect --uid=invio --gid=invio` with every sandbox property of `invio-run-due.service` passed as `-p` (`NoNewPrivileges`, `ProtectSystem`, `ProtectHome`, `PrivateTmp`, `ReadWritePaths`, `StateDirectory`, `PrivateDevices`, `RestrictSUIDSGID`, …, read from the unit file with the same key list as the contract test). Probes: `touch /opt/invio/x` and `touch /etc/x` must fail; `ls -A /home` must print nothing; `touch /var/lib/invio/probe` must succeed (remove it afterwards); `sudo -n true` must fail.
   - `side_effect.yml`, appended section: converge with `invio_run_due_memory_max: 2G`; assert that `/etc/systemd/system/invio-run-due.service.d/50-invio-role.conf` exists and `MemoryMax=2147483648`; converge with the default and assert that the drop-in is removed.
 
 ### Implementation for User Story 4
 
-- [ ] T054 [P] [US4] Add the hardening directives from T051 to `deploy/systemd/invio-run-due.service`, grouped under a comment `# Sandbox (issue #24 + research R8)`
-- [ ] T055 [P] [US4] Add the same hardening block to `deploy/systemd/invio-notify-retry.service`
-- [ ] T056 [P] [US4] Create `deploy/ansible/roles/invio/templates/memory-override.conf.j2`: a comment "Managed by Ansible role invio", then `[Service]` and `MemoryMax={{ memory_max }}`
-- [ ] T057 [US4] Extend `deploy/ansible/roles/invio/tasks/units.yml`. For each of `(invio-run-due.service, invio_run_due_memory_max, 1G)` and `(invio-notify-retry.service, invio_notify_retry_memory_max, 256M)`: when the value differs from the default, create `/etc/systemd/system/<svc>.d/` (`0755`) and template `50-invio-role.conf`; otherwise `file state=absent` on that drop-in. Both notify `invio daemon-reload` (research R11)
+- [X] T054 [P] [US4] Add the hardening directives from T051 to `deploy/systemd/invio-run-due.service`, grouped under a comment `# Sandbox (issue #24 + research R8)`
+- [X] T055 [P] [US4] Add the same hardening block to `deploy/systemd/invio-notify-retry.service`
+- [X] T056 [P] [US4] Create `deploy/ansible/roles/invio/templates/memory-override.conf.j2`: a comment "Managed by Ansible role invio", then `[Service]` and `MemoryMax={{ memory_max }}`
+- [X] T057 [US4] Extend `deploy/ansible/roles/invio/tasks/units.yml`. For each of `(invio-run-due.service, invio_run_due_memory_max, 1G)` and `(invio-notify-retry.service, invio_notify_retry_memory_max, 256M)`: when the value differs from the default, create `/etc/systemd/system/<svc>.d/` (`0755`) and template `50-invio-role.conf`; otherwise `file state=absent` on that drop-in. Both notify `invio daemon-reload` (research R11)
 - [ ] T058 [US4] Run `deploy/scripts/verify-units.sh` (no output), the pytest module and `molecule test` (default). In `docs/deployment.md` "Operating", document how an operator can repeat the automated sandbox probes on their own host (the same `systemd-run` command as T053) and `systemd-analyze security invio-run-due.service` for information. These are optional for operators; CI already covers them (quickstart #21, #22)
 
 **Checkpoint**: Both services are sandboxed, the limits are enforced, and the overrides work
@@ -297,7 +297,7 @@ the timers' `ActiveEnterTimestamp` unchanged (quickstart #15, #16, #23, #24).
 
 ### Tests for User Story 6 ⚠️
 
-- [ ] T059 [US6] Append an **update** section to `deploy/ansible/molecule/default/side_effect.yml` (the single side-effect playbook from T024):
+- [X] T059 [US6] Append an **update** section to `deploy/ansible/molecule/default/side_effect.yml` (the single side-effect playbook from T024):
   1. record `ActiveEnterTimestamp` of both timers;
   2. converge with `invio_git_version: "{{ lookup('env','INVIO_TEST_REF') }}~1"` (resolve it to a SHA with `git -C /src rev-parse`);
   3. assert the timers' `ActiveEnterTimestamp` changed (they were restarted), `/etc/invio/deployed-revision` equals the parent SHA, and both timers are active;
@@ -305,18 +305,18 @@ the timers' `ActiveEnterTimestamp` unchanged (quickstart #15, #16, #23, #24).
   5. converge again unchanged and assert the timers' `ActiveEnterTimestamp` is unchanged and the play has `changed=0` (FR-021, US6 scenarios 1 and 5).
 
   Also add a failure case: converge with `invio_git_version: does-not-exist` inside `block/rescue`. Assert that it failed in the check-mode probe, that both timers are still `active` with an unchanged `ActiveEnterTimestamp`, and that `deployed-revision` is unchanged (spec edge case, contract G7, quickstart #25)
-- [ ] T060 [US6] Append a "wait for running service" section to `deploy/ansible/molecule/default/side_effect.yml`. Start a transient long-running unit masquerading as the service: a drop-in that replaces `ExecStart` with `/bin/sleep 20`, applied with `systemctl start --no-block invio-run-due.service`. Then converge with the parent ref and assert that the converge's checkout happened after the service became inactive (compare `ExecMainExitTimestamp` with the mtime of `/etc/invio/deployed-revision`). Remove the drop-in afterwards (US6 scenario 3)
+- [X] T060 [US6] Append a "wait for running service" section to `deploy/ansible/molecule/default/side_effect.yml`. Start a transient long-running unit masquerading as the service: a drop-in that replaces `ExecStart` with `/bin/sleep 20`, applied with `systemctl start --no-block invio-run-due.service`. Then converge with the parent ref and assert that the converge's checkout happened after the service became inactive (compare `ExecMainExitTimestamp` with the mtime of `/etc/invio/deployed-revision`). Remove the drop-in afterwards (US6 scenario 3)
 
 ### Implementation for User Story 6
 
-- [ ] T061 [US6] Extend `deploy/ansible/roles/invio/tasks/install.yml` with the update gate before the real checkout (research R4, contracts G5–G7):
+- [X] T061 [US6] Extend `deploy/ansible/roles/invio/tasks/install.yml` with the update gate before the real checkout (research R4, contracts G5–G7):
   1. a `git` task with the same arguments and `check_mode: true`, registered as `invio_checkout_probe`;
   2. `stat /etc/systemd/system/invio-run-due.timer`, registered as `invio_installed`;
   3. when `invio_checkout_probe.changed and invio_installed.stat.exists`: `systemd name={{ item }} state=stopped` over `invio_timers`, then a `command: systemctl is-active {{ invio_units | select('match', '.*\\.service$') | join(' ') }}` loop with `register`, `until: r.stdout_lines | intersect(['active', 'activating']) | length == 0`, `retries: "{{ (invio_update_wait_timeout / 10) | int }}"`, `delay: 10`, `failed_when: false`, `changed_when: false`, followed by an assert that the wait succeeded ("services still running after {{ invio_update_wait_timeout }} s").
 
   The existing `units.yml` starts the timers at the end, so a failure in any step between them leaves the timers stopped (FR-021)
-- [ ] T062 [US6] Make the `uv sync` and migration steps in `deploy/ansible/roles/invio/tasks/install.yml` run on unchanged refs **without** reporting changes. `uv sync` keeps its `changed_when`. The migration runs only when `deployed-revision` differs from `invio_checkout.after`. With an unchanged ref, `units.yml` `state: started` on already-started timers reports `ok` (G6)
-- [ ] T063 [US6] Fill `docs/deployment.md`:
+- [X] T062 [US6] Make the `uv sync` and migration steps in `deploy/ansible/roles/invio/tasks/install.yml` run on unchanged refs **without** reporting changes. `uv sync` keeps its `changed_when`. The migration runs only when `deployed-revision` differs from `invio_checkout.after`. With an unchanged ref, `units.yml` `state: started` on already-started timers reports `ok` (G6)
+- [X] T063 [US6] Fill `docs/deployment.md`:
   - "Updating → With Ansible": set `invio_git_version` to the new tag and run the playbook; what the role does, in order.
   - "Updating → Manually": `systemctl stop invio-run-due.timer invio-notify-retry.timer`; wait until `systemctl is-active invio-run-due.service invio-notify-retry.service` shows no `active`/`activating`; `git -C /opt/invio fetch --tags && git -C /opt/invio checkout <tag>`; `uv sync --locked --no-dev --no-editable --compile-bytecode` with the same `UV_*` environment as the role; `systemd-run … invio db upgrade` (the same command as the role); `systemctl daemon-reload`; copy the units again if they changed; `systemctl start` both timers; verify with `systemctl list-timers` and one manual start.
   - "Recovering from a failed update": the timers stay stopped; `git -C /opt/invio checkout <previous tag>` + `uv sync`; MariaDB DDL isn't transactional, so check the Alembic revision (`alembic current` via `systemd-run`) and fix partially applied steps by hand; restore from backup if needed; restart the timers (FR-019, US6 scenario 4)
@@ -327,9 +327,9 @@ the timers' `ActiveEnterTimestamp` unchanged (quickstart #15, #16, #23, #24).
 
 ## Phase 9: Polish & Cross-Cutting Concerns
 
-- [ ] T064 [P] Add a "Deployment" section to `README.md` (two or three sentences plus a link to `docs/deployment.md` and `deploy/`), and list `deploy/` in the README "Layout" section (constitution: docs in the same PR)
-- [ ] T065 [P] Fill `docs/deployment.md` "Overview" (the four units, the account, paths from data-model.md "Installation tree"), "Troubleshooting" (env file missing → unit fails at start; unknown `INVIO_*` key warning; DB unreachable → failed run, next trigger retries; lock vs `TimeoutStartSec`: set `INVIO_RUN_LOCK_SECONDS` ≥ the longest job, research R8) and "Manual verification", which holds **only** the two checks that aren't automated (plan Complexity Tracking): quarter-hour timing observed over 1 h (`journalctl -u invio-run-due -o short-iso --since -1h | grep Starting`, 4 starts each ≤ 60 s after the slot; SC-002 observation part) and the timed manual update (SC-009 manual part). Add an informational note on checking catch-up after a real host reboot (`systemctl list-timers`, LAST right after boot)
-- [ ] T066 Check the #23 dependency. If `invio run-due` exists on `main` by now, remove the R14 guard in `deploy/ansible/molecule/default/verify.yml` and make the run-due start mandatory. Otherwise leave the guard and note in the PR description that the guard must be removed once #23 is merged
+- [X] T064 [P] Add a "Deployment" section to `README.md` (two or three sentences plus a link to `docs/deployment.md` and `deploy/`), and list `deploy/` in the README "Layout" section (constitution: docs in the same PR)
+- [X] T065 [P] Fill `docs/deployment.md` "Overview" (the four units, the account, paths from data-model.md "Installation tree"), "Troubleshooting" (env file missing → unit fails at start; unknown `INVIO_*` key warning; DB unreachable → failed run, next trigger retries; lock vs `TimeoutStartSec`: set `INVIO_RUN_LOCK_SECONDS` ≥ the longest job, research R8) and "Manual verification", which holds **only** the two checks that aren't automated (plan Complexity Tracking): quarter-hour timing observed over 1 h (`journalctl -u invio-run-due -o short-iso --since -1h | grep Starting`, 4 starts each ≤ 60 s after the slot; SC-002 observation part) and the timed manual update (SC-009 manual part). Add an informational note on checking catch-up after a real host reboot (`systemctl list-timers`, LAST right after boot)
+- [X] T066 Check the #23 dependency. If `invio run-due` exists on `main` by now, remove the R14 guard in `deploy/ansible/molecule/default/verify.yml` and make the run-due start mandatory. Otherwise leave the guard and note in the PR description that the guard must be removed once #23 is merged
 - [ ] T067 Run all gates: `uv run ruff check`, `uv run ruff format --check`, `uv run mypy src`, `uv run pytest`, `deploy/scripts/verify-units.sh`, `cd deploy/ansible && uv run ansible-lint`, `molecule test` for both scenarios. Fix all findings
 - [ ] T068 Walk through specs/015-gh-issue-24/quickstart.md scenarios 1–25 (including 19a) and tick each one against its CI, Molecule or manual source. Write `specs/015-gh-issue-24/pr-description.md`: summary, link to issue #24, the `scout` → `invio` naming (clarification Q1), the justification for the new dev-only dependency group `deploy` (constitution: new dependencies justified), the manual-verification deviation (plan Complexity Tracking), and the #23 guard status
 
