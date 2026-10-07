@@ -247,51 +247,52 @@
             fail_msg: "check-journal-json.py failed: {{ invio_notify_check.stderr }}"
             quiet: true
 
-    - name: Read the next elapse of the notify-retry timer
-      ansible.builtin.command:
-        argv: [systemctl, show, invio-notify-retry.timer, -p, NextElapseUSecRealtime, --value]
-      register: invio_notify_next
-      changed_when: false
-
-    - name: Convert it to epoch seconds and read the current time
-      ansible.builtin.command:
-        argv: [date, -d, "{{ invio_notify_next.stdout }}", +%s]
-      register: invio_notify_next_epoch
-      changed_when: false
-
-    - name: Read the current time
-      ansible.builtin.command:
-        argv: [date, +%s]
-      register: invio_now_epoch
+    # A timer that has just fired (or whose triggered service still runs) reports no next elapse
+    # or one in the past until it is rescheduled; the hourly and the quarter-hour trigger can fire
+    # during verify, so wait for a future elapse instead of reading it once.
+    - name: Read the seconds until the next elapse of the notify-retry timer
+      ansible.builtin.shell: |
+        next=$(systemctl show invio-notify-retry.timer -p NextElapseUSecRealtime --value)
+        [ -n "$next" ] && [ "$next" != n/a ] || exit 1
+        echo $(( $(date -d "$next" +%s) - $(date +%s) ))
+      args:
+        executable: /bin/bash
+      register: invio_notify_wait
+      until: invio_notify_wait.rc == 0 and (invio_notify_wait.stdout | int) > 0
+      retries: 60
+      delay: 5
       changed_when: false
 
     - name: Check that the next notify-retry run is at most 65 minutes ahead (hourly + 5 min)
       ansible.builtin.assert:
         that:
-          - (invio_notify_next_epoch.stdout | int) - (invio_now_epoch.stdout | int) > 0
-          - (invio_notify_next_epoch.stdout | int) - (invio_now_epoch.stdout | int) <= 3900
+          - (invio_notify_wait.stdout | int) <= 3900
+        fail_msg: "next notify-retry run is {{ invio_notify_wait.stdout }} s ahead"
         quiet: true
 
-    - name: Read the next elapse of the run-due timer
-      ansible.builtin.command:
-        argv: [systemctl, show, invio-run-due.timer, -p, NextElapseUSecRealtime, --value]
+    - name: Read the next elapse of the run-due timer as minute and second
+      ansible.builtin.shell: |
+        next=$(systemctl show invio-run-due.timer -p NextElapseUSecRealtime --value)
+        [ -n "$next" ] && [ "$next" != n/a ] || exit 1
+        [ "$(date -d "$next" +%s)" -gt "$(date +%s)" ] || exit 1
+        echo "$next"
+        date -d "$next" +%M:%S
+      args:
+        executable: /bin/bash
       register: invio_next
-      changed_when: false
-
-    - name: Convert it to minute and second
-      ansible.builtin.command:
-        argv: [date, -d, "{{ invio_next.stdout }}", +%M:%S]
-      register: invio_next_clock
+      until: invio_next.rc == 0
+      retries: 60
+      delay: 5
       changed_when: false
 
     - name: Check that the next start is at most 60 s after a quarter hour
       vars:
-        invio_minute: "{{ invio_next_clock.stdout.split(':')[0] | int }}"
-        invio_second: "{{ invio_next_clock.stdout.split(':')[1] | int }}"
+        invio_minute: "{{ invio_next.stdout_lines[1].split(':')[0] | int }}"
+        invio_second: "{{ invio_next.stdout_lines[1].split(':')[1] | int }}"
       ansible.builtin.assert:
         that:
           - (invio_minute | int % 15) * 60 + (invio_second | int) <= 60
-        fail_msg: "next elapse {{ invio_next.stdout }} is not within 60 s after a quarter hour"
+        fail_msg: "next elapse {{ invio_next.stdout_lines[0] }} is not within 60 s after a quarter hour"
         quiet: true
 
     # --- Limits and sandbox (FR-006, FR-008, SC-008, quickstart #21, #22) ----------------------
