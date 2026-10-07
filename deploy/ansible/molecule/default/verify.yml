@@ -1,0 +1,240 @@
+---
+- name: Verify
+  hosts: all
+  become: true
+  vars:
+    # Secrets that must never appear in the journal (newline-separated for the checker).
+    invio_verify_secrets: "{{ [invio_db_password, invio_llm_api_keys.mistral] | join('\n') }}"
+    invio_verify_systemd_run:
+      - systemd-run
+      - --wait
+      - --pipe
+      - --collect
+      - --uid=invio
+      - --gid=invio
+      - -p
+      - EnvironmentFile=/etc/invio/invio.env
+      - -p
+      - WorkingDirectory=/var/lib/invio
+      - -p
+      - StateDirectory=invio
+      - -E
+      - PYTHONDONTWRITEBYTECODE=1
+      - -E
+      - HOME=/var/lib/invio
+  tasks:
+    - name: Check that the timers are enabled
+      ansible.builtin.command:
+        argv: [systemctl, is-enabled, "{{ item }}"]
+      loop:
+        - invio-run-due.timer
+      register: invio_enabled
+      changed_when: false
+      failed_when: invio_enabled.stdout != 'enabled'
+
+    - name: Check that the timers are active
+      ansible.builtin.command:
+        argv: [systemctl, is-active, "{{ item }}"]
+      loop:
+        - invio-run-due.timer
+      register: invio_active
+      changed_when: false
+      failed_when: invio_active.stdout != 'active'
+
+    - name: Stat the env file and its directory
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - /etc/invio/invio.env
+        - /etc/invio
+      register: invio_stat
+
+    - name: Check the owners and modes
+      ansible.builtin.assert:
+        that:
+          - invio_stat.results[0].stat.pw_name == 'invio'
+          - invio_stat.results[0].stat.gr_name == 'invio'
+          - invio_stat.results[0].stat.mode == '0600'
+          - invio_stat.results[1].stat.pw_name == 'root'
+          - invio_stat.results[1].stat.gr_name == 'invio'
+          - invio_stat.results[1].stat.mode == '0750'
+        quiet: true
+
+    - name: Check that an unprivileged user cannot read the env file
+      ansible.builtin.command:
+        argv: [sudo, -u, nobody, cat, /etc/invio/invio.env]
+      register: invio_nobody
+      changed_when: false
+      failed_when: invio_nobody.rc == 0
+      no_log: true
+
+    - name: Read the database character set
+      ansible.builtin.command:
+        argv:
+          - mysql
+          - -N
+          - -e
+          - "SELECT DEFAULT_CHARACTER_SET_NAME FROM information_schema.SCHEMATA WHERE SCHEMA_NAME='invio'"
+      register: invio_charset
+      changed_when: false
+      failed_when: invio_charset.stdout != 'utf8mb4'
+
+    - name: Read the grants of the database user
+      ansible.builtin.command:
+        argv: [mysql, -N, -e, "SHOW GRANTS FOR 'invio'@'localhost'"]
+      register: invio_grants
+      changed_when: false
+      no_log: true
+
+    - name: Check that the grants only cover the invio schema
+      ansible.builtin.assert:
+        that:
+          - invio_grants.stdout_lines | length > 0
+          - invio_grants.stdout_lines | reject('match', '^GRANT (USAGE ON \*\.\*|ALL PRIVILEGES ON `invio`\.\*) TO `invio`@`localhost`') | list | length == 0
+          - invio_grants.stdout_lines | select('match', '^GRANT ALL PRIVILEGES ON `invio`\.\* ') | list | length == 1
+        quiet: true
+
+    - name: Find the newest migration file
+      ansible.builtin.shell: |
+        set -o pipefail
+        newest="$(ls /opt/invio/src/invio/db/migrations/versions/[0-9]*.py | sort | tail -n 1)"
+        sed -n -E 's/^revision(: str)? = "([^"]+)".*/\2/p' "$newest"
+      args:
+        executable: /bin/bash
+      register: invio_head
+      changed_when: false
+      failed_when: invio_head.stdout | length == 0
+
+    - name: Run the migration twice as the service account
+      ansible.builtin.command:
+        argv: "{{ invio_verify_systemd_run + ['/opt/invio/.venv/bin/invio', 'db', 'upgrade'] }}"
+      loop: [1, 2]
+      register: invio_upgrade
+      changed_when: false
+
+    - name: Check that the schema is at head and that the second call is a no-op
+      ansible.builtin.assert:
+        that:
+          - "('database at revision ' ~ invio_head.stdout) in invio_upgrade.results[0].stdout_lines"
+          - invio_upgrade.results[0].stdout_lines == invio_upgrade.results[1].stdout_lines
+        quiet: true
+
+    - name: Check whether invio run-due exists
+      ansible.builtin.command:
+        argv: [/opt/invio/.venv/bin/invio, run-due, --help]
+        chdir: /
+      register: invio_run_due_help
+      changed_when: false
+      failed_when: false
+
+    # TODO(#23): remove this guard once `invio run-due` is merged and make the start mandatory.
+    - name: Report the skipped run-due start
+      ansible.builtin.debug:
+        msg: "skipped: requires #23"
+      when: invio_run_due_help.rc != 0
+
+    - name: Start the real run-due service (only when issue 23 provides the command)
+      when: invio_run_due_help.rc == 0
+      block:
+        - name: Start the service
+          ansible.builtin.command:
+            argv: [systemctl, start, invio-run-due.service]
+          changed_when: true
+
+        - name: Read its result
+          ansible.builtin.command:
+            argv: [systemctl, show, -p, Result, --value, invio-run-due.service]
+          register: invio_run_due_result
+          changed_when: false
+          failed_when: invio_run_due_result.stdout != 'success'
+
+    # The journal contract is checked on the real unit and its sandbox. While `run-due` does not
+    # exist, a drop-in swaps ExecStart for `invio db upgrade`, which logs JSON lines too.
+    - name: Check the journal of the run-due service
+      block:
+        - name: Remember the start time
+          ansible.builtin.command:
+            argv: [date, +%s]
+          register: invio_probe_start
+          changed_when: false
+
+        - name: Create the drop-in directory
+          ansible.builtin.file:
+            path: /run/systemd/system/invio-run-due.service.d
+            state: directory
+            mode: "0755"
+
+        - name: Swap ExecStart for a command that exists today
+          ansible.builtin.copy:
+            dest: /run/systemd/system/invio-run-due.service.d/90-journal-probe.conf
+            content: |
+              [Service]
+              ExecStart=
+              ExecStart=/opt/invio/.venv/bin/invio db upgrade
+            mode: "0644"
+          when: invio_run_due_help.rc != 0
+
+        - name: Reload systemd
+          ansible.builtin.systemd_service:
+            daemon_reload: true
+
+        - name: Start the service
+          ansible.builtin.command:
+            argv: [systemctl, start, invio-run-due.service]
+          changed_when: true
+
+        - name: Check the result
+          ansible.builtin.command:
+            argv: [systemctl, show, -p, Result, --value, invio-run-due.service]
+          register: invio_probe_result
+          changed_when: false
+          failed_when: invio_probe_result.stdout != 'success'
+
+        - name: Copy the journal checker
+          ansible.builtin.copy:
+            src: "{{ playbook_dir }}/../../../scripts/check-journal-json.py"
+            dest: /usr/local/bin/check-journal-json.py
+            mode: "0755"
+
+        - name: Check the journal lines and that no secret leaked
+          ansible.builtin.shell: |
+            set -o pipefail
+            journalctl --sync
+            journalctl -u invio-run-due -o cat --since "@{{ invio_probe_start.stdout }}" | /usr/local/bin/check-journal-json.py
+          args:
+            executable: /bin/bash
+          environment:
+            INVIO_CHECK_SECRETS: "{{ invio_verify_secrets }}"
+          changed_when: false
+          no_log: true
+      always:
+        - name: Remove the drop-in
+          ansible.builtin.file:
+            path: /run/systemd/system/invio-run-due.service.d/90-journal-probe.conf
+            state: absent
+
+        - name: Reload systemd after removing the drop-in
+          ansible.builtin.systemd_service:
+            daemon_reload: true
+
+    - name: Read the next elapse of the run-due timer
+      ansible.builtin.command:
+        argv: [systemctl, show, invio-run-due.timer, -p, NextElapseUSecRealtime, --value]
+      register: invio_next
+      changed_when: false
+
+    - name: Convert it to minute and second
+      ansible.builtin.command:
+        argv: [date, -d, "{{ invio_next.stdout }}", +%M:%S]
+      register: invio_next_clock
+      changed_when: false
+
+    - name: Check that the next start is at most 60 s after a quarter hour
+      vars:
+        invio_minute: "{{ invio_next_clock.stdout.split(':')[0] | int }}"
+        invio_second: "{{ invio_next_clock.stdout.split(':')[1] | int }}"
+      ansible.builtin.assert:
+        that:
+          - (invio_minute | int % 15) * 60 + (invio_second | int) <= 60
+        fail_msg: "next elapse {{ invio_next.stdout }} is not within 60 s after a quarter hour"
+        quiet: true

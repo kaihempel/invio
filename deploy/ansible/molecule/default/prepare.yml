@@ -1,0 +1,46 @@
+---
+- name: Prepare
+  hosts: all
+  become: true
+  tasks:
+    # Docker Desktop (macOS) can fail the first read of a file on a read-only bind mount with
+    # "Permission denied", which makes the role's checkout from /src flaky. Reading everything
+    # once avoids it.
+    - name: Warm the read-only source mount
+      ansible.builtin.command:
+        argv: [find, /src, -type, f, -exec, cat, "{}", +]
+      register: invio_warm
+      changed_when: false
+      failed_when: false
+      no_log: true
+
+    # FR-016, quickstart #13: a missing/empty required variable fails in validate.yml, names the
+    # variable, and nothing has changed on the host yet.
+    - name: Run the role with an empty database password
+      block:
+        - name: Include the role
+          ansible.builtin.include_role:
+            name: invio
+          vars:
+            invio_db_password: ""
+        - name: Remember that the role did not fail
+          ansible.builtin.set_fact:
+            invio_negative_failed: false
+      rescue:
+        - name: Remember that the role failed
+          ansible.builtin.set_fact:
+            invio_negative_failed: true
+            invio_negative_msg: "{{ ansible_failed_result | to_json }}"
+
+    - name: Check that the failure names the variable and that nothing was changed
+      ansible.builtin.stat:
+        path: /etc/invio
+      register: invio_negative_dir
+
+    - name: Assert the negative case
+      ansible.builtin.assert:
+        that:
+          - invio_negative_failed
+          - "'invio_db_password' in invio_negative_msg"
+          - not invio_negative_dir.stat.exists
+        quiet: true

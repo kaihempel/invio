@@ -139,8 +139,8 @@ and 13) passes converge, idempotence and verify; `uv run molecule test -s extern
 
 ### Tests for User Story 5 ⚠️
 
-- [ ] T023 [P] [US5] Add `test_role_unit_files_are_symlinks_to_canonical_units` to `tests/test_deploy_units.py`. For every file in `deploy/systemd/`, `deploy/ansible/roles/invio/files/<name>` exists, is a **relative** symlink, and `resolve()` equals the canonical file. The role's `files/` directory has no extra unit files (research R11, G9)
-- [ ] T024 [P] [US5] Create `deploy/ansible/molecule/default/molecule.yml`:
+- [X] T023 [P] [US5] Add `test_role_unit_files_are_symlinks_to_canonical_units` to `tests/test_deploy_units.py`. For every file in `deploy/systemd/`, `deploy/ansible/roles/invio/files/<name>` exists, is a **relative** symlink, and `resolve()` equals the canonical file. The role's `files/` directory has no extra unit files (research R11, G9)
+- [X] T024 [P] [US5] Create `deploy/ansible/molecule/default/molecule.yml`:
   - driver `docker`;
   - platforms `debian12` and `debian13`, built from `Dockerfile.j2` with `privileged: true`, `cgroupns_mode: host`, volumes `/sys/fs/cgroup:/sys/fs/cgroup:rw` and `${MOLECULE_PROJECT_DIRECTORY}/../..:/src:ro`, `command: /lib/systemd/systemd`, `pre_build_image: false`;
   - provisioner `ansible` with `env: ANSIBLE_ROLES_PATH: ../../roles` and inventory group_vars that set test values for every required variable (`invio_git_repo: /src`, `invio_git_version: "{{ lookup('env', 'INVIO_TEST_REF') }}"`, dummy SMTP host `127.0.0.1`, `invio_http_contact: ci@example.invalid`, `invio_llm_api_keys: {mistral: ci-secret-mistral}`, `invio_db_password: ci-secret-db`);
@@ -154,8 +154,8 @@ and 13) passes converge, idempotence and verify; `uv run molecule test -s extern
   4. assert that `journalctl -b -u invio-run-due.service` shows exactly one start within 120 s of boot, and that both timers are `active`.
 
   Later stories (US4, US6) append their own sections to this file.
-- [ ] T025 [P] [US5] Create `deploy/ansible/molecule/default/Dockerfile.j2`: `FROM {{ item.image }}` (debian:12 / debian:13), `apt-get install -y systemd systemd-sysv python3 sudo ca-certificates`, `git config --system --add safe.directory /src`, remove `/lib/systemd/system/multi-user.target.wants/*` getty units, `STOPSIGNAL SIGRTMIN+3`
-- [ ] T026 [US5] Create `deploy/ansible/molecule/default/verify.yml`. It asserts:
+- [X] T025 [P] [US5] Create `deploy/ansible/molecule/default/Dockerfile.j2`: `FROM {{ item.image }}` (debian:12 / debian:13), `apt-get install -y systemd systemd-sysv python3 sudo ca-certificates`, `git config --system --add safe.directory /src`, remove `/lib/systemd/system/multi-user.target.wants/*` getty units, `STOPSIGNAL SIGRTMIN+3`
+- [X] T026 [US5] Create `deploy/ansible/molecule/default/verify.yml`. It asserts:
   1. `systemctl is-enabled` and `is-active` are `enabled` and `active` for both timers present at this point;
   2. `stat /etc/invio/invio.env` gives owner `invio`, group `invio`, mode `0600`, and `/etc/invio` gives `root:invio 0750`;
   3. `sudo -u nobody cat /etc/invio/invio.env` fails;
@@ -165,9 +165,9 @@ and 13) passes converge, idempotence and verify; `uv run molecule test -s extern
   7. the guarded run-due start (only if `invio run-due --help` succeeds, otherwise `debug: msg="skipped: requires #23"`, research R14): `systemctl start invio-run-due.service` succeeds and `systemctl show -p Result` is `success`;
   8. `journalctl -u invio-run-due -o cat` piped to the copied `check-journal-json.py` with `INVIO_CHECK_SECRETS` set to the test secrets exits 0;
   9. timer schedule: `systemctl show invio-run-due.timer -p NextElapseUSecRealtime --value`, parsed with `date -d`, has minute in {0, 15, 30, 45} and seconds ≤ 60 past that minute (SC-002 schedule part; quickstart #8–#11, #19).
-- [ ] T027 [US5] Create `deploy/ansible/molecule/default/converge.yml` (hosts all, become, `roles: [invio]`). Also add a negative check to `deploy/ansible/molecule/default/prepare.yml`: run the role with `invio_db_password` undefined via `ansible.builtin.include_role` inside `block/rescue`, then assert that the rescue happened, that the failure message contains `invio_db_password`, and that `/etc/invio` does not exist (FR-016, quickstart #13)
-- [ ] T028 [P] [US5] Create `deploy/scripts/check-no-secrets.sh` (bash, `set -euo pipefail`, executable). Usage: `check-no-secrets.sh <logfile> <secret>...`. It exits 1 if any secret occurs in the log file (`grep -F`), and prints only the index of the matching secret, never the secret itself. Otherwise it exits 0. T042 runs it on a verbose converge log with the Molecule test secrets `ci-secret-db`, `ci-secret-mistral` and `ci-secret-admin` (FR-017, quickstart #14)
-- [ ] T029 [P] [US5] Create `deploy/ansible/molecule/external-db/molecule.yml`:
+- [X] T027 [US5] Create `deploy/ansible/molecule/default/converge.yml` (hosts all, become, `roles: [invio]`). Also add a negative check to `deploy/ansible/molecule/default/prepare.yml`: run the role with `invio_db_password` undefined via `ansible.builtin.include_role` inside `block/rescue`, then assert that the rescue happened, that the failure message contains `invio_db_password`, and that `/etc/invio` does not exist (FR-016, quickstart #13)
+- [X] T028 [P] [US5] Create `deploy/scripts/check-no-secrets.sh` (bash, `set -euo pipefail`, executable). Usage: `check-no-secrets.sh <logfile> <secret>...`. It exits 1 if any secret occurs in the log file (`grep -F`), and prints only the index of the matching secret, never the secret itself. Otherwise it exits 0. T042 runs it on a verbose converge log with the Molecule test secrets `ci-secret-db`, `ci-secret-mistral` and `ci-secret-admin` (FR-017, quickstart #14)
+- [X] T029 [P] [US5] Create `deploy/ansible/molecule/external-db/molecule.yml`:
   - platforms: a Debian 12 target (same image settings as T024) and a `mariadb:11.4` container `dbserver` on a shared Docker network `molecule-invio`, with `MARIADB_ROOT_PASSWORD=ci-secret-admin`;
   - group_vars: `invio_mariadb_manage_server: false`, `invio_db_host: dbserver`, `invio_db_user_host: "%"`, `invio_db_admin_user: root`, `invio_db_admin_password: ci-secret-admin`;
   - a `converge.yml` that applies the role to the target only.
@@ -176,7 +176,7 @@ and 13) passes converge, idempotence and verify; `uv run molecule test -s extern
 
 ### Implementation for User Story 5
 
-- [ ] T030 [P] [US5] Create `deploy/ansible/roles/invio/defaults/main.yml` with every default from contracts/ansible-role.md "Defaults":
+- [X] T030 [P] [US5] Create `deploy/ansible/roles/invio/defaults/main.yml` with every default from contracts/ansible-role.md "Defaults":
   - `invio_user: invio`, `invio_group: invio`, `invio_mariadb_manage_server: true`;
   - `invio_db_host: localhost`, `invio_db_port: 3306`, `invio_db_name: invio`, `invio_db_user: invio`, `invio_db_user_host: localhost`;
   - `invio_uv_version` and `invio_uv_sha256` (pinned to the version used by `astral-sh/setup-uv` in CI; fill in the real checksum of `uv-x86_64-unknown-linux-gnu.tar.gz`), `invio_python_version: "3.12"`;
@@ -184,7 +184,7 @@ and 13) passes converge, idempotence and verify; `uv run molecule test -s extern
   - `invio_run_due_memory_max: 1G`, `invio_notify_retry_memory_max: 256M`, `invio_update_wait_timeout: 11100`.
 
   Optional variables (`invio_git_key_file`, `invio_smtp_user`, `invio_smtp_password`, `invio_healthcheck_url`, `invio_db_admin_user`, `invio_db_admin_password`) are documented in comments and left undefined. Add a comment that `invio_user`/`invio_group` are fixed by the unit files and are not meant to be changed
-- [ ] T031 [P] [US5] Create `deploy/ansible/roles/invio/tasks/validate.yml` (tag `invio:validate`, no changes). Use `ansible.builtin.assert` with `fail_msg` naming each variable:
+- [X] T031 [P] [US5] Create `deploy/ansible/roles/invio/tasks/validate.yml` (tag `invio:validate`, no changes). Use `ansible.builtin.assert` with `fail_msg` naming each variable:
   - `invio_git_repo`, `invio_git_version`, `invio_db_password`, `invio_smtp_host`, `invio_smtp_from` and `invio_http_contact` are defined and non-empty;
   - `invio_llm_api_keys` is a mapping with at least one non-empty value, and its keys are a subset of `mistral, openai, anthropic, google`;
   - every `invio_env_extra` key matches `^INVIO_[A-Z0-9_]+$`;
@@ -193,14 +193,14 @@ and 13) passes converge, idempotence and verify; `uv run molecule test -s extern
   - `ansible_distribution == 'Debian'` and `ansible_distribution_major_version in ['12', '13']`.
 
   Mark tasks that reference secret variables `no_log: true` (FR-016, FR-017)
-- [ ] T032 [P] [US5] Create `deploy/ansible/roles/invio/tasks/mariadb.yml` (tag `invio:mariadb`, all DB tasks `no_log: true`).
+- [X] T032 [P] [US5] Create `deploy/ansible/roles/invio/tasks/mariadb.yml` (tag `invio:mariadb`, all DB tasks `no_log: true`).
   - When `invio_mariadb_manage_server`: `apt` install `mariadb-server` and `python3-pymysql`, then `service mariadb started enabled`. Set login facts for `login_unix_socket: /run/mysqld/mysqld.sock`.
   - Otherwise: `apt` install `python3-pymysql` only; `wait_for host={{ invio_db_host }} port={{ invio_db_port }} timeout=10` with `fail_msg` "MariaDB server {{ invio_db_host }}:{{ invio_db_port }} is not reachable"; login via `invio_db_admin_user`/`invio_db_admin_password`.
   - Then `community.mysql.mysql_db name={{ invio_db_name }} encoding=utf8mb4 collation=utf8mb4_unicode_ci state=present`, and `community.mysql.mysql_user name={{ invio_db_user }} host={{ invio_db_user_host }} password={{ invio_db_password }} priv="{{ invio_db_name }}.*:ALL" update_password=always state=present` (idempotent: it changes only when the password differs). Never use `state: absent` (research R10, G4, G8)
-- [ ] T033 [P] [US5] Create `deploy/ansible/roles/invio/tasks/account.yml`: `group name=invio system=true`; `user name=invio group=invio system=true shell=/usr/sbin/nologin home=/var/lib/invio create_home=false` (data-model "Service account")
-- [ ] T034 [P] [US5] Create `deploy/ansible/roles/invio/templates/invio.env.j2`. It writes the `KEY="value"` lines from contracts/env-file.md using a macro `q(v)` that escapes `\` → `\\` and `"` → `\"`. `INVIO_DATABASE_URL` is built as `mysql+pymysql://{{ invio_db_user | urlencode }}:{{ invio_db_password | urlencode }}@{{ invio_db_host }}:{{ invio_db_port }}/{{ invio_db_name }}?charset=utf8mb4`; when `invio_db_host == 'localhost'` and the server is managed, append `&unix_socket=/run/mysqld/mysqld.sock`. Write one key per entry in `invio_llm_api_keys` (`INVIO_<PROVIDER>_API_KEY`), the optional keys only when defined, `INVIO_ARCHIVE_DIR="/var/lib/invio/archive"`, then the `invio_env_extra` entries sorted by key. Add a header comment "Managed by Ansible role invio — do not edit"
-- [ ] T035 [US5] Create `deploy/ansible/roles/invio/tasks/config.yml` (tag `invio:config`): `file path=/etc/invio state=directory owner=root group=invio mode=0750`; `template src=invio.env.j2 dest=/etc/invio/invio.env owner=invio group=invio mode=0600` with `no_log: true` (contracts/env-file.md "Location and permissions"; depends on T033, T034)
-- [ ] T036 [US5] Create `deploy/ansible/roles/invio/tasks/install.yml` (tag `invio:install`) for the first-install path:
+- [X] T033 [P] [US5] Create `deploy/ansible/roles/invio/tasks/account.yml`: `group name=invio system=true`; `user name=invio group=invio system=true shell=/usr/sbin/nologin home=/var/lib/invio create_home=false` (data-model "Service account")
+- [X] T034 [P] [US5] Create `deploy/ansible/roles/invio/templates/invio.env.j2`. It writes the `KEY="value"` lines from contracts/env-file.md using a macro `q(v)` that escapes `\` → `\\` and `"` → `\"`. `INVIO_DATABASE_URL` is built as `mysql+pymysql://{{ invio_db_user | urlencode }}:{{ invio_db_password | urlencode }}@{{ invio_db_host }}:{{ invio_db_port }}/{{ invio_db_name }}?charset=utf8mb4`; when `invio_db_host == 'localhost'` and the server is managed, append `&unix_socket=/run/mysqld/mysqld.sock`. Write one key per entry in `invio_llm_api_keys` (`INVIO_<PROVIDER>_API_KEY`), the optional keys only when defined, `INVIO_ARCHIVE_DIR="/var/lib/invio/archive"`, then the `invio_env_extra` entries sorted by key. Add a header comment "Managed by Ansible role invio — do not edit"
+- [X] T035 [US5] Create `deploy/ansible/roles/invio/tasks/config.yml` (tag `invio:config`): `file path=/etc/invio state=directory owner=root group=invio mode=0750`; `template src=invio.env.j2 dest=/etc/invio/invio.env owner=invio group=invio mode=0600` with `no_log: true` (contracts/env-file.md "Location and permissions"; depends on T033, T034)
+- [X] T036 [US5] Create `deploy/ansible/roles/invio/tasks/install.yml` (tag `invio:install`) for the first-install path:
   1. `apt` install `git ca-certificates`; `file path=/var/cache/invio-uv state=directory owner=root group=root mode=0700` (data-model "Installation tree");
   2. `get_url` the uv tarball pinned by `invio_uv_version` with `checksum: sha256:{{ invio_uv_sha256 }}` to `/var/cache/invio-uv/`, then `unarchive` `uv` to `/usr/local/bin` (`creates` guard keyed by version);
   3. `command: uv python install {{ invio_python_version }}` with env `UV_PYTHON_INSTALL_DIR=/opt/invio-python`, and `changed_when` on "Installed" in stderr;
@@ -210,18 +210,18 @@ and 13) passes converge, idempotence and verify; `uv run molecule test -s extern
   7. when they differ: `command: systemd-run --wait --pipe --collect --quiet --uid=invio --gid=invio -p EnvironmentFile=/etc/invio/invio.env -p WorkingDirectory=/var/lib/invio -p StateDirectory=invio -E PYTHONDONTWRITEBYTECODE=1 /opt/invio/.venv/bin/invio db upgrade` (`no_log: false` is fine: invio scrubs the URL), then `copy content="{{ invio_checkout.after }}\n" dest=/etc/invio/deployed-revision owner=root mode=0644`.
 
   Research R1–R5
-- [ ] T037 [US5] Create the role's unit symlinks `deploy/ansible/roles/invio/files/invio-run-due.service` → `../../../../systemd/invio-run-due.service` and `files/invio-run-due.timer` → `../../../../systemd/invio-run-due.timer` (relative, `ln -s`). Create `deploy/ansible/roles/invio/vars/main.yml` with `invio_units: [invio-run-due.service, invio-run-due.timer]` and `invio_timers: [invio-run-due.timer]` (US3 extends both lists)
-- [ ] T038 [US5] Create `deploy/ansible/roles/invio/handlers/main.yml` (`systemd daemon_reload: true`, listen `invio daemon-reload`) and `deploy/ansible/roles/invio/tasks/units.yml` (tag `invio:units`): `copy src={{ item }} dest=/etc/systemd/system/{{ item }} owner=root group=root mode=0644` over `invio_units`, notifying the handler; `meta: flush_handlers`; `systemd name={{ item }} enabled=true state=started` over `invio_timers` (FR-004, G9)
-- [ ] T039 [US5] Create `deploy/ansible/roles/invio/tasks/main.yml` that imports, in order, `validate.yml`, `mariadb.yml`, `account.yml`, `config.yml`, `install.yml`, `units.yml`, each tagged `invio` plus its own tag (contracts/ansible-role.md "Task order", "Tags")
-- [ ] T040 [P] [US5] Create `deploy/ansible/playbook.example.yml`: hosts `invio_servers`, `become: true`, `roles: [invio]`, with commented example vars. Secrets are referenced from `vault_*` variables (Ansible Vault), with a comment on running it with DebOps (`invio_mariadb_manage_server: false` when `debops.mariadb` manages the server)
+- [X] T037 [US5] Create the role's unit symlinks `deploy/ansible/roles/invio/files/invio-run-due.service` → `../../../../systemd/invio-run-due.service` and `files/invio-run-due.timer` → `../../../../systemd/invio-run-due.timer` (relative, `ln -s`). Create `deploy/ansible/roles/invio/vars/main.yml` with `invio_units: [invio-run-due.service, invio-run-due.timer]` and `invio_timers: [invio-run-due.timer]` (US3 extends both lists)
+- [X] T038 [US5] Create `deploy/ansible/roles/invio/handlers/main.yml` (`systemd daemon_reload: true`, listen `invio daemon-reload`) and `deploy/ansible/roles/invio/tasks/units.yml` (tag `invio:units`): `copy src={{ item }} dest=/etc/systemd/system/{{ item }} owner=root group=root mode=0644` over `invio_units`, notifying the handler; `meta: flush_handlers`; `systemd name={{ item }} enabled=true state=started` over `invio_timers` (FR-004, G9)
+- [X] T039 [US5] Create `deploy/ansible/roles/invio/tasks/main.yml` that imports, in order, `validate.yml`, `mariadb.yml`, `account.yml`, `config.yml`, `install.yml`, `units.yml`, each tagged `invio` plus its own tag (contracts/ansible-role.md "Task order", "Tags")
+- [X] T040 [P] [US5] Create `deploy/ansible/playbook.example.yml`: hosts `invio_servers`, `become: true`, `roles: [invio]`, with commented example vars. Secrets are referenced from `vault_*` variables (Ansible Vault), with a comment on running it with DebOps (`invio_mariadb_manage_server: false` when `debops.mariadb` manages the server)
 - [ ] T041 [US5] Run `cd deploy/ansible && uv run ansible-lint` until it's clean. Then `INVIO_TEST_REF=$(git rev-parse HEAD) uv run molecule test` for `default` and `external-db` until converge, idempotence (`changed=0`, FR-015/SC-005) and verify pass on Debian 12 and 13. Fix the role, not the tests
-- [ ] T042 [US5] Create `.github/workflows/deploy.yml`:
+- [X] T042 [US5] Create `.github/workflows/deploy.yml`:
   - triggers: `workflow_dispatch`, and `pull_request` + `push` with `paths: ["deploy/**", ".github/workflows/deploy.yml", "tests/test_deploy_*.py"]`;
   - job `molecule` (ubuntu-latest) with a matrix over scenario `[default, external-db]`;
   - steps: checkout with `fetch-depth: 0`; setup-uv; `uv sync --locked --only-group deploy`; install the collections; `INVIO_TEST_REF=${{ github.sha }}`; a secret-leak converge (`uv run molecule converge -s ${{ matrix.scenario }} -- -v 2>&1 | tee converge.log`, then `deploy/scripts/check-no-secrets.sh converge.log ci-secret-db ci-secret-mistral ci-secret-admin`, then `uv run molecule destroy -s ${{ matrix.scenario }}`); `uv run molecule test -s ${{ matrix.scenario }}`.
 
   Don't add it to required checks (FR-023)
-- [ ] T043 [US5] Fill `docs/deployment.md` "Requirements", "Install with Ansible" (requirements.yml, inventory variables table from contracts/ansible-role.md, Vault for secrets, DebOps notes, the server switch) and "Configuration (env file)" (path, permissions, format and escaping, `invio:config` tag to update secrets only, no restart needed for oneshot services)
+- [X] T043 [US5] Fill `docs/deployment.md` "Requirements", "Install with Ansible" (requirements.yml, inventory variables table from contracts/ansible-role.md, Vault for secrets, DebOps notes, the server switch) and "Configuration (env file)" (path, permissions, format and escaping, `invio:config` tag to update secrets only, no restart needed for oneshot services)
 
 **Checkpoint**: A fresh Debian host is provisioned by one role run, with run-due scheduled. This plus US1 and US2 is the MVP
 

@@ -1,0 +1,133 @@
+---
+# Molecule runs one side-effect playbook per scenario, so every mutation of the converged host
+# lives here. Each section restores the default state at its end.
+- name: Side effects
+  hosts: all
+  become: true
+  vars:
+    invio_timer_names:
+      - invio-run-due.timer
+    invio_service_names:
+      - invio-run-due.service
+  tasks:
+    # --- Catch-up after downtime (US1 scenario 3, SC-003, quickstart #20) ---------------------
+    - name: Stop the timers
+      ansible.builtin.systemd_service:
+        name: "{{ item }}"
+        state: stopped
+      loop: "{{ invio_timer_names }}"
+
+    - name: Pretend the last trigger was one hour ago
+      ansible.builtin.command:
+        argv: [touch, -d, "-1 hour", "/var/lib/systemd/timers/stamp-{{ item }}"]
+      loop: "{{ invio_timer_names }}"
+      changed_when: true
+
+    - name: Read the seconds since the last quarter hour
+      ansible.builtin.command:
+        argv: [date, +%s]
+      register: invio_now
+      changed_when: false
+
+    # A slot that elapses right after the restart would be a second, legitimate start. Skip past
+    # it: if the next quarter hour is less than 180 s away, wait until 70 s after it.
+    - name: Wait out an imminent quarter hour
+      ansible.builtin.wait_for:
+        timeout: "{{ (900 - (invio_now.stdout | int % 900)) + 70 }}"
+      when: (900 - (invio_now.stdout | int % 900)) < 180
+
+    # The container shares the kernel (and its boot id) with the Docker host, so `journalctl -b`
+    # also shows earlier "boots" of this container: mark the time and count from there.
+    - name: Remember the time of the restart
+      ansible.builtin.command:
+        argv: [date, +%s]
+      register: invio_restart_marker
+      changed_when: false
+
+    - name: Restart the container (the equivalent of a reboot)
+      community.docker.docker_container:
+        name: "{{ inventory_hostname }}"
+        state: started
+        restart: true
+      delegate_to: localhost
+      become: false
+
+    - name: Wait for the container to come back
+      ansible.builtin.wait_for_connection:
+        delay: 5
+        timeout: 120
+
+    - name: Wait for the catch-up start
+      ansible.builtin.command:
+        argv:
+          - journalctl
+          - -u
+          - invio-run-due.service
+          - MESSAGE_ID=7d4958e842da4a758f6c1cdc7b36dcc5
+          - --since
+          - "@{{ invio_restart_marker.stdout }}"
+          - -o
+          - cat
+          - --no-pager
+      register: invio_starts
+      until: invio_starts.stdout_lines | length >= 1
+      retries: 24
+      delay: 5
+      changed_when: false
+
+    # The start must not repeat for a missed slot: give a second start time to show up.
+    - name: Let a duplicate start show up
+      ansible.builtin.wait_for:
+        timeout: 30
+
+    - name: Count the starts since the restart
+      ansible.builtin.command:
+        argv:
+          - journalctl
+          - -u
+          - invio-run-due.service
+          - MESSAGE_ID=7d4958e842da4a758f6c1cdc7b36dcc5
+          - --since
+          - "@{{ invio_restart_marker.stdout }}"
+          - -o
+          - cat
+          - --no-pager
+      register: invio_starts
+      changed_when: false
+
+    - name: Read when the service started
+      ansible.builtin.command:
+        argv: [systemctl, show, -p, ExecMainStartTimestamp, --value, invio-run-due.service]
+      register: invio_started_at
+      changed_when: false
+
+    - name: Read when userspace came up
+      ansible.builtin.command:
+        argv: [systemctl, show, -p, UserspaceTimestamp, --value]
+      register: invio_userspace
+      changed_when: false
+
+    - name: Convert both to epoch seconds
+      ansible.builtin.command:
+        argv: [date, -d, "{{ item }}", +%s]
+      loop:
+        - "{{ invio_userspace.stdout }}"
+        - "{{ invio_started_at.stdout }}"
+      register: invio_epochs
+      changed_when: false
+
+    - name: Check that the missed slot ran exactly once, soon after boot
+      ansible.builtin.assert:
+        that:
+          - invio_starts.stdout_lines | length == 1
+          - (invio_epochs.results[1].stdout | int) - (invio_epochs.results[0].stdout | int) >= 0
+          - (invio_epochs.results[1].stdout | int) - (invio_epochs.results[0].stdout | int) <= 120
+        quiet: true
+
+    - name: Check that the timers are active again
+      ansible.builtin.command:
+        argv: [systemctl, is-active, "{{ item }}"]
+      loop: "{{ invio_timer_names }}"
+      register: invio_timers_active
+      changed_when: false
+      failed_when: invio_timers_active.stdout != 'active'

@@ -1,0 +1,232 @@
+---
+# Installation tree: uv, managed Python, checkout, venv, migration (research R1-R5).
+#
+# Update gate (research R4, contracts G5-G7): when the checkout would change on an existing
+# installation, verify the target ref, stop both timers and wait for running services. Checkout,
+# uv sync and the migration always run afterwards, so a half-finished update repairs itself on
+# the next run. The timers are started only by units.yml, so any failure leaves them stopped.
+- name: Install the tools for checkout and unpacking, and dbus (systemd-run needs it)
+  ansible.builtin.apt:
+    name:
+      - dbus
+      - git
+      - ca-certificates
+      - tar
+      - gzip
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Make sure the system bus is listening (a fresh dbus install does not start it)
+  ansible.builtin.systemd_service:
+    name: dbus.socket
+    state: started
+
+- name: Create the uv cache directory
+  ansible.builtin.file:
+    path: /var/cache/invio-uv
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Create the managed Python directory
+  ansible.builtin.file:
+    path: /opt/invio-python
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Download the pinned uv release
+  ansible.builtin.get_url:
+    url: "https://github.com/astral-sh/uv/releases/download/{{ invio_uv_version }}/uv-{{ ansible_architecture }}-unknown-linux-gnu.tar.gz"
+    dest: "/var/cache/invio-uv/uv-{{ invio_uv_version }}-{{ ansible_architecture }}.tar.gz"
+    checksum: "sha256:{{ invio_uv_sha256[ansible_architecture] }}"
+    owner: root
+    group: root
+    mode: "0600"
+
+- name: Create the uv unpack directory
+  ansible.builtin.file:
+    path: "/var/cache/invio-uv/uv-{{ invio_uv_version }}-{{ ansible_architecture }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Unpack uv
+  ansible.builtin.unarchive:
+    src: "/var/cache/invio-uv/uv-{{ invio_uv_version }}-{{ ansible_architecture }}.tar.gz"
+    dest: "/var/cache/invio-uv/uv-{{ invio_uv_version }}-{{ ansible_architecture }}"
+    remote_src: true
+    extra_opts:
+      - --strip-components=1
+    creates: "/var/cache/invio-uv/uv-{{ invio_uv_version }}-{{ ansible_architecture }}/uv"
+
+- name: Install uv
+  ansible.builtin.copy:
+    src: "/var/cache/invio-uv/uv-{{ invio_uv_version }}-{{ ansible_architecture }}/uv"
+    dest: /usr/local/bin/uv
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Install the managed Python outside the checkout
+  ansible.builtin.command:
+    argv:
+      - /usr/local/bin/uv
+      - python
+      - install
+      - --no-bin
+      - "{{ invio_python_version }}"
+  environment:
+    UV_PYTHON_INSTALL_DIR: /opt/invio-python
+    UV_CACHE_DIR: /var/cache/invio-uv
+  register: invio_uv_python
+  changed_when: "'Installed Python' in invio_uv_python.stderr"
+
+- name: Check whether this is an existing installation
+  ansible.builtin.stat:
+    path: /etc/systemd/system/invio-run-due.timer
+  register: invio_installed
+
+- name: Probe the checkout (check mode)
+  ansible.builtin.git:
+    repo: "{{ invio_git_repo }}"
+    dest: /opt/invio
+    version: "{{ invio_git_version }}"
+    key_file: "{{ invio_git_key_file | default(omit) }}"
+    ssh_opts: >-
+      {{ '-o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new'
+      if invio_git_key_file is defined else omit }}
+  check_mode: true
+  register: invio_checkout_probe
+
+- name: Prepare an existing installation for the update
+  when: invio_checkout_probe.changed and invio_installed.stat.exists
+  block:
+    - name: Fetch the remote refs (the probe does not fail for an unknown ref)
+      ansible.builtin.command:
+        argv: [git, -C, /opt/invio, fetch, --tags, origin]
+      environment: >-
+        {{ {'GIT_SSH_COMMAND': 'ssh -i ' ~ invio_git_key_file
+        ~ ' -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new'}
+        if invio_git_key_file is defined else {} }}
+      changed_when: false
+
+    - name: Check that the target ref exists locally
+      ansible.builtin.command:
+        argv: [git, -C, /opt/invio, rev-parse, --verify, --quiet, "{{ invio_git_version }}^{commit}"]
+      register: invio_ref_local
+      changed_when: false
+      failed_when: false
+
+    - name: Check that the target ref exists on the remote
+      ansible.builtin.command:
+        argv: [git, -C, /opt/invio, rev-parse, --verify, --quiet, "origin/{{ invio_git_version }}^{commit}"]
+      register: invio_ref_remote
+      changed_when: false
+      failed_when: false
+      when: invio_ref_local.rc != 0
+
+    - name: Fail early for an unknown ref (the timers keep running)
+      ansible.builtin.assert:
+        that: invio_ref_local.rc == 0 or (invio_ref_remote.rc | default(1)) == 0
+        fail_msg: "invio_git_version does not exist in {{ invio_git_repo }}; nothing was changed"
+        quiet: true
+
+    - name: Stop both timers
+      ansible.builtin.systemd_service:
+        name: "{{ item }}"
+        state: stopped
+      loop: "{{ invio_timers }}"
+
+    - name: Wait until no invio service is running
+      ansible.builtin.command:
+        argv: "{{ ['systemctl', 'is-active'] + invio_services }}"
+      register: invio_wait
+      until: invio_wait.stdout_lines | intersect(invio_busy_states) | length == 0
+      retries: "{{ ((invio_update_wait_timeout | int) / 10) | round(0, 'ceil') | int }}"
+      delay: 10
+      changed_when: false
+      failed_when: false
+
+    - name: Check that the services stopped in time
+      ansible.builtin.assert:
+        that: invio_wait.stdout_lines | intersect(invio_busy_states) | length == 0
+        fail_msg: "services still running after {{ invio_update_wait_timeout }} s"
+        quiet: true
+
+- name: Check out the code
+  ansible.builtin.git:
+    repo: "{{ invio_git_repo }}"
+    dest: /opt/invio
+    version: "{{ invio_git_version }}"
+    key_file: "{{ invio_git_key_file | default(omit) }}"
+    ssh_opts: >-
+      {{ '-o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new'
+      if invio_git_key_file is defined else omit }}
+  register: invio_checkout
+
+- name: Install the locked dependencies into the venv
+  ansible.builtin.command:
+    argv:
+      - /usr/local/bin/uv
+      - sync
+      - --locked
+      - --no-dev
+      - --no-editable
+      - --compile-bytecode
+    chdir: /opt/invio
+  environment:
+    UV_PROJECT_ENVIRONMENT: /opt/invio/.venv
+    UV_PYTHON_INSTALL_DIR: /opt/invio-python
+    UV_PYTHON_PREFERENCE: only-managed
+    UV_PYTHON: "{{ invio_python_version }}"
+    UV_CACHE_DIR: /var/cache/invio-uv
+  register: invio_uv_sync
+  changed_when: "'Installed' in invio_uv_sync.stderr or 'Uninstalled' in invio_uv_sync.stderr"
+
+- name: Read the revision that was last migrated
+  ansible.builtin.slurp:
+    src: /etc/invio/deployed-revision
+  register: invio_deployed
+  failed_when: false
+
+- name: Migrate the database when the deployed revision differs
+  when: (invio_deployed.content | default('') | b64decode | trim) != invio_checkout.after
+  block:
+    - name: Run the migration as the service account
+      ansible.builtin.command:
+        argv:
+          - systemd-run
+          - --wait
+          - --pipe
+          - --collect
+          - --quiet
+          - "--uid={{ invio_user }}"
+          - "--gid={{ invio_group }}"
+          - -p
+          - EnvironmentFile=/etc/invio/invio.env
+          - -p
+          - WorkingDirectory=/var/lib/invio
+          - -p
+          - StateDirectory=invio
+          - -E
+          - PYTHONDONTWRITEBYTECODE=1
+          - -E
+          - HOME=/var/lib/invio
+          - /opt/invio/.venv/bin/invio
+          - db
+          - upgrade
+      changed_when: true
+
+    - name: Record the migrated revision
+      ansible.builtin.copy:
+        content: "{{ invio_checkout.after }}\n"
+        dest: /etc/invio/deployed-revision
+        owner: root
+        group: root
+        mode: "0644"

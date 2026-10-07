@@ -1,0 +1,20 @@
+---
+# Not meant to be overridden: these mirror deploy/systemd/.
+invio_units:
+  - invio-run-due.service
+  - invio-run-due.timer
+invio_timers:
+  - invio-run-due.timer
+invio_services:
+  - invio-run-due.service
+# Unit states that mean "still running" (a oneshot unit is activating while it runs).
+invio_busy_states:
+  - active
+  - activating
+  - deactivating
+  - reloading
+invio_llm_providers:
+  - mistral
+  - openai
+  - anthropic
+  - google

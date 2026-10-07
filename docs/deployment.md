@@ -4,7 +4,96 @@
 
 ## Requirements
 
+- Target host: Debian 12 (bookworm) or 13 (trixie) with systemd, root access (`become: true`)
+  and Python 3 for Ansible. Other distributions are not supported.
+- Outbound network from the target: the Git remote, PyPI (`uv sync`) and GitHub releases (the uv
+  binary and the managed Python).
+- Controller (for the role): the `deploy` dependency group (`uv sync --group deploy`) gives you
+  `ansible-core`, `ansible-lint` and Molecule. Install the collections the role needs:
+
+  ```bash
+  uv run --group deploy ansible-galaxy collection install \
+    -r deploy/ansible/requirements.yml -p deploy/ansible/.collections
+  ```
+
+  Install them before running `ansible-lint` or the pre-commit hook too: lint runs in offline
+  mode and does not download collections. Molecule needs a second file,
+  `deploy/ansible/molecule/requirements.yml` (it adds `community.docker`).
+- The role uses `ansible.mysql` (the maintained successor that `community.mysql` now forwards
+  to) for the database tasks.
+- The role directory contains symlinks into `deploy/systemd/`. If you copy the role somewhere
+  else, copy it with `cp -rL deploy/ansible/roles/invio <target>` so that the symlinks become
+  real files.
+- The hardening in the unit files (see below) would block the Chromium sandbox. If the optional
+  `render` extra (Playwright) is ever deployed, the units need a reviewed relaxation.
+- `network-online.target` only waits for the network when a wait-online service
+  (`systemd-networkd-wait-online` or `NetworkManager-wait-online`) is enabled. Without one the
+  `After=` ordering is a no-op, and a run right after boot may find the network not yet up (the
+  next trigger retries).
+
 ## Install with Ansible
+
+The role `invio` (`deploy/ansible/roles/invio`) provisions a fresh Debian host in one run:
+MariaDB (database and user), the `invio` account, the env file, uv and Python, the checkout and
+venv, the database migration, the unit files and both timers. A second run with the same
+variables reports `changed=0`. Use `deploy/ansible/playbook.example.yml` as a starting point:
+
+```yaml
+- hosts: invio_servers
+  become: true
+  roles: [invio]
+```
+
+### Variables
+
+Required (validated first; a failure names the variable and nothing on the host has changed):
+
+| Variable | Rule |
+|---|---|
+| `invio_git_repo` | URL or path of the repository |
+| `invio_git_version` | tag or full 40-character commit SHA (abbreviated SHAs are rejected) |
+| `invio_db_password` | non-empty, single line |
+| `invio_smtp_host`, `invio_smtp_from` | non-empty |
+| `invio_http_contact` | non-empty |
+| `invio_llm_api_keys` | mapping provider to key, at least one non-empty; providers `mistral`, `openai`, `anthropic`, `google` |
+| `invio_db_admin_user`, `invio_db_admin_password` | only when `invio_mariadb_manage_server` is `false` and `invio_db_host` is not `localhost` |
+
+Optional (defaults in `defaults/main.yml`):
+
+| Variable | Default |
+|---|---|
+| `invio_mariadb_manage_server` | `true` |
+| `invio_db_host`, `invio_db_port`, `invio_db_name`, `invio_db_user`, `invio_db_user_host` | `localhost`, `3306`, `invio`, `invio`, `localhost` |
+| `invio_git_key_file` | unset (deploy key on the target, for private repositories) |
+| `invio_uv_version`, `invio_uv_sha256` | pinned release; the checksum is a mapping keyed by CPU architecture (`x86_64`, `aarch64`) |
+| `invio_python_version` | `3.12.13` (full patch version) |
+| `invio_smtp_port`, `invio_smtp_security`, `invio_smtp_user`, `invio_smtp_password` | `587`, `starttls`, unset, unset |
+| `invio_log_level`, `invio_healthcheck_url` | `INFO`, unset |
+| `invio_env_extra` | `{}`: more `INVIO_*` settings, key to value |
+| `invio_run_due_memory_max`, `invio_notify_retry_memory_max` | `1G`, `256M` (applied as a drop-in) |
+| `invio_update_wait_timeout` | `11100` seconds to wait for a running service before an update |
+
+`invio_user` and `invio_group` are fixed to `invio` by the unit files.
+
+### Secrets with Ansible Vault
+
+Put secrets in an encrypted vars file and reference them (`invio_db_password: "{{
+vault_invio_db_password }}"`). Every task that handles a secret uses `no_log`, so nothing
+appears in output, also not with `-v` or on a failure.
+
+### Database server: managed or external
+
+With `invio_mariadb_manage_server: true` the role installs and starts `mariadb-server` and
+administers it over the root Unix socket. With `false` the role installs no server package and
+changes no server configuration: it checks that `invio_db_host:invio_db_port` is reachable, then
+creates the database and user through `invio_db_admin_user`. Use this when another tool manages
+the server, for example `debops.mariadb`. Set `invio_db_user_host: "%"` when the application host
+differs from the database host. The role never drops a database, user or table.
+
+### Tags
+
+`invio` (everything), `invio:validate`, `invio:mariadb`, `invio:account`, `invio:config`,
+`invio:install`, `invio:units`. `invio:validate` always runs.
 
 ## Install manually
 
@@ -90,6 +179,25 @@ role uses.
 merged into your checkout the service fails with a usage error; the timer keeps running.
 
 ## Configuration (env file)
+
+The services read `/etc/invio/invio.env` through systemd's `EnvironmentFile=` (without a leading
+`-`, so a missing file fails the start). Owner and mode:
+
+| Path | Owner:group | Mode |
+|---|---|---|
+| `/etc/invio/` | `root:invio` | `0750` |
+| `/etc/invio/invio.env` | `invio:invio` | `0600` |
+| `/etc/invio/deployed-revision` | `root:root` | `0644` (commit that was last migrated; not secret) |
+
+Format: one `KEY="value"` per line, only `INVIO_*` keys, no newlines in values. Write a backslash
+as `\\` and a double quote as `\"`. systemd does not expand `$VARIABLE` in these values. Do not
+set `INVIO_ENV_FILE` on a server: invio's own dotenv parser would expand `${...}` in the file.
+`deploy/env/invio.env.example` lists every key with placeholder values. The database password
+inside `INVIO_DATABASE_URL` is URL-encoded; the role does that for you.
+
+To update only the configuration (for example rotate a secret) without touching the code, run
+the playbook with `--tags invio:config`. Oneshot services read the file on every start, so no
+restart is needed.
 
 ## Operating
 

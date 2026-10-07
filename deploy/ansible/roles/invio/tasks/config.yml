@@ -1,0 +1,17 @@
+---
+- name: Create the configuration directory
+  ansible.builtin.file:
+    path: /etc/invio
+    state: directory
+    owner: root
+    group: "{{ invio_group }}"
+    mode: "0750"
+
+- name: Write the env file
+  ansible.builtin.template:
+    src: invio.env.j2
+    dest: /etc/invio/invio.env
+    owner: "{{ invio_user }}"
+    group: "{{ invio_group }}"
+    mode: "0600"
+  no_log: true

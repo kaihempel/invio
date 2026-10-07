@@ -1,0 +1,14 @@
+---
+- name: Create the service group
+  ansible.builtin.group:
+    name: "{{ invio_group }}"
+    system: true
+
+- name: Create the service account
+  ansible.builtin.user:
+    name: "{{ invio_user }}"
+    group: "{{ invio_group }}"
+    system: true
+    shell: /usr/sbin/nologin
+    home: /var/lib/invio
+    create_home: false

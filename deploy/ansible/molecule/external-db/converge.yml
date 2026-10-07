@@ -1,0 +1,6 @@
+---
+- name: Converge
+  hosts: target
+  become: true
+  roles:
+    - invio

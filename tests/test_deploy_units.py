@@ -11,7 +11,9 @@ import os
 import re
 from pathlib import Path
 
+import jinja2
 import pytest
+from sqlalchemy.engine import make_url
 
 from invio.config.settings import unknown_env_keys
 
@@ -285,3 +287,188 @@ def test_run_due_timer_contract() -> None:
         },
         "invio-run-due.service",
     )
+
+
+# --- Ansible role files (contracts/ansible-role.md, contracts/env-file.md) ---------------------
+
+
+def test_role_unit_files_are_symlinks_to_canonical_units() -> None:
+    canonical = sorted(path.name for path in SYSTEMD.iterdir())
+    assert canonical, "deploy/systemd is empty"
+    in_role = sorted(path.name for path in (ROLE / "files").iterdir() if path.name != ".gitkeep")
+    assert in_role == canonical, "role files/ must hold exactly the canonical units"
+    for name in canonical:
+        link = ROLE / "files" / name
+        assert link.is_symlink(), f"{link} must be a symlink"
+        assert not Path(os.readlink(link)).is_absolute(), f"{link} must be a relative symlink"
+        assert link.resolve() == (SYSTEMD / name).resolve()
+
+
+def _render_template(name: str, **variables: object) -> str:
+    env = jinja2.Environment(
+        loader=jinja2.FileSystemLoader(ROLE / "templates"),
+        trim_blocks=True,
+        keep_trailing_newline=True,
+        undefined=jinja2.StrictUndefined,
+        autoescape=False,  # config files, not HTML
+    )
+    return env.get_template(name).render(**variables)
+
+
+ENV_VARS: dict[str, object] = {
+    "invio_db_user": "invio",
+    "invio_db_password": "pw",
+    "invio_db_host": "localhost",
+    "invio_db_port": 3306,
+    "invio_db_name": "invio",
+    "invio_mariadb_manage_server": True,
+    "invio_smtp_host": "smtp.example.com",
+    "invio_smtp_port": 587,
+    "invio_smtp_security": "starttls",
+    "invio_smtp_from": "Invio <invio@example.com>",
+    "invio_llm_api_keys": {"openai": "k-openai", "mistral": "k-mistral"},
+    "invio_log_level": "INFO",
+    "invio_http_contact": "ci@example.invalid",
+    "invio_env_extra": {},
+}
+ALL_OPTIONAL: dict[str, object] = {
+    "invio_smtp_user": "mailer",
+    "invio_smtp_password": "mail-pw",
+    "invio_healthcheck_url": "https://hc-ping.example.com/uuid",
+    "invio_llm_api_keys": {
+        "google": "k-g",
+        "anthropic": "k-a",
+        "openai": "k-o",
+        "mistral": "k-m",
+    },
+    "invio_env_extra": {"INVIO_MAX_PARALLEL_ITEMS": "4", "INVIO_HTTP_RESPECT_ROBOTS": "true"},
+}
+
+
+def _systemd_unquote(value: str) -> str:
+    """Decode a ``"..."`` EnvironmentFile value the way systemd does for ``\\\\`` and ``\\"``."""
+    assert value.startswith('"') and value.endswith('"') and len(value) >= 2, value
+    inner = value[1:-1]
+    out: list[str] = []
+    chars = iter(inner)
+    for char in chars:
+        if char == "\\":
+            out.append(next(chars))
+        else:
+            assert char != '"', f"unescaped quote in {value!r}"
+            out.append(char)
+    return "".join(out)
+
+
+def _env_pairs(text: str) -> dict[str, str]:
+    pairs: dict[str, str] = {}
+    for line in text.splitlines():
+        if not line or line.startswith("#"):
+            continue
+        key, _, value = line.partition("=")
+        assert key not in pairs, f"duplicate key {key}"
+        pairs[key] = _systemd_unquote(value)
+    return pairs
+
+
+def test_env_template_renders_the_documented_keys_in_fixed_order() -> None:
+    text = _render_template("invio.env.j2", **{**ENV_VARS, **ALL_OPTIONAL})
+    assert text.isascii()
+    assert text.endswith("\n")
+    keys = [ln.partition("=")[0] for ln in text.splitlines() if ln and not ln.startswith("#")]
+    assert keys == [
+        "INVIO_DATABASE_URL",
+        "INVIO_SMTP_HOST",
+        "INVIO_SMTP_PORT",
+        "INVIO_SMTP_SECURITY",
+        "INVIO_SMTP_FROM",
+        "INVIO_SMTP_USER",
+        "INVIO_SMTP_PASSWORD",
+        "INVIO_ANTHROPIC_API_KEY",
+        "INVIO_GOOGLE_API_KEY",
+        "INVIO_MISTRAL_API_KEY",
+        "INVIO_OPENAI_API_KEY",
+        "INVIO_LOG_LEVEL",
+        "INVIO_HTTP_CONTACT",
+        "INVIO_ARCHIVE_DIR",
+        "INVIO_HEALTHCHECK_URL",
+        "INVIO_HTTP_RESPECT_ROBOTS",
+        "INVIO_MAX_PARALLEL_ITEMS",
+    ]
+    assert "Managed by Ansible role invio" in text.splitlines()[0]
+    assert "INVIO_ENV_FILE" not in keys
+
+
+def test_env_template_omits_optional_keys_when_undefined_or_empty() -> None:
+    text = _render_template("invio.env.j2", **{**ENV_VARS, "invio_smtp_user": ""})
+    pairs = _env_pairs(text)
+    assert not {"INVIO_SMTP_USER", "INVIO_SMTP_PASSWORD", "INVIO_HEALTHCHECK_URL"} & set(pairs)
+    assert set(pairs) >= {"INVIO_DATABASE_URL", "INVIO_OPENAI_API_KEY", "INVIO_ARCHIVE_DIR"}
+    assert pairs["INVIO_ARCHIVE_DIR"] == "/var/lib/invio/archive"
+
+
+def test_env_template_skips_empty_llm_keys() -> None:
+    text = _render_template(
+        "invio.env.j2", **{**ENV_VARS, "invio_llm_api_keys": {"openai": "k", "google": ""}}
+    )
+    assert "INVIO_GOOGLE_API_KEY" not in text
+
+
+def test_env_template_output_has_only_known_settings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for key in list(os.environ):
+        if key.startswith("INVIO_"):
+            monkeypatch.delenv(key)
+    path = tmp_path / "invio.env"
+    path.write_text(
+        _render_template("invio.env.j2", **{**ENV_VARS, **ALL_OPTIONAL}), encoding="utf-8"
+    )
+    assert unknown_env_keys(path) == []
+
+
+@pytest.mark.parametrize(
+    ("host", "managed", "socket"),
+    [
+        ("localhost", True, True),
+        ("localhost", False, False),
+        ("dbserver", True, False),
+        ("dbserver", False, False),
+    ],
+)
+def test_env_template_uses_the_unix_socket_only_for_a_managed_local_server(
+    host: str, managed: bool, socket: bool
+) -> None:
+    text = _render_template(
+        "invio.env.j2",
+        **{**ENV_VARS, "invio_db_host": host, "invio_mariadb_manage_server": managed},
+    )
+    url = _env_pairs(text)["INVIO_DATABASE_URL"]
+    assert ("unix_socket=/run/mysqld/mysqld.sock" in url) is socket
+    assert url.endswith("charset=utf8mb4&unix_socket=/run/mysqld/mysqld.sock") is socket
+    assert f"@{host}:3306/invio?charset=utf8mb4" in url
+
+
+def test_env_template_escaping_round_trips_through_systemd_and_sqlalchemy() -> None:
+    password = 'p"a\\ss/@:%'
+    user = "us:er@x"
+    text = _render_template(
+        "invio.env.j2", **{**ENV_VARS, "invio_db_password": password, "invio_db_user": user}
+    )
+    # the raw line must not contain the password unescaped
+    assert password not in text
+    url = make_url(_env_pairs(text)["INVIO_DATABASE_URL"])
+    assert url.password == password
+    assert url.username == user
+    assert url.host == "localhost"
+    assert url.database == "invio"
+    assert url.query["charset"] == "utf8mb4"
+
+
+def test_env_template_escapes_backslash_and_quote_in_plain_values_and_keeps_dollar_literal() -> (
+    None
+):
+    value = 'a"b\\c $HOME `id` ${X}'
+    text = _render_template("invio.env.j2", **{**ENV_VARS, "invio_http_contact": value})
+    assert _env_pairs(text)["INVIO_HTTP_CONTACT"] == value
+    assert '"a\\"b\\\\c $HOME `id` ${X}"' in text

@@ -1,0 +1,52 @@
+---
+# Database and database user (research R10). Never drops anything (G8).
+# Every task that touches the database password uses no_log (FR-017).
+- name: Check that the external MariaDB server is reachable
+  ansible.builtin.wait_for:
+    host: "{{ invio_db_host }}"
+    port: "{{ invio_db_port }}"
+    timeout: 10
+    msg: "MariaDB server {{ invio_db_host }}:{{ invio_db_port }} is not reachable"
+  when: not invio_mariadb_manage_server
+
+- name: Install the MariaDB server and the Python driver for the Ansible modules
+  ansible.builtin.apt:
+    name: "{{ ['mariadb-server', 'python3-pymysql'] if invio_mariadb_manage_server else ['python3-pymysql'] }}"
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Start and enable the MariaDB server
+  ansible.builtin.service:
+    name: mariadb
+    state: started
+    enabled: true
+  when: invio_mariadb_manage_server
+
+- name: Create the database
+  ansible.mysql.mysql_db:
+    name: "{{ invio_db_name }}"
+    encoding: utf8mb4
+    collation: utf8mb4_unicode_ci
+    state: present
+    login_unix_socket: "{{ '/run/mysqld/mysqld.sock' if invio_mariadb_manage_server else omit }}"
+    login_host: "{{ omit if invio_mariadb_manage_server else invio_db_host }}"
+    login_port: "{{ omit if invio_mariadb_manage_server else invio_db_port }}"
+    login_user: "{{ omit if invio_mariadb_manage_server else invio_db_admin_user }}"
+    login_password: "{{ omit if invio_mariadb_manage_server else invio_db_admin_password }}"
+  no_log: true
+
+- name: Create the database user (the password is only updated when it differs)
+  ansible.mysql.mysql_user:
+    name: "{{ invio_db_user }}"
+    host: "{{ invio_db_user_host }}"
+    password: "{{ invio_db_password }}"
+    priv: "{{ invio_db_name }}.*:ALL"
+    update_password: always
+    state: present
+    login_unix_socket: "{{ '/run/mysqld/mysqld.sock' if invio_mariadb_manage_server else omit }}"
+    login_host: "{{ omit if invio_mariadb_manage_server else invio_db_host }}"
+    login_port: "{{ omit if invio_mariadb_manage_server else invio_db_port }}"
+    login_user: "{{ omit if invio_mariadb_manage_server else invio_db_admin_user }}"
+    login_password: "{{ omit if invio_mariadb_manage_server else invio_db_admin_password }}"
+  no_log: true
