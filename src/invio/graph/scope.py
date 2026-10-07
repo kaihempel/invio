@@ -17,10 +17,22 @@ from invio.config.job import JobConfig
 from invio.domain import ItemType
 from invio.graph.budget import BudgetTracker
 from invio.graph.nodes.synthesize import SynthesisResult
-from invio.graph.ports import DeliveryReport, ProviderBinding
+from invio.graph.ports import DeliveryReport, ProgressCounts, ProviderBinding, RunObserver
 from invio.graph.state import RunStage
 
-__all__ = ["RunScope"]
+__all__ = ["ItemRef", "RunScope"]
+
+
+@dataclass(frozen=True, slots=True)
+class ItemRef:
+    """Title and URL of a taken item, captured at deduplication (a dry run rolls the rows back).
+
+    Both are untrusted: the title has control characters stripped and is cut, the URL has no
+    credentials, query string or fragment (they can hold signed tokens).
+    """
+
+    title: str
+    url: str
 
 
 @dataclass(slots=True)
@@ -41,5 +53,11 @@ class RunScope:
     delivery: DeliveryReport | None = None
     failure: BaseException | None = None  # the original exception of the first fatal error
     finalized: bool = False
+    stage: RunStage = "load_job"  # the run-level stage that runs now (items: ``extract_text``)
+    errors_recorded: bool = False  # ``runs.stats["errors"]`` is written; the safety net keeps it
     item_types: dict[int, ItemType] = field(default_factory=dict)  # kind of every taken item
     item_stage: dict[int, RunStage] = field(default_factory=dict)  # last stage an item entered
+    max_items: int | None = None  # per-run cap from ``--max-items``; applied in ``load_job``
+    observer: RunObserver | None = None  # progress sink; dropped after its first failure
+    progress: ProgressCounts = field(default_factory=ProgressCounts)
+    item_refs: dict[int, ItemRef] = field(default_factory=dict)

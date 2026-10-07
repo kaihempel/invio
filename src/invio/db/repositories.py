@@ -5,7 +5,7 @@ errors surface immediately, and never commit or roll back (see ``session_scope``
 """
 
 import builtins
-from collections.abc import Collection, Iterable, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -18,7 +18,14 @@ from sqlalchemy.orm import Session
 
 from invio.db.models import Digest, Item, Job, LlmUsage, Notification, Run
 from invio.db.types import utcnow
-from invio.domain import COST_PRECISION, Candidate, ItemStatus, NotificationStatus, RunStatus
+from invio.domain import (
+    COST_PRECISION,
+    STATS_VERSION,
+    Candidate,
+    ItemStatus,
+    NotificationStatus,
+    RunStatus,
+)
 
 __all__ = [
     "KEEP",
@@ -154,6 +161,48 @@ class RunRepository:
         if limit is not None:
             stmt = stmt.limit(limit)
         return _all(self._session, stmt)
+
+    def record_errors(
+        self, run_id: int, entries: Sequence[Mapping[str, Any]], *, omitted: int = 0
+    ) -> bool:
+        """Merge the run's error list into ``stats`` (and ``errors_omitted`` when ``omitted > 0``).
+
+        Returns ``False`` and changes nothing for an unknown run and for a run still
+        ``running`` (its final stats are not written yet). ``status``, ``error`` and
+        ``finished_at`` are never touched. ``stats`` is a plain JSON column: a new dict is
+        assigned so the change is detected. Flushes only.
+        """
+        run = self._session.get(Run, run_id)
+        if run is None or run.status == RunStatus.RUNNING:
+            return False
+        merged: dict[str, Any] = {
+            **(run.stats or {"version": STATS_VERSION}),
+            "errors": list(entries),
+        }
+        if omitted > 0:
+            merged["errors_omitted"] = omitted
+        run.stats = merged
+        self._session.flush()
+        return True
+
+    def list_recent(
+        self, *, job_id: int | None = None, limit: int = 20
+    ) -> builtins.list[tuple[Run, str, dict[str, Any]]]:
+        """Return ``(run, job name, job config)`` newest first (``started_at DESC, id DESC``).
+
+        One query; ``job_id`` restricts it to one job.
+        """
+        stmt = (
+            select(Run, Job.name, Job.config)
+            .join(Job, Job.id == Run.job_id)
+            .order_by(Run.started_at.desc(), Run.id.desc())
+            .limit(limit)
+        )
+        if job_id is not None:
+            stmt = stmt.where(Run.job_id == job_id)
+        return [
+            (run, name, dict(config or {})) for run, name, config in self._session.execute(stmt)
+        ]
 
     def has_successful_run(self, job_id: int) -> bool:
         """Whether the job has any run with status ``succeeded`` or ``partial``."""

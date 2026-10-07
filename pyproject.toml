@@ -77,6 +77,7 @@ select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF", "TID251"]
 "src/invio/sources/{http,netguard,robots}.py" = ["TID251"]
 # The ``job_cli`` fixture is imported into the CLI test modules and used as a parameter.
 "tests/test_cli_job*.py" = ["F811"]
+"tests/test_cli_run.py" = ["F811"]
 # Fixtures from ``tests/http_helpers.py`` are imported and used as parameters.
 "tests/test_http*.py" = ["F811"]
 "tests/test_source_rss.py" = ["F811"]

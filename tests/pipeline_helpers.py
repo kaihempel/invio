@@ -25,9 +25,9 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from invio.config.job import JobConfig, LLMConfig, ScheduleConfig, SourceConfig
 from invio.db.models import Digest, Item, Job, LlmUsage, Notification
-from invio.db.repositories import JobRepository
+from invio.db.repositories import JobRepository, RunRepository
 from invio.db.session import session_factory, session_scope
-from invio.domain import Candidate
+from invio.domain import Candidate, RunStatus
 from invio.graph.nodes import relevance, summarize_item, synthesize
 from invio.graph.ports import DeliveryReport, ProviderBinding, RunDeps
 from invio.llm.base import LLMError, LLMProvider, Usage, structured_with_repair
@@ -610,3 +610,24 @@ __all__ = [
     "store_job",
     "summary_reply",
 ]
+
+
+def add_run(
+    factory: sessionmaker[Session],
+    job_id: int,
+    status: RunStatus = RunStatus.SUCCEEDED,
+    *,
+    stats: dict[str, Any] | None = None,
+    error: str | None = None,
+    started_at: datetime | None = None,
+    duration: timedelta | None = None,
+) -> int:
+    """Store a run of ``job_id``; any status but ``running`` is finished, ``duration`` after
+    its start (default now)."""
+    with session_scope(factory) as session:
+        runs = RunRepository(session)
+        run = runs.start(job_id, started_at=started_at)
+        if status is not RunStatus.RUNNING:
+            finished_at = run.started_at + duration if duration is not None else None
+            runs.finish(run, status, stats=stats, error=error, finished_at=finished_at)
+        return run.id

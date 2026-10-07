@@ -6,24 +6,27 @@ found / already exists / invalid name / aborted / declined, 2 invalid configurat
 ``_is_interactive`` and ``_edit_text`` functions are test seams.
 """
 
+import asyncio
 import contextlib
 import os
 import sys
-from collections.abc import Iterator
-from datetime import datetime
+from collections.abc import Coroutine, Iterator
+from contextlib import AbstractAsyncContextManager
 from pathlib import Path
-from typing import Annotated
-from zoneinfo import ZoneInfo
+from typing import Annotated, Any
 
 import typer
 import yaml
-from rich.console import Console
+from pydantic import ValidationError
 from rich.table import Table
-from sqlalchemy.exc import SQLAlchemyError
 
 from invio.cli import editor
-from invio.cli.errors import fail
+from invio.cli.console import stderr_console, stdout_console
+from invio.cli.errors import fail, mapped_errors
+from invio.cli.progress import RunProgressView
 from invio.cli.prompts import Prompter, QuestionaryPrompter, WizardAborted
+from invio.cli.run_output import DASH, format_time, stats_block
+from invio.cli.runtime import settings_error, setup_runtime
 from invio.cli.source_check import HttpSourceChecker, SourceChecker
 from invio.cli.wizard import WARNING_NO_REGISTRY, run_wizard
 from invio.config.job import (
@@ -34,9 +37,14 @@ from invio.config.job import (
     known_timezones,
     loads_yaml,
 )
-from invio.config.settings import MissingSettingError
+from invio.config.settings import get_settings
+from invio.domain import RunStatus
 from invio.llm.base import ModelRegistryError
 from invio.llm.registry import ModelRegistry, default_registry
+from invio.notify import DatabaseConfigError
+from invio.pipeline import RunDeps
+from invio.pipeline.deps import default_deps
+from invio.pipeline.run import JobBusyError, JobDisabledError, RunResult, run_job_by_name
 from invio.services.jobs import (
     JobExistsError,
     JobNameError,
@@ -46,10 +54,19 @@ from invio.services.jobs import (
     StoredJobConfigError,
     check_job_name,
 )
+from invio.textsafe import strip_control
 
 app = typer.Typer(help="Manage research jobs.", no_args_is_help=True)
 
-_DASH = "—"
+_RUN = "run"  # the name of ``invio job run``; the group callback's exit code depends on it
+
+
+@app.callback()
+def _setup(ctx: typer.Context) -> None:
+    """Manage research jobs."""
+    # The root callback leaves the runtime setup to this group (``SELF_CONFIGURING_GROUPS``):
+    # a configuration error is "could not start" (1) for ``job run``, where 2 means partial.
+    setup_runtime(config_exit=1 if ctx.invoked_subcommand == _RUN else 2)
 
 
 # --- test seams ------------------------------------------------------------------------------
@@ -57,6 +74,16 @@ _DASH = "—"
 
 def _make_service() -> JobService:
     return JobService.from_settings()
+
+
+def _run_deps() -> AbstractAsyncContextManager[RunDeps]:
+    """The production run dependencies (HTTP client, providers, notifier); tests replace this."""
+    return default_deps(get_settings())
+
+
+def _execute(coro: Coroutine[Any, Any, RunResult]) -> RunResult:
+    """Run the coroutine to completion on a fresh event loop (the Ctrl-C test replaces this)."""
+    return asyncio.run(coro)
 
 
 def _make_prompter() -> Prompter:
@@ -105,31 +132,14 @@ def _default_timezone() -> str:
 def _errors() -> Iterator[None]:
     """Map the expected exceptions to a message on stderr and an exit code (no traceback)."""
     try:
-        yield
-    except (JobNotFoundError, JobExistsError) as exc:
+        with mapped_errors(config_exit=2):
+            yield
+    except JobExistsError as exc:
         raise fail(f"Error: {exc}", 1) from exc
     except JobNameError as exc:
         raise fail(f"Error: invalid job name '{exc.name}': {exc.rule}", 1) from exc
-    except JobConfigError as exc:  # includes StoredJobConfigError
-        raise fail(str(exc), 2) from exc
-    except MissingSettingError as exc:
-        raise fail(f"Configuration error: {exc}", 2) from exc
     except (WizardAborted, KeyboardInterrupt, EOFError) as exc:
         raise fail("aborted; nothing saved", 1) from exc
-    except SQLAlchemyError as exc:
-        # Deliberately only the type name: the message may embed the database URL or SQL.
-        raise fail(
-            f"Error: database error ({type(exc).__name__}); "
-            "is the schema current? run 'invio db upgrade'",
-            1,
-        ) from exc
-
-
-def _fmt_next_run(next_run_at: datetime | None, tz: str) -> str:
-    """Render ``next_run_at`` as ``YYYY-MM-DD HH:MM <TZ abbr>`` in ``tz`` (``—`` if unset)."""
-    if next_run_at is None:
-        return _DASH
-    return next_run_at.astimezone(ZoneInfo(tz)).strftime("%Y-%m-%d %H:%M %Z")
 
 
 def _fmt_frequency(schedule: ScheduleConfig) -> str:
@@ -139,9 +149,6 @@ def _fmt_frequency(schedule: ScheduleConfig) -> str:
     if schedule.frequency is Frequency.MONTHLY:
         return f"monthly {schedule.day_of_month} {when}"
     return f"daily {when}"
-
-
-_PIPE_WIDTH = 1_000
 
 
 def _yes_no(flag: bool) -> str:
@@ -165,17 +172,13 @@ def list_jobs() -> None:
     for row in summaries:
         config = row.config
         if config is None:
-            frequency, next_run, status = _DASH, _DASH, "invalid config"
+            frequency, next_run, status = DASH, DASH, "invalid config"
         else:
             frequency = _fmt_frequency(config.schedule)
-            next_run = _fmt_next_run(row.next_run_at, config.schedule.timezone)
+            next_run = format_time(row.next_run_at, config.schedule.timezone)
             status = row.last_run_status.value if row.last_run_status else "never run"
         table.add_row(row.name, _yes_no(row.enabled), frequency, next_run, status)
-    console = Console(markup=False, highlight=False, emoji=False)
-    if not console.is_terminal:
-        # Piped output defaults to 80 columns; never truncate cells for grep/awk.
-        console = Console(markup=False, highlight=False, emoji=False, width=_PIPE_WIDTH)
-    console.print(table)
+    stdout_console().print(table)
 
 
 @app.command()
@@ -191,7 +194,7 @@ def show(name: Annotated[str, typer.Argument(help="Job name.")]) -> None:
         tz = record.config.schedule.timezone
         typer.echo(f"name: {record.name}")
         typer.echo(f"enabled: {_yes_no(record.enabled)}")
-        typer.echo(f"next run: {_fmt_next_run(record.next_run_at, tz)}")
+        typer.echo(f"next run: {format_time(record.next_run_at, tz)}")
         typer.echo()
         typer.echo(dump_yaml(record.config), nl=False)
 
@@ -201,7 +204,7 @@ def _stored_yaml(service: JobService, name: str) -> str:
 
 
 def _status_line(verb: str, name: str, record: JobRecord) -> str:
-    next_run = _fmt_next_run(record.next_run_at, record.config.schedule.timezone)
+    next_run = format_time(record.next_run_at, record.config.schedule.timezone)
     return f"{verb} job '{name}' (next run: {next_run})"
 
 
@@ -384,3 +387,123 @@ def import_job(
         record = service.import_yaml(file, name, replace=replace)
         verb = "replaced" if existed and replace else "imported"
         typer.echo(f"{verb} job '{record.name}'")
+
+
+# --- run -------------------------------------------------------------------------------------
+
+
+@contextlib.contextmanager
+def _run_errors() -> Iterator[None]:
+    """Everything that can stop ``job run`` from starting: one stderr line, exit 1.
+
+    Only named types are caught (``typer.Exit`` is a ``RuntimeError``). A configuration problem
+    exits 1 here, not 2: "could not start" is a single exit code for scripts.
+    """
+    try:
+        with mapped_errors(config_exit=1):
+            yield
+    except (DatabaseConfigError, ModelRegistryError) as exc:
+        raise fail(f"Configuration error: {exc}", 1) from exc
+    except ValidationError as exc:
+        raise fail(f"Configuration error: {settings_error(exc)}", 1) from exc
+    except KeyboardInterrupt as exc:
+        raise fail("interrupted; a started run is recorded as failed", 1) from exc
+
+
+async def _run_once(
+    name: str, *, dry_run: bool, max_items: int | None, view: RunProgressView
+) -> RunResult:
+    async with _run_deps() as deps:
+        return await run_job_by_name(
+            name, dry_run=dry_run, max_items=max_items, observer=view, deps=deps
+        )
+
+
+def _disabled(name: str) -> typer.Exit:
+    return fail(f"Error: job '{name}' is disabled; enable it with 'invio job enable {name}'", 1)
+
+
+def _print_result(result: RunResult, *, show_digest: bool) -> None:
+    """Digest (if asked), the stats table and the usage line, separated by blank lines."""
+    if show_digest:
+        digest = result.digest
+        if digest is None or not digest.item_ids:
+            typer.echo("No digest: nothing relevant was found.")
+        else:
+            typer.echo(f"# {strip_control(digest.title)}\n")
+            typer.echo(strip_control(digest.body, multiline=True))
+        typer.echo()
+    notifications = (
+        None if result.dry_run else (result.notifications_sent, result.notifications_failed)
+    )
+    stdout_console().print(
+        stats_block(
+            run_id=result.run_id,
+            status=result.status,
+            dry_run=result.dry_run,
+            stats=result.stats,
+            started_at=result.started_at,
+            finished_at=result.finished_at,
+            notifications=notifications,
+        )
+    )
+
+
+@app.command(_RUN)
+def run(
+    name: Annotated[str, typer.Argument(help="Job name.")],
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", help="Send nothing and keep only the run row; print the digest."),
+    ] = False,
+    max_items: Annotated[
+        int | None,
+        typer.Option(
+            "--max-items", help="Process at most N items (never more than the job limit)."
+        ),
+    ] = None,
+    verbose: Annotated[
+        bool,
+        typer.Option("--verbose", "-v", help="One stderr line per item; print the digest too."),
+    ] = False,
+) -> None:
+    """Run a job once, now.
+
+    Progress goes to stderr; the digest (dry run or --verbose), the statistics and the token
+    and cost line go to stdout.
+
+    Exit codes: 0 succeeded, 1 failed or could not start, 2 partial.
+
+    Usage errors (an unknown option, a non-numeric --max-items) also exit 2.
+    """
+    if max_items is not None and max_items < 1:
+        raise fail("Error: --max-items must be at least 1", 1)
+    with _run_errors():
+        record = _make_service().get_by_name(name)
+        if not record.enabled:
+            raise _disabled(name)
+        limit = record.config.limits.max_items_per_run
+        if max_items is not None and max_items > limit:
+            typer.echo(
+                f"note: --max-items {max_items} exceeds the job limit {limit}; using {limit}",
+                err=True,
+            )
+        view = RunProgressView(stderr_console(), verbose=verbose)
+        try:
+            with view:  # stopped before anything else is printed, also on Ctrl-C
+                result = _execute(_run_once(name, dry_run=dry_run, max_items=max_items, view=view))
+        except JobDisabledError as exc:  # disabled between the check above and the claim
+            raise _disabled(name) from exc
+        except JobBusyError as exc:
+            when = format_time(exc.locked_until, record.config.schedule.timezone)
+            raise fail(f"Error: job '{name}' is running (locked until {when})", 1) from exc
+    _print_result(result, show_digest=result.dry_run or verbose)
+    if result.status is RunStatus.FAILED:
+        reason = result.error or (result.errors[0].error_class if result.errors else "run failed")
+        raise fail(f"run {result.run_id} failed: {strip_control(reason)}", 1)
+    if result.status is RunStatus.PARTIAL:
+        raise fail(
+            f"run {result.run_id} finished partial: {len(result.errors)} error(s); "
+            f"see 'invio run show {result.run_id}'",
+            2,
+        )

@@ -44,13 +44,6 @@ def test_help_lists_all_nine_commands(job_cli: JobCli) -> None:
         assert re.search(rf"^\s*│?\s*{command}\s", output, re.MULTILINE), command
 
 
-def test_fmt_next_run() -> None:
-    when = datetime(2026, 10, 5, 5, 0, tzinfo=UTC)
-
-    assert job_module._fmt_next_run(when, "Europe/Berlin") == "2026-10-05 07:00 CEST"
-    assert job_module._fmt_next_run(None, "UTC") == "—"
-
-
 # --- list ------------------------------------------------------------------------------------
 
 

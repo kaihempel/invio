@@ -38,7 +38,7 @@ from invio.db.repositories import (
     UsageRepository,
 )
 from invio.db.session import session_scope
-from invio.domain import ItemStatus, RunStatus
+from invio.domain import STATS_VERSION, ItemStatus, RunStatus
 from invio.graph.budget import BudgetTracker
 from invio.graph.nodes.llm_calls import failure_message
 from invio.graph.nodes.relevance import RelevanceOutcome
@@ -59,12 +59,12 @@ __all__ = [
     "finish_dry_run",
     "persist_run",
     "record_failed_run",
+    "sanitized_error",
     "unprocessed",
 ]
 
 logger = logging.getLogger("invio.graph")
 
-STATS_VERSION: Final = 1  # layout of runs.stats, see contracts/run-stats.md
 ALL_FAILED_ERROR: Final = "all attempted items failed"  # runs.error of a run failed by its items
 ALL_SOURCES_FAILED_ERROR: Final = "all sources failed"  # runs.error when no source could be read
 
@@ -143,6 +143,7 @@ def _ledger_stats(budget: BudgetTracker) -> dict[str, Any]:
     """
     return {
         "llm_calls": budget.calls,
+        "llm_calls_unpriced": sum(1 for e in budget.ledger if e.cost_usd is None),
         "input_tokens": budget.input_tokens,
         "output_tokens": budget.output_tokens,
         "tokens": budget.used,
@@ -179,6 +180,10 @@ def build_stats(result: RunDraft) -> dict[str, Any]:
         "relevant": sum(o.status == ItemStatus.RELEVANT for o in result.relevance),
         "summarized": sum(o.status == ItemStatus.SUMMARIZED for o in result.summaries),
         "failed": len(_failed_ids(result)),
+        # Items that reached an outcome (rated, summarized or failed), in either stage.
+        "processed": len(
+            {o.item_id for o in result.relevance} | {o.item_id for o in result.summaries}
+        ),
         "skipped_budget": len(unprocessed(result)) if result.budget.exceeded else 0,
         **_ledger_stats(result.budget),
     }
@@ -293,7 +298,7 @@ def _invalid_fields(error: ValidationError) -> str:
     return f"{type(error).__name__}: invalid fields {text or '(root)'}"
 
 
-def _sanitized_error(error: BaseException) -> str:
+def sanitized_error(error: BaseException) -> str:
     """Error text for ``runs.error``: LLM errors by their facts, a config ``ValidationError`` by
     its field paths, anything else by class only."""
     if isinstance(error, LLMError):
@@ -328,7 +333,7 @@ def record_failed_run(
     If this transaction fails, ``run.record_failed_error`` is logged with the error class only
     and the error is re-raised: the run stays ``running`` and the caller must exit non-zero.
     """
-    message = _sanitized_error(error)
+    message = sanitized_error(error)
     try:
         with session_scope(factory) as session:
             runs = RunRepository(session)

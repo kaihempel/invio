@@ -317,6 +317,8 @@ def _stats_keys_of_a_recovered_run() -> set[str]:
     return {
         "version",
         "llm_calls",
+        "llm_calls_unpriced",
+        "errors",
         "input_tokens",
         "output_tokens",
         "tokens",
