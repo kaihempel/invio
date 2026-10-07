@@ -1,0 +1,54 @@
+---
+- name: Verify
+  hosts: target
+  become: true
+  tasks:
+    - name: Check that no MariaDB server package is installed on the target (FR-018)
+      ansible.builtin.command:
+        argv: [dpkg, -s, mariadb-server]
+      register: invio_dpkg
+      changed_when: false
+      failed_when: invio_dpkg.rc == 0
+
+    - name: Read the databases and users of the external server
+      ansible.mysql.mysql_info:
+        login_host: dbserver
+        login_user: "{{ invio_db_admin_user }}"
+        login_password: "{{ invio_db_admin_password }}"
+        filter:
+          - databases
+          - users
+      register: invio_dbinfo
+      no_log: true
+
+    - name: Check that the database and the user exist on the server
+      ansible.builtin.assert:
+        that:
+          - "'invio' in invio_dbinfo.databases"
+          - "'%' in invio_dbinfo.users"
+          - "'invio' in invio_dbinfo.users['%']"
+        quiet: true
+
+    - name: Read the env file
+      ansible.builtin.slurp:
+        src: /etc/invio/invio.env
+      register: invio_env_file
+      no_log: true
+
+    - name: Check that the application connects to the external server over TCP
+      ansible.builtin.assert:
+        that:
+          - (invio_env_file.content | b64decode) is search('^INVIO_DATABASE_URL="mysql\+pymysql://[^"]*@dbserver:3306/invio\?charset=utf8mb4"$', multiline=true)
+          - "'unix_socket' not in (invio_env_file.content | b64decode)"
+        quiet: true
+      no_log: true
+
+    - name: Check that the timers are active
+      ansible.builtin.command:
+        argv: [systemctl, is-active, "{{ item }}"]
+      loop:
+        - invio-run-due.timer
+        - invio-notify-retry.timer
+      register: invio_active
+      changed_when: false
+      failed_when: invio_active.stdout != 'active'

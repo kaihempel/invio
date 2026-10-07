@@ -1,0 +1,103 @@
+name: Deploy (Molecule)
+
+# Provisioning tests for the Ansible role in deploy/ansible: a fresh Debian 12/13 container with
+# systemd as PID 1 is provisioned, verified, re-run for idempotence and updated. Opt-in: this
+# workflow is not a required check (FR-023).
+
+on:
+  workflow_dispatch:
+  schedule:
+    # weekly, to notice upstream changes (Debian images, uv, PyPI) even when deploy/ is untouched
+    # On a scheduled run the update test starts from the previous commit on main (REF~1), not
+    # from the last release: it is a smoke test of the update path, not a release upgrade test.
+    - cron: "17 4 * * 1"
+  pull_request:
+    paths:
+      - "deploy/**"
+      - ".github/workflows/deploy.yml"
+      - "tests/test_deploy_*.py"
+      - "pyproject.toml"
+      - "uv.lock"
+      - "src/invio/db/**"
+      # the verify step checks CLI output ("database at revision", "nothing to retry")
+      - "src/invio/cli/**"
+  push:
+    paths:
+      - "deploy/**"
+      - ".github/workflows/deploy.yml"
+      - "tests/test_deploy_*.py"
+      - "pyproject.toml"
+      - "uv.lock"
+      - "src/invio/db/**"
+      # the verify step checks CLI output ("database at revision", "nothing to retry")
+      - "src/invio/cli/**"
+
+permissions:
+  contents: read
+
+jobs:
+  molecule:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario: [default, external-db]
+    env:
+      # The commit under test. On a pull request this is the merge commit; the update test
+      # converges its first parent (REF~1) first, so fetch-depth 0 is required.
+      INVIO_TEST_REF: ${{ github.sha }}
+      INVIO_TEST_SRC: ${{ github.workspace }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          # keep in step with invio_uv_version in deploy/ansible/roles/invio/defaults/main.yml
+          version: "0.12.23"
+          enable-cache: true
+          python-version: "3.12"
+
+      - name: Install the deploy tools
+        run: uv sync --locked --only-group deploy
+
+      - name: Install Ansible collections
+        run: >-
+          uv run --locked --only-group deploy ansible-galaxy collection install
+          -r deploy/ansible/requirements.yml
+          -r deploy/ansible/molecule/requirements.yml
+          -p deploy/ansible/.collections
+
+      # Outside converge.log: the create stage prints the platform definitions, and the
+      # external-db server container gets its root password through its environment.
+      - name: Create and prepare the test instances
+        working-directory: deploy/ansible
+        run: |
+          uv run --locked --only-group deploy molecule create -s ${{ matrix.scenario }}
+          uv run --locked --only-group deploy molecule prepare -s ${{ matrix.scenario }}
+
+      - name: Converge verbosely
+        shell: bash
+        working-directory: deploy/ansible
+        run: |
+          uv run --locked --only-group deploy molecule converge -s ${{ matrix.scenario }} -- -v 2>&1 | tee converge.log
+
+      - name: Check the converge log for secrets
+        # always(): a failed converge is when the verbose log is most likely to leak
+        if: ${{ always() && hashFiles('deploy/ansible/converge.log') != '' }}
+        shell: bash
+        working-directory: deploy/ansible
+        run: |
+          ../scripts/check-no-secrets.sh converge.log ci-secret-db ci-secret-mistral ci-secret-admin
+
+      - name: Destroy the converge instances
+        if: ${{ always() }}
+        working-directory: deploy/ansible
+        run: uv run --locked --only-group deploy molecule destroy -s ${{ matrix.scenario }}
+
+      - name: Molecule test
+        working-directory: deploy/ansible
+        run: uv run --locked --only-group deploy molecule test -s ${{ matrix.scenario }}

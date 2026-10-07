@@ -1,0 +1,36 @@
+---
+- name: Prepare
+  hosts: all
+  become: true
+  tasks:
+    - name: Copy the repository under test
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/../shared/tasks/copy-source.yml"
+
+    - name: Run the role with an empty database password
+      block:
+        - name: Include the role
+          ansible.builtin.include_role:
+            name: invio
+          vars:
+            invio_db_password: ""
+        - name: Remember that the role did not fail
+          ansible.builtin.set_fact:
+            invio_negative_failed: false
+      rescue:
+        - name: Remember that the role failed
+          ansible.builtin.set_fact:
+            invio_negative_failed: true
+            invio_negative_msg: "{{ ansible_failed_result | to_json }}"
+
+    - name: Check that the failure names the variable and that nothing was changed
+      ansible.builtin.stat:
+        path: /etc/invio
+      register: invio_negative_dir
+
+    - name: Assert the negative case
+      ansible.builtin.assert:
+        that:
+          - invio_negative_failed
+          - "'invio_db_password' in invio_negative_msg"
+          - not invio_negative_dir.stat.exists
+        quiet: true

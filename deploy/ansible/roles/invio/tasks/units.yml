@@ -1,0 +1,56 @@
+---
+- name: Install the unit files verbatim
+  ansible.builtin.copy:
+    src: "{{ item }}"
+    dest: "/etc/systemd/system/{{ item }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop: "{{ invio_units }}"
+  notify: invio daemon-reload
+
+# The drop-in directories always exist, so switching back to the default leaves no empty
+# directory behind; operators' own drop-ins (systemctl edit) live there too.
+- name: Create the drop-in directories
+  ansible.builtin.file:
+    path: "/etc/systemd/system/{{ item }}.d"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop: "{{ invio_services }}"
+
+- name: Write the memory limit drop-ins
+  ansible.builtin.template:
+    src: memory-override.conf.j2
+    dest: "/etc/systemd/system/{{ item.unit }}.d/50-invio-role.conf"
+    owner: root
+    group: root
+    mode: "0644"
+  vars:
+    memory_max: "{{ item.value }}"
+  loop: "{{ invio_memory_overrides }}"
+  loop_control:
+    label: "{{ item.unit }}"
+  when: item.value | string != item.default
+  notify: invio daemon-reload
+
+- name: Remove the memory limit drop-ins when the default applies
+  ansible.builtin.file:
+    path: "/etc/systemd/system/{{ item.unit }}.d/50-invio-role.conf"
+    state: absent
+  loop: "{{ invio_memory_overrides }}"
+  loop_control:
+    label: "{{ item.unit }}"
+  when: item.value | string == item.default
+  notify: invio daemon-reload
+
+- name: Reload systemd now
+  ansible.builtin.meta: flush_handlers
+
+- name: Enable and start the timers
+  ansible.builtin.systemd_service:
+    name: "{{ item }}"
+    enabled: true
+    state: started
+  loop: "{{ invio_timers }}"

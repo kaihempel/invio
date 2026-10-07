@@ -1,0 +1,148 @@
+---
+# Validate every input before anything on the host changes (FR-016).
+# Values are read with lookup('vars', item) so that a value that references another variable
+# (for example "{{ vault_invio_db_password }}") is templated first and then checked.
+# Failure messages name the variable and never contain its value. No task here uses no_log:
+# the conditions only look at length, type and the absence of newlines, and an assert that
+# fails would otherwise hide the variable name from the operator.
+- name: Check the platform
+  ansible.builtin.assert:
+    that:
+      - ansible_distribution == 'Debian'
+      - ansible_distribution_major_version in ['12', '13']
+      - ansible_architecture in invio_uv_sha256
+    fail_msg: >-
+      The invio role supports Debian 12 and 13 on architectures listed in invio_uv_sha256
+    quiet: true
+
+- name: Check the required string variables
+  ansible.builtin.assert:
+    that:
+      - item in vars
+      - lookup('vars', item) is string
+      - lookup('vars', item) | length > 0
+      - "'\\n' not in lookup('vars', item) and '\\r' not in lookup('vars', item)"
+    fail_msg: "{{ item }} is required and must be a non-empty single-line string"
+    quiet: true
+  loop:
+    - invio_git_repo
+    - invio_git_version
+    - invio_db_password
+    - invio_smtp_host
+    - invio_smtp_from
+    - invio_http_contact
+
+- name: Check that invio_git_repo carries no credentials
+  ansible.builtin.assert:
+    that:
+      - invio_git_repo is not search('^https?://[^/@]+@')
+      - invio_git_repo is not search('^[A-Za-z][A-Za-z0-9+.-]*://[^/@:]+:[^/@]*@')
+    fail_msg: >-
+      invio_git_repo must not contain a user name or token (it would be stored readable in
+      /opt/invio/.git/config); use an SSH URL with invio_git_key_file instead
+    quiet: true
+
+- name: Check the git version is a tag or a full commit SHA
+  ansible.builtin.assert:
+    that:
+      - invio_git_version is not match('^[0-9a-f]{7,39}$')
+    fail_msg: "invio_git_version is an abbreviated commit SHA: use a full 40-char SHA or a tag"
+    quiet: true
+
+- name: Check the string variables that end up in the env file or in unit files
+  ansible.builtin.assert:
+    that:
+      - lookup('vars', item) is string or lookup('vars', item) is number
+      - "'\\n' not in (lookup('vars', item) | string) and '\\r' not in (lookup('vars', item) | string)"
+    fail_msg: "{{ item }} must be a single-line string"
+    quiet: true
+  loop:
+    - invio_db_host
+    - invio_db_port
+    - invio_db_name
+    - invio_db_user
+    - invio_db_user_host
+    - invio_smtp_port
+    - invio_smtp_security
+    - invio_log_level
+  loop_control:
+    label: "{{ item }}"
+
+- name: Check the optional string variables when they are set
+  ansible.builtin.assert:
+    that:
+      - lookup('vars', item) is string
+      - "'\\n' not in lookup('vars', item) and '\\r' not in lookup('vars', item)"
+    fail_msg: "{{ item }} must be a single-line string"
+    quiet: true
+  loop:
+    - invio_smtp_user
+    - invio_smtp_password
+    - invio_healthcheck_url
+    - invio_git_key_file
+    - invio_db_admin_user
+    - invio_db_admin_password
+  when: item in vars
+  loop_control:
+    label: "{{ item }}"
+
+- name: Check invio_llm_api_keys
+  ansible.builtin.assert:
+    that:
+      - invio_llm_api_keys is defined
+      - invio_llm_api_keys is mapping
+      - invio_llm_api_keys | dict2items | selectattr('value', 'truthy') | list | length > 0
+      - invio_llm_api_keys.keys() | list | difference(invio_llm_providers) | length == 0
+      - invio_llm_api_keys.values() | map('string') | join('|') is not search('[\r\n]')
+    fail_msg: >-
+      invio_llm_api_keys must be a mapping from provider (mistral, openai, anthropic, google)
+      to a single-line API key, with at least one non-empty key
+    quiet: true
+
+- name: Check invio_env_extra
+  ansible.builtin.assert:
+    that:
+      - invio_env_extra is mapping
+      - invio_env_extra.keys() | reject('match', '^INVIO_[A-Z0-9_]+$') | list | length == 0
+      - invio_env_extra.keys() | list | intersect(invio_managed_env_keys) | length == 0
+      - invio_env_extra.values() | select('boolean') | list | length == 0
+      - invio_env_extra.values() | map('string') | join('|') is not search('[\r\n]')
+    fail_msg: >-
+      invio_env_extra must be a mapping whose keys match ^INVIO_[A-Z0-9_]+$, are not set by
+      the role itself (use the dedicated invio_* variable instead; INVIO_ENV_FILE is never set)
+      and whose values are single-line strings or numbers (quote booleans: "true")
+    quiet: true
+
+- name: Check the database administrator for an external server
+  ansible.builtin.assert:
+    that:
+      - invio_db_admin_user is defined
+      - invio_db_admin_user | length > 0
+      - invio_db_admin_password is defined
+      - invio_db_admin_password | length > 0
+    fail_msg: >-
+      invio_db_admin_user and invio_db_admin_password are required when
+      invio_mariadb_manage_server is false and invio_db_host is not localhost
+    quiet: true
+  when: not invio_mariadb_manage_server and invio_db_host != 'localhost'
+
+- name: Check that a managed server is local
+  ansible.builtin.assert:
+    that:
+      - invio_db_host == 'localhost'
+    fail_msg: >-
+      invio_mariadb_manage_server installs a local server: set invio_db_host to localhost, or set
+      invio_mariadb_manage_server to false for a remote server
+    quiet: true
+  when: invio_mariadb_manage_server
+
+- name: Check the memory limits and the update timeout
+  ansible.builtin.assert:
+    that:
+      - invio_run_due_memory_max | string is match('^[0-9]+[KMGT]?$')
+      - invio_notify_retry_memory_max | string is match('^[0-9]+[KMGT]?$')
+      - invio_update_wait_timeout | int > 0
+    fail_msg: >-
+      invio_run_due_memory_max and invio_notify_retry_memory_max must look like 512M or 2G,
+      and invio_update_wait_timeout must be a positive number of seconds
+    quiet: true

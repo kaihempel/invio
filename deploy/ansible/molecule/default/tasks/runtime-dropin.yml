@@ -1,0 +1,27 @@
+---
+# Writes the runtime drop-in invio_dropin_name for invio-run-due.service (when
+# invio_dropin_content is defined) or removes it, then reloads systemd. Runtime drop-ins live in
+# /run/systemd/system and are gone after a reboot.
+- name: Create the runtime drop-in directory
+  ansible.builtin.file:
+    path: /run/systemd/system/invio-run-due.service.d
+    state: directory
+    mode: "0755"
+  when: invio_dropin_content is defined
+
+- name: Write the runtime drop-in
+  ansible.builtin.copy:
+    dest: "/run/systemd/system/invio-run-due.service.d/{{ invio_dropin_name }}"
+    content: "{{ invio_dropin_content }}"
+    mode: "0644"
+  when: invio_dropin_content is defined
+
+- name: Remove the runtime drop-in
+  ansible.builtin.file:
+    path: "/run/systemd/system/invio-run-due.service.d/{{ invio_dropin_name }}"
+    state: absent
+  when: invio_dropin_content is not defined
+
+- name: Reload systemd for the drop-in
+  ansible.builtin.systemd_service:
+    daemon_reload: true

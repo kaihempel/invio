@@ -688,6 +688,15 @@ failed, `1` a notification failed or was given up, `2` configuration error (data
 host or sender). A crashed first attempt may have reached the recipient before the row was
 marked, so recovering a stale `pending` row can send a duplicate mail.
 
+## Deployment
+
+invio runs unattended on a Debian 12 or 13 server with systemd: a timer starts `invio run-due`
+every 15 minutes and another retries failed notifications hourly, both as the locked-down `invio`
+account with logs in the journal. The Ansible role in `deploy/ansible` provisions a host in one
+run (database, account, env file, uv and Python, code, migration, timers); the same steps by
+hand, the update procedure and the troubleshooting notes are in
+[docs/deployment.md](docs/deployment.md). The units and the example env file are in `deploy/`.
+
 ## Layout
 
 ```
@@ -710,5 +719,7 @@ src/invio/
   notify/       e-mail notifier: payload, render (Markdown, sanitizer, MIME), email (SMTP, retry)
   scheduling/   next-run calculation (next_run.py)
 alembic.ini     developer entry point for `uv run alembic ...`
+deploy/         systemd units (systemd/), env example (env/), checker scripts (scripts/) and the
+                Ansible role `invio` with Molecule tests (ansible/)
 tests/
 ```

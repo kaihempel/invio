@@ -1,0 +1,14 @@
+# Missed triggers run once after boot (Persistent=true). AccuracySec=1s keeps starts within
+# 60 s of the quarter hour (the default of 1 min would add up to another minute).
+[Unit]
+Description=invio: run due research jobs every 15 minutes
+
+[Timer]
+OnCalendar=*:0/15
+Persistent=true
+RandomizedDelaySec=60
+AccuracySec=1s
+Unit=invio-run-due.service
+
+[Install]
+WantedBy=timers.target
