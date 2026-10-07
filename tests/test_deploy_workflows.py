@@ -66,7 +66,9 @@ def test_deploy_workflow_is_opt_in_and_triggered_by_deploy_changes() -> None:
 def test_deploy_trigger_paths_match_existing_files() -> None:
     for pattern in DEPLOY["on"]["push"]["paths"]:
         # Path.glob treats "*" and "**" like GitHub's filter: "*" stays within one directory.
-        assert any(path.is_file() for path in REPO.glob(pattern)), f"{pattern} matches nothing"
+        # Before Python 3.13 a trailing "**" yields only directories, so look inside them.
+        glob = f"{pattern}/*" if pattern.endswith("**") else pattern
+        assert any(path.is_file() for path in REPO.glob(glob)), f"{pattern} matches nothing"
 
 
 def test_deploy_runs_when_the_cli_output_checked_by_molecule_changes() -> None:
