@@ -63,7 +63,7 @@
     # --- Update path (FR-021, US6, quickstart #15, #16, #25) -----------------------------------
     - name: Resolve the parent of the commit under test
       ansible.builtin.command:
-        argv: [git, -C, /src, rev-parse, "{{ invio_ref }}~1"]
+        argv: [git, -C, /srv/invio-src, rev-parse, "{{ invio_ref }}~1"]
       register: invio_parent
       changed_when: false
 

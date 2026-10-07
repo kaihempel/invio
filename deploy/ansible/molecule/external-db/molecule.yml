@@ -44,7 +44,7 @@ provisioner:
   inventory:
     group_vars:
       all:
-        invio_git_repo: /src
+        invio_git_repo: /srv/invio-src
         invio_git_version: "{{ lookup('env', 'INVIO_TEST_REF') }}"
         invio_smtp_host: 127.0.0.1
         invio_smtp_from: ci@example.invalid

@@ -3,19 +3,22 @@
   hosts: all
   become: true
   tasks:
-    # Docker Desktop (macOS) can fail the first read of a file on a read-only bind mount with
-    # "Permission denied", which makes the role's checkout from /src flaky. Reading everything
-    # once avoids it.
-    - name: Warm the read-only source mount
-      ansible.builtin.command:
-        argv: [find, /src, -type, f, -exec, cat, "{}", +]
-      register: invio_warm
-      changed_when: false
-      failed_when: false
-      no_log: true
+    # The role clones from a copy of the mounted repository that lives on the container's own
+    # file system. Docker Desktop (macOS) fails object reads of the checkout tool on a read-only
+    # bind mount with "Permission denied"; a plain file copy (clone --no-hardlinks) is not affected, and
+    # the copy keeps the test independent of file ownership on the mount.
+    - name: Install the version control tool to copy the repository under test
+      ansible.builtin.apt:
+        name: git
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
 
-    # FR-016, quickstart #13: a missing/empty required variable fails in validate.yml, names the
-    # variable, and nothing has changed on the host yet.
+    - name: Copy the repository under test from the read-only mount
+      ansible.builtin.command:
+        argv: [git, clone, --no-hardlinks, --no-checkout, /src, /srv/invio-src]
+        creates: /srv/invio-src
+
     - name: Run the role with an empty database password
       block:
         - name: Include the role
