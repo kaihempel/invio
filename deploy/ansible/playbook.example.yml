@@ -1,0 +1,35 @@
+---
+# Example playbook for the invio role. Copy it next to your inventory and adjust.
+#
+# Install the collection first:
+#   uv run --group deploy ansible-galaxy collection install -r requirements.yml
+# Keep secrets in Ansible Vault and reference them from vault_* variables, for example:
+#   ansible-vault edit group_vars/invio_servers/vault.yml
+#
+# The role directory contains symlinks into deploy/systemd/. When you copy the role somewhere
+# else, copy it with `cp -rL deploy/ansible/roles/invio <target>` so the symlinks become files.
+#
+# With DebOps: when debops.mariadb manages the database server, set
+# invio_mariadb_manage_server: false and give the role an administrator account.
+- name: Provision invio
+  hosts: invio_servers
+  become: true
+  roles:
+    - invio
+  vars:
+    invio_git_repo: https://example.com/your-org/invio.git
+    invio_git_version: v0.1.0 # a tag or a full 40-character commit SHA
+    invio_db_password: "{{ vault_invio_db_password }}"
+    invio_smtp_host: smtp.example.com
+    invio_smtp_from: Invio <invio@example.com>
+    invio_smtp_user: invio@example.com
+    invio_smtp_password: "{{ vault_invio_smtp_password }}"
+    invio_http_contact: admin@example.com
+    invio_llm_api_keys:
+      mistral: "{{ vault_invio_mistral_api_key }}"
+    # invio_mariadb_manage_server: false
+    # invio_db_host: db.example.com
+    # invio_db_user_host: "%"
+    # invio_db_admin_user: root
+    # invio_db_admin_password: "{{ vault_invio_db_admin_password }}"
+    # invio_run_due_memory_max: 2G

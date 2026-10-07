@@ -1,0 +1,10 @@
+---
+profile: production
+# Opt-in rule (research R12): tasks that handle password variables need no_log.
+enable_list:
+  - no-log-password
+# Collections are installed ahead of time (see docs/deployment.md); never download during lint.
+offline: true
+exclude_paths:
+  - molecule/*/.cache
+  - .collections

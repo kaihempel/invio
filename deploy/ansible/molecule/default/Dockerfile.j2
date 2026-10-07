@@ -1,0 +1,20 @@
+FROM {{ item.image }}
+
+ENV container=docker
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends systemd systemd-sysv python3 sudo ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# The repository is mounted read-only at /src and owned by another uid than root inside the
+# container. Write the setting directly: the git binary is not installed yet at this point.
+RUN printf '[safe]\n\tdirectory = /src\n' > /etc/gitconfig
+
+# A container has no ttys: drop the units that would fail or spin.
+RUN rm -f /lib/systemd/system/multi-user.target.wants/getty.target \
+    /lib/systemd/system/multi-user.target.wants/systemd-logind.service \
+    /etc/systemd/system/getty.target.wants/*
+
+STOPSIGNAL SIGRTMIN+3
+CMD ["/lib/systemd/systemd"]

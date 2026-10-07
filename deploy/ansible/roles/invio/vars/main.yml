@@ -1,0 +1,48 @@
+---
+# Not meant to be overridden: these mirror deploy/systemd/.
+invio_units:
+  - invio-run-due.service
+  - invio-run-due.timer
+  - invio-notify-retry.service
+  - invio-notify-retry.timer
+invio_timers: "{{ invio_units | select('match', '.*[.]timer$') | list }}"
+invio_services: "{{ invio_units | select('match', '.*[.]service$') | list }}"
+# Unit states that mean "still running" (a oneshot unit is activating while it runs).
+invio_busy_states:
+  - active
+  - activating
+  - deactivating
+  - reloading
+invio_llm_providers:
+  - mistral
+  - openai
+  - anthropic
+  - google
+# Memory ceilings: a drop-in is written only when the value differs from the shipped default.
+invio_memory_overrides:
+  - unit: invio-run-due.service
+    value: "{{ invio_run_due_memory_max }}"
+    default: 1G
+  - unit: invio-notify-retry.service
+    value: "{{ invio_notify_retry_memory_max }}"
+    default: 256M
+# Keys the template writes itself, in template order (providers sorted), plus INVIO_ENV_FILE,
+# which must never be set on a server: invio_env_extra may not repeat them. The tests check this
+# list against templates/invio.env.j2 and deploy/env/invio.env.example.
+invio_managed_env_keys:
+  - INVIO_DATABASE_URL
+  - INVIO_SMTP_HOST
+  - INVIO_SMTP_PORT
+  - INVIO_SMTP_SECURITY
+  - INVIO_SMTP_FROM
+  - INVIO_SMTP_USER
+  - INVIO_SMTP_PASSWORD
+  - INVIO_ANTHROPIC_API_KEY
+  - INVIO_GOOGLE_API_KEY
+  - INVIO_MISTRAL_API_KEY
+  - INVIO_OPENAI_API_KEY
+  - INVIO_LOG_LEVEL
+  - INVIO_HTTP_CONTACT
+  - INVIO_ARCHIVE_DIR
+  - INVIO_HEALTHCHECK_URL
+  - INVIO_ENV_FILE

@@ -1,0 +1,68 @@
+---
+# The DebOps / remote-server case: the role does not install MariaDB and uses an existing server.
+# Same environment variables as the default scenario (INVIO_TEST_SRC, INVIO_TEST_REF).
+dependency:
+  name: galaxy
+  options:
+    requirements-file: ${MOLECULE_PROJECT_DIRECTORY}/molecule/requirements.yml
+driver:
+  name: docker
+platforms:
+  - name: target
+    image: debian:12
+    dockerfile: ../default/Dockerfile.j2
+    pre_build_image: false
+    privileged: true
+    cgroupns_mode: host
+    command: /lib/systemd/systemd
+    groups: [target]
+    networks:
+      - name: molecule-invio
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+      - ${INVIO_TEST_SRC}:/src:ro
+    tmpfs:
+      - /run
+      - /run/lock
+      - /tmp
+  - name: dbserver
+    image: mariadb:11.4
+    pre_build_image: true
+    command: mariadbd
+    groups: [dbservers]
+    networks:
+      - name: molecule-invio
+    env:
+      MARIADB_ROOT_PASSWORD: ci-secret-admin
+provisioner:
+  name: ansible
+  env:
+    ANSIBLE_ROLES_PATH: ${MOLECULE_PROJECT_DIRECTORY}/roles
+  config_options:
+    defaults:
+      interpreter_python: auto_silent
+  inventory:
+    group_vars:
+      all:
+        invio_git_repo: /srv/invio-src
+        invio_git_version: "{{ lookup('env', 'INVIO_TEST_REF') }}"
+        invio_smtp_host: 127.0.0.1
+        invio_smtp_from: ci@example.invalid
+        invio_http_contact: ci@example.invalid
+        invio_llm_api_keys:
+          mistral: ci-secret-mistral
+        invio_db_password: ci-secret-db
+        invio_mariadb_manage_server: false
+        invio_db_host: dbserver
+        invio_db_user_host: "%"
+        invio_db_admin_user: root
+        invio_db_admin_password: ci-secret-admin
+scenario:
+  test_sequence:
+    - dependency
+    - create
+    - prepare
+    - converge
+    - idempotence
+    - verify
+    - destroy

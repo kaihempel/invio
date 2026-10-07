@@ -1,0 +1,27 @@
+---
+# Order matters: validation first, the timers are started last (contracts/ansible-role.md).
+- name: Validate the role variables
+  ansible.builtin.import_tasks: validate.yml
+  tags: [invio, "invio:validate", always]
+
+- name: Provision the database
+  ansible.builtin.import_tasks: mariadb.yml
+  tags: [invio, "invio:mariadb"]
+
+- name: Create the service account
+  ansible.builtin.import_tasks: account.yml
+  tags: [invio, "invio:account"]
+
+- name: Write the configuration
+  ansible.builtin.import_tasks: config.yml
+  tags: [invio, "invio:config"]
+
+- name: Install the code
+  ansible.builtin.import_tasks: install.yml
+  tags: [invio, "invio:install"]
+
+# Also tagged invio:install: an update run with --tags invio:install stops the timers, so the
+# unit tasks must run with it to start them again.
+- name: Install the units and start the timers
+  ansible.builtin.import_tasks: units.yml
+  tags: [invio, "invio:units", "invio:install"]

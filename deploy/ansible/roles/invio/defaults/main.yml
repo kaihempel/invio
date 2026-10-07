@@ -1,0 +1,49 @@
+---
+# Defaults for the invio role. See specs/015-gh-issue-24/contracts/ansible-role.md.
+#
+# Required variables (no default; validate.yml fails with the variable name when missing):
+#   invio_git_repo, invio_git_version (tag or full 40-char commit SHA), invio_db_password,
+#   invio_smtp_host, invio_smtp_from, invio_http_contact,
+#   invio_llm_api_keys (mapping provider -> key; providers: mistral, openai, anthropic, google)
+#
+# Optional variables (left undefined on purpose):
+#   invio_git_key_file         path of a deploy key on the target, for private repositories
+#   invio_smtp_user, invio_smtp_password
+#   invio_healthcheck_url      treated as a secret (the URL is a capability)
+#   invio_db_admin_user, invio_db_admin_password
+#                              required only when invio_mariadb_manage_server is false and
+#                              invio_db_host is not localhost
+
+# The account and group are fixed by the unit files (User=invio) and are not meant to be changed.
+invio_user: invio
+invio_group: invio
+
+# true: install and manage a local MariaDB server. false: use an existing server at invio_db_host
+# (for example one managed by DebOps), administered with invio_db_admin_user/_password.
+invio_mariadb_manage_server: true
+invio_db_host: localhost
+invio_db_port: 3306
+invio_db_name: invio
+invio_db_user: invio
+invio_db_user_host: localhost
+
+# uv release installed into /usr/local/bin. The checksums come from the release's
+# uv-<arch>-unknown-linux-gnu.tar.gz.sha256 files, keyed by ansible_architecture. Keep the
+# version in step with setup-uv in .github/workflows (uv_build is pinned to <0.13 in pyproject).
+invio_uv_version: "0.12.23"
+invio_uv_sha256:
+  x86_64: 9167d72b3319674b6303c4cbe071854bba13ebdf3d76b1a7cbdc175471fb66d6
+  aarch64: 6524bd338177ed50d035d39354e12545e993bbeba2ecbddf0480c5b3a81d313f
+# Full patch version: the interpreter is identical on every host and on re-runs.
+invio_python_version: "3.12.13"
+
+invio_smtp_port: 587
+invio_smtp_security: starttls
+invio_log_level: INFO
+invio_env_extra: {}
+
+invio_run_due_memory_max: 1G
+invio_notify_retry_memory_max: 256M
+
+# Seconds to wait for a running service before an update (3 h TimeoutStartSec + 5 min).
+invio_update_wait_timeout: 11100

@@ -1,0 +1,44 @@
+# Retries failed e-mail notifications once (started every hour by invio-notify-retry.timer).
+# Installed verbatim by the Ansible role and by the manual procedure in docs/deployment.md.
+# Override MemoryMax only through a drop-in (systemctl edit), never by editing this file.
+[Unit]
+Description=invio: retry failed notifications
+Documentation=file:///opt/invio/docs/deployment.md
+Wants=network-online.target
+After=network-online.target mariadb.service
+
+[Service]
+Type=oneshot
+User=invio
+Group=invio
+EnvironmentFile=/etc/invio/invio.env
+WorkingDirectory=/var/lib/invio
+Environment=PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 HOME=/var/lib/invio XDG_CACHE_HOME=/var/lib/invio/cache
+ExecStart=/opt/invio/.venv/bin/invio notify retry
+SyslogIdentifier=invio-notify-retry
+StateDirectory=invio
+StateDirectoryMode=0750
+ReadWritePaths=/var/lib/invio
+UMask=0027
+MemoryMax=256M
+TimeoutStartSec=15min
+
+# Sandbox (issue #24 + research R8)
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=

@@ -17,6 +17,7 @@ from invio.db import migrate
 from invio.db.models import Base, Job
 from invio.db.session import create_db_engine, session_factory, session_scope
 from tests.db_helpers import TEST_DATABASE_URL, uses_sqlite
+from tests.deploy_helpers import is_unwanted_deploy_skip
 
 if TYPE_CHECKING:
     from invio.config.job import ScheduleConfig
@@ -35,6 +36,22 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     for item in items:
         if item.get_closest_marker("live") is not None:
             item.add_marker(skip)
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[None]) -> pytest.TestReport:
+    """Turn skipped deploy tests into failures when ``INVIO_REQUIRE_DEPLOY_TOOLS=1``.
+
+    The deploy tests skip without ``ansible-playbook`` or ``systemd-analyze``. CI sets the
+    variable so a missing tool fails the job instead of hiding the tests.
+    """
+    report: pytest.TestReport = yield
+    if is_unwanted_deploy_skip(
+        report, item.path, os.environ.get("INVIO_REQUIRE_DEPLOY_TOOLS") == "1"
+    ):
+        report.outcome = "failed"
+        report.longrepr = f"skipped although INVIO_REQUIRE_DEPLOY_TOOLS=1: {report.longrepr}"
+    return report
 
 
 @pytest.fixture(scope="session", autouse=True)

@@ -1,0 +1,61 @@
+---
+# Provisioning test for the invio role on Debian 12 and 13 with systemd as PID 1.
+#
+# Molecule tests a commit, not the working tree: the repository is mounted read-only at /src and
+# the role checks out INVIO_TEST_REF (a full commit SHA) from it.
+#   INVIO_TEST_SRC   repository to mount at /src (CI: the workspace; locally a clone,
+#                    because a git worktree's .git file points outside the mount)
+#   INVIO_TEST_REF   full SHA of the commit under test
+dependency:
+  name: galaxy
+  options:
+    requirements-file: ${MOLECULE_PROJECT_DIRECTORY}/molecule/requirements.yml
+driver:
+  name: docker
+platforms:
+  - name: debian12
+    image: debian:12
+    <<: &systemd_container
+      dockerfile: Dockerfile.j2
+      pre_build_image: false
+      privileged: true
+      cgroupns_mode: host
+      command: /lib/systemd/systemd
+      volumes:
+        - /sys/fs/cgroup:/sys/fs/cgroup:rw
+        - ${INVIO_TEST_SRC}:/src:ro
+      tmpfs:
+        - /run
+        - /run/lock
+        - /tmp
+  - name: debian13
+    image: debian:13
+    <<: *systemd_container
+provisioner:
+  name: ansible
+  env:
+    ANSIBLE_ROLES_PATH: ${MOLECULE_PROJECT_DIRECTORY}/roles
+  config_options:
+    defaults:
+      interpreter_python: auto_silent
+  inventory:
+    group_vars:
+      all:
+        invio_git_repo: /srv/invio-src
+        invio_git_version: "{{ lookup('env', 'INVIO_TEST_REF') }}"
+        invio_smtp_host: 127.0.0.1
+        invio_smtp_from: ci@example.invalid
+        invio_http_contact: ci@example.invalid
+        invio_llm_api_keys:
+          mistral: ci-secret-mistral
+        invio_db_password: ci-secret-db
+scenario:
+  test_sequence:
+    - dependency
+    - create
+    - prepare
+    - converge
+    - idempotence
+    - side_effect
+    - verify
+    - destroy
