@@ -13,6 +13,7 @@ User=invio
 Group=invio
 EnvironmentFile=/etc/invio/invio.env
 WorkingDirectory=/var/lib/invio
+Environment=PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 HOME=/var/lib/invio XDG_CACHE_HOME=/var/lib/invio/cache
 ExecStart=/opt/invio/.venv/bin/invio run-due
 SyslogIdentifier=invio-run-due
 StateDirectory=invio

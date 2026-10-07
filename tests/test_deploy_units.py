@@ -220,6 +220,14 @@ SERVICE_BASE: Expected = {
     "ReadWritePaths": "/var/lib/invio",
     "UMask": "0027",
 }
+JOURNAL_ENV = frozenset(
+    {
+        "PYTHONDONTWRITEBYTECODE=1",
+        "PYTHONUNBUFFERED=1",
+        "HOME=/var/lib/invio",
+        "XDG_CACHE_HOME=/var/lib/invio/cache",
+    }
+)
 PER_SERVICE_KEYS = ("ExecStart", "SyslogIdentifier", "MemoryMax", "TimeoutStartSec")
 RUN_DUE = {
     "ExecStart": "/opt/invio/.venv/bin/invio run-due",
@@ -240,8 +248,13 @@ def _assert_service_contract(name: str, per_service: dict[str, str]) -> None:
     assert set(unit) == {"Unit", "Service"}, "services have no [Install] section (FR-004)"
     assert unit["Unit"]["Description"][0] != ""
     assert_directives(unit, "Unit", SERVICE_UNIT)
-    assert_directives(unit, "Service", {**SERVICE_BASE, **per_service})
+    assert_directives(
+        unit, "Service", {**SERVICE_BASE, "Environment": set(JOURNAL_ENV), **per_service}
+    )
     service = unit["Service"]
+    # stdout and stderr go to the journal by default (research R9): no override
+    assert "StandardOutput" not in service
+    assert "StandardError" not in service
     assert "Restart" not in service  # FR-005
     assert "SuccessExitStatus" not in service  # exit codes pass through (FR-005)
     assert not service["EnvironmentFile"][0].startswith("-")

@@ -115,6 +115,30 @@ and the unit shows as failed until the next hourly run replaces it.
 
 ### Logs
 
+Each service logs to the system journal under its own identifier (`invio-run-due`,
+`invio-notify-retry`). invio writes one JSON object per log line to stderr; systemd sends it to
+the journal.
+
+```bash
+journalctl -u invio-run-due -o cat --since today
+journalctl -u invio-run-due -o cat | grep '"run_id": "<id>"'   # one run
+```
+
+Check the journal contract (every line that starts with `{` is JSON with `level` and `message`,
+and no secret appears) with the checker script. Pass the secrets to look for in
+`INVIO_CHECK_SECRETS` (newline-separated, each at least 8 characters; the script also looks for
+URL-encoded and escaped forms). It exits 0 when the output is clean, 1 on a violation (it names
+the line number only, never the content), 2 on missing input and 3 on an internal error:
+
+```bash
+journalctl --sync
+journalctl -u invio-run-due -o cat | deploy/scripts/check-journal-json.py
+```
+
+Result lines that commands print to stdout (for example `nothing to retry`) are plain text by
+design (stdout is the command's result, stderr is for logs). Use `--allow-no-json` for services
+that may print only such a line.
+
 ## Updating
 
 ### With Ansible
