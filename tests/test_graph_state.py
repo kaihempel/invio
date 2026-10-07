@@ -107,6 +107,7 @@ def _deps(**overrides: Any) -> RunDeps:
         "notify": _notify,
         "next_run": _next_run,
         "clock": lambda: datetime(2026, 10, 4, tzinfo=UTC),
+        "retry_delay": lambda streak: timedelta(hours=streak),
     }
     values.update(overrides)
     return RunDeps(**values)

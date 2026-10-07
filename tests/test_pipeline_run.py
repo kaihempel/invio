@@ -12,11 +12,13 @@ from sqlalchemy import Engine, select
 
 from invio.config.job import ScheduleConfig
 from invio.db.models import Digest, Item, Job, LlmUsage, Run
+from invio.db.repositories import JobRepository
 from invio.db.session import session_factory, session_scope
 from invio.domain import ItemStatus, RunStatus
 from invio.log import job_var, run_id_var
 from invio.pipeline.run import run_job
 from tests.conftest import FakeClock
+from tests.db_helpers import uses_sqlite
 from tests.http_helpers import FakeResolver, RecordingTransport
 from tests.pipeline_helpers import (
     Env,
@@ -328,6 +330,7 @@ async def test_s30_a_page_mode_web_item_is_fetched_unconditionally(
             notify=env.deps.notify,
             next_run=env.deps.next_run,
             clock=env.deps.clock,
+            retry_delay=env.deps.retry_delay,
             sleep=env.deps.sleep,
         )
         result = await run_job(env.job_id, deps=deps)
@@ -680,3 +683,96 @@ async def test_s19_a_dry_run_releases_pending_items_it_took_with_attempts_unchan
     (item,) = _rows(db_engine, Item)
     assert (item.status, item.attempts) == (ItemStatus.SUMMARIZED, 2)
     assert real.status == RunStatus.SUCCEEDED
+
+
+# --- run-due: the due-aware claim (#23) ------------------------------------------------------
+
+
+async def test_a_job_that_is_no_longer_due_is_refused_without_a_run_or_lock_change(
+    db_engine: Engine, fake_clock: FakeClock, recording_next_run: NextRun
+) -> None:
+    from invio.pipeline.run import JobNotDueError
+
+    future = fake_clock() + timedelta(days=1)
+    env = build_env(db_engine, fake_clock, recording_next_run, next_run_at=future)
+
+    with pytest.raises(JobNotDueError) as excinfo:
+        await run_job(env.job_id, deps=env.deps, due_by=fake_clock())
+
+    assert (excinfo.value.job_id, excinfo.value.next_run_at) == (env.job_id, future)
+    assert _rows(db_engine, Run) == []
+    job = _job(db_engine, env.job_id)
+    assert (job.locked_until, job.next_run_at) == (None, future)
+
+
+async def test_an_unexpired_lock_is_busy_even_with_due_by(
+    db_engine: Engine, fake_clock: FakeClock, recording_next_run: NextRun
+) -> None:
+    from invio.pipeline.run import JobBusyError
+
+    env = build_env(
+        db_engine, fake_clock, recording_next_run, locked_until=fake_clock() + timedelta(hours=1)
+    )
+
+    with pytest.raises(JobBusyError):
+        await run_job(env.job_id, deps=env.deps, due_by=fake_clock())
+
+    assert _rows(db_engine, Run) == []
+
+
+async def test_a_failed_claim_without_due_by_is_busy_as_before(
+    db_engine: Engine, fake_clock: FakeClock, recording_next_run: NextRun
+) -> None:
+    from invio.pipeline.run import JobBusyError
+
+    env = build_env(
+        db_engine, fake_clock, recording_next_run, locked_until=fake_clock() + timedelta(hours=1)
+    )
+
+    with pytest.raises(JobBusyError):
+        await run_job(env.job_id, deps=env.deps)
+
+
+async def test_a_due_job_runs_with_due_by(
+    db_engine: Engine, fake_clock: FakeClock, recording_next_run: NextRun
+) -> None:
+    env = build_env(db_engine, fake_clock, recording_next_run)
+
+    result = await run_job(env.job_id, deps=env.deps, due_by=fake_clock())
+
+    assert result.status == RunStatus.SUCCEEDED
+
+
+async def test_an_error_between_claim_and_graph_releases_the_lock(
+    db_engine: Engine,
+    fake_clock: FakeClock,
+    recording_next_run: NextRun,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    env = build_env(db_engine, fake_clock, recording_next_run)
+
+    def boom(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("scope")
+
+    monkeypatch.setattr("invio.pipeline.run.new_scope", boom)
+
+    with pytest.raises(RuntimeError, match="scope"):
+        await run_job(env.job_id, deps=env.deps)
+
+    assert _job(db_engine, env.job_id).locked_until is None
+
+
+@pytest.mark.skipif(uses_sqlite(), reason="needs two connections; SQLite tests share one")
+async def test_a_lock_taken_by_another_connection_is_classified_busy(
+    db_engine: Engine, fake_clock: FakeClock, recording_next_run: NextRun
+) -> None:
+    from invio.pipeline.run import JobBusyError
+
+    env = build_env(db_engine, fake_clock, recording_next_run)
+    with session_scope(session_factory(db_engine)) as session:
+        assert JobRepository(session).claim(
+            env.job_id, now=fake_clock(), until=fake_clock() + timedelta(hours=1)
+        )
+
+    with pytest.raises(JobBusyError):
+        await run_job(env.job_id, deps=env.deps, due_by=fake_clock())

@@ -24,6 +24,7 @@ from invio.llm.base import LLMProvider
 from invio.llm.factory import resolve
 from invio.llm.registry import ModelRegistry, default_registry
 from invio.notify.email import deliver_digest
+from invio.scheduling.backoff import retry_delay
 from invio.scheduling.next_run import compute_next_run
 from invio.sources.http import HttpClientConfig, NotModified, SafeHttpClient
 from invio.sources.netguard import Resolver
@@ -108,6 +109,7 @@ async def default_deps(
                 notify=notify,
                 next_run=compute_next_run,
                 clock=utcnow,
+                retry_delay=retry_delay,
                 concurrency=settings.max_parallel_items,
                 lock_ttl=timedelta(seconds=settings.run_lock_seconds),
             )

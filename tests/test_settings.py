@@ -311,3 +311,30 @@ def test_invalid_run_orchestration_settings_are_rejected(
 
     with pytest.raises(ValidationError, match=name.removeprefix("INVIO_").lower()):
         Settings()
+
+
+def test_healthcheck_url_is_a_secret(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("INVIO_HEALTHCHECK_URL", "https://hc-ping.com/uuid-123")
+
+    url = get_settings().healthcheck_url
+
+    assert isinstance(url, SecretStr)
+    assert url.get_secret_value() == "https://hc-ping.com/uuid-123"
+    assert "uuid-123" not in repr(get_settings())
+
+
+def test_healthcheck_url_is_unset_by_default() -> None:
+    assert get_settings().healthcheck_url is None
+
+
+@pytest.mark.parametrize("value", ["ftp://x", "not a url", "https://", "http:///path", "//host"])
+def test_an_invalid_healthcheck_url_fails_validation_without_echoing_it(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    monkeypatch.setenv("INVIO_HEALTHCHECK_URL", value)
+
+    with pytest.raises(ValidationError) as excinfo:
+        get_settings()
+
+    assert "healthcheck_url" in str(excinfo.value)
+    assert "absolute http(s) URL" in str(excinfo.value)
