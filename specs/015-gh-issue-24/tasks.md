@@ -78,18 +78,18 @@ after a reboot the timer is still active (quickstart #1, #2, #10, #19, #20).
 
 ### Tests for User Story 1 ⚠️
 
-- [ ] T012 [P] [US1] Add `test_run_due_service_contract` to `tests/test_deploy_units.py`. It asserts on `deploy/systemd/invio-run-due.service`, exactly as in contracts/systemd-units.md "Services (both)" and the run-due column:
+- [X] T012 [P] [US1] Add `test_run_due_service_contract` to `tests/test_deploy_units.py`. It asserts on `deploy/systemd/invio-run-due.service`, exactly as in contracts/systemd-units.md "Services (both)" and the run-due column:
   - `[Unit]`: `Description` non-empty, `Documentation=file:///opt/invio/docs/deployment.md`, `Wants=network-online.target`, `After={network-online.target, mariadb.service}`;
   - `[Service]`: `Type=oneshot`, `User=invio`, `Group=invio`, `EnvironmentFile=/etc/invio/invio.env` (no leading `-`), `WorkingDirectory=/var/lib/invio`, `ExecStart=/opt/invio/.venv/bin/invio run-due`, `StateDirectory=invio`, `StateDirectoryMode=0750`, `ReadWritePaths=/var/lib/invio`, `MemoryMax=1G`, `TimeoutStartSec=3h`, `UMask=0027`;
   - no `Restart`, no `SuccessExitStatus`, no `[Install]` section (FR-001, FR-004, FR-005, FR-007, FR-008, FR-020).
-- [ ] T013 [P] [US1] Add `test_run_due_timer_contract` to `tests/test_deploy_units.py`: `OnCalendar=*:0/15`, `Persistent=true`, `RandomizedDelaySec=60`, `AccuracySec=1s`, `Unit=invio-run-due.service`, `[Install] WantedBy=timers.target` (FR-002, FR-004, SC-002; research R7)
+- [X] T013 [P] [US1] Add `test_run_due_timer_contract` to `tests/test_deploy_units.py`: `OnCalendar=*:0/15`, `Persistent=true`, `RandomizedDelaySec=60`, `AccuracySec=1s`, `Unit=invio-run-due.service`, `[Install] WantedBy=timers.target` (FR-002, FR-004, SC-002; research R7)
 
 ### Implementation for User Story 1
 
-- [ ] T014 [P] [US1] Create `deploy/systemd/invio-run-due.service` with the `[Unit]` and `[Service]` directives listed in T012 (the hardening directives come in US4, the journal directives in US2). Add a short comment block at the top: purpose, "installed verbatim by the role", and "override `MemoryMax` only via a drop-in"
-- [ ] T015 [P] [US1] Create `deploy/systemd/invio-run-due.timer` with the directives from T013 and a comment: "missed triggers run once after boot (Persistent); AccuracySec=1s keeps starts within 60 s of the quarter hour"
-- [ ] T016 [US1] Run `deploy/scripts/verify-units.sh` locally (Linux or CI) and fix any warning until it exits 0 with no output. Check that T012 and T013 pass
-- [ ] T017 [US1] Fill `docs/deployment.md` "Install manually" with a complete installation without Ansible (FR-019), mirroring the role's steps:
+- [X] T014 [P] [US1] Create `deploy/systemd/invio-run-due.service` with the `[Unit]` and `[Service]` directives listed in T012 (the hardening directives come in US4, the journal directives in US2). Add a short comment block at the top: purpose, "installed verbatim by the role", and "override `MemoryMax` only via a drop-in"
+- [X] T015 [P] [US1] Create `deploy/systemd/invio-run-due.timer` with the directives from T013 and a comment: "missed triggers run once after boot (Persistent); AccuracySec=1s keeps starts within 60 s of the quarter hour"
+- [X] T016 [US1] Run `deploy/scripts/verify-units.sh` locally (Linux or CI) and fix any warning until it exits 0 with no output. Check that T012 and T013 pass
+- [X] T017 [US1] Fill `docs/deployment.md` "Install manually" with a complete installation without Ansible (FR-019), mirroring the role's steps:
   1. `apt install git ca-certificates mariadb-server`;
   2. create the database and user in SQL (`CREATE DATABASE invio CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci; CREATE USER 'invio'@'localhost' IDENTIFIED BY '…'; GRANT ALL ON invio.* TO 'invio'@'localhost';`);
   3. `useradd --system --shell /usr/sbin/nologin --home-dir /var/lib/invio --no-create-home invio`;

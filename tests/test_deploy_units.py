@@ -200,3 +200,75 @@ def test_env_example_lists_every_documented_key_and_not_env_file() -> None:
         "INVIO_ARCHIVE_DIR",
         "INVIO_HEALTHCHECK_URL",
     }
+
+
+# --- unit contracts (contracts/systemd-units.md) -----------------------------------------------
+
+SERVICE_UNIT: Expected = {
+    "Documentation": "file:///opt/invio/docs/deployment.md",
+    "Wants": "network-online.target",
+    "After": {"network-online.target", "mariadb.service"},
+}
+SERVICE_BASE: Expected = {
+    "Type": "oneshot",
+    "User": "invio",
+    "Group": "invio",
+    "EnvironmentFile": "/etc/invio/invio.env",
+    "WorkingDirectory": "/var/lib/invio",
+    "StateDirectory": "invio",
+    "StateDirectoryMode": "0750",
+    "ReadWritePaths": "/var/lib/invio",
+    "UMask": "0027",
+}
+PER_SERVICE_KEYS = ("ExecStart", "SyslogIdentifier", "MemoryMax", "TimeoutStartSec")
+RUN_DUE = {
+    "ExecStart": "/opt/invio/.venv/bin/invio run-due",
+    "SyslogIdentifier": "invio-run-due",
+    "MemoryMax": "1G",
+    "TimeoutStartSec": "3h",
+}
+
+
+def load(name: str) -> Unit:
+    path = SYSTEMD / name
+    assert path.is_file(), f"{path} does not exist"
+    return parse_unit(path)
+
+
+def _assert_service_contract(name: str, per_service: dict[str, str]) -> None:
+    unit = load(name)
+    assert set(unit) == {"Unit", "Service"}, "services have no [Install] section (FR-004)"
+    assert unit["Unit"]["Description"][0] != ""
+    assert_directives(unit, "Unit", SERVICE_UNIT)
+    assert_directives(unit, "Service", {**SERVICE_BASE, **per_service})
+    service = unit["Service"]
+    assert "Restart" not in service  # FR-005
+    assert "SuccessExitStatus" not in service  # exit codes pass through (FR-005)
+    assert not service["EnvironmentFile"][0].startswith("-")
+
+
+def test_run_due_service_contract() -> None:
+    _assert_service_contract("invio-run-due.service", RUN_DUE)
+
+
+def _assert_timer_contract(name: str, timer: dict[str, str], unit_name: str) -> None:
+    unit = load(name)
+    assert set(unit) == {"Unit", "Timer", "Install"}
+    assert unit["Unit"]["Description"][0] != ""
+    assert_directives(unit, "Timer", {**timer, "Unit": unit_name})
+    assert_directives(unit, "Install", {"WantedBy": "timers.target"})
+
+
+def test_run_due_timer_contract() -> None:
+    # RandomizedDelaySec=60 plus AccuracySec=1s keeps a start within about 60 s of the quarter
+    # hour (SC-002); the default AccuracySec of 1 min would add up to a minute on top of it.
+    _assert_timer_contract(
+        "invio-run-due.timer",
+        {
+            "OnCalendar": "*:0/15",
+            "Persistent": "true",
+            "RandomizedDelaySec": "60",
+            "AccuracySec": "1s",
+        },
+        "invio-run-due.service",
+    )

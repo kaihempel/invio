@@ -46,10 +46,23 @@ printf '#!/bin/sh\nexit 0\n' >"$root/opt/invio/.venv/bin/invio"
 chmod 0755 "$root/opt/invio/.venv/bin/invio"
 cp "${units[@]}" "$root/etc/systemd/system/"
 
+# With --root, systemd-analyze only sees units below the root, so the targets the units order
+# against (sysinit.target, network-online.target, ...) must exist there too.
+mkdir -p "$root/usr/lib/systemd/system"
+for dir in /usr/lib/systemd/system /lib/systemd/system; do
+    if [ -d "$dir" ]; then
+        cp "$dir"/*.target "$root/usr/lib/systemd/system/"
+        break
+    fi
+done
+
 targets=("$root"/etc/systemd/system/invio-*)
 status=0
 output="$(systemd-analyze verify --root="$root" "${targets[@]}" 2>&1)" || status=$?
 if [ "$status" -ne 0 ] || [ -n "$output" ]; then
-    [ -n "$output" ] && printf '%s\n' "$output"
-    exit 1
+    if [ -n "$output" ]; then
+        printf '%s\n' "$output"
+    fi
+    # Propagate systemd-analyze's own exit code; any output without a failure is still exit 1.
+    exit "$((status != 0 ? status : 1))"
 fi

@@ -1,0 +1,23 @@
+# Runs all due invio research jobs once (started every 15 minutes by invio-run-due.timer).
+# Installed verbatim by the Ansible role and by the manual procedure in docs/deployment.md.
+# Override MemoryMax only through a drop-in (systemctl edit), never by editing this file.
+[Unit]
+Description=invio: run due research jobs
+Documentation=file:///opt/invio/docs/deployment.md
+Wants=network-online.target
+After=network-online.target mariadb.service
+
+[Service]
+Type=oneshot
+User=invio
+Group=invio
+EnvironmentFile=/etc/invio/invio.env
+WorkingDirectory=/var/lib/invio
+ExecStart=/opt/invio/.venv/bin/invio run-due
+SyslogIdentifier=invio-run-due
+StateDirectory=invio
+StateDirectoryMode=0750
+ReadWritePaths=/var/lib/invio
+UMask=0027
+MemoryMax=1G
+TimeoutStartSec=3h
