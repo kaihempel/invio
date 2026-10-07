@@ -64,7 +64,7 @@ jobs:
         run: uv run --locked --group deploy ansible-lint
 
       - name: Unit contract tests
-        run: uv run --locked pytest tests/test_deploy_units.py tests/test_deploy_journal_check.py
+        run: uv run --locked pytest tests/test_deploy_*.py
 
   mariadb:
     # Optional: runs the persistence tests against a real MariaDB (non-blocking).
