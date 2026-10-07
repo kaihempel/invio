@@ -1,9 +1,11 @@
 ---
 # Included by both prepare playbooks. The role clones from a copy of the mounted repository that
 # lives on the container's own file system: Docker Desktop (macOS) fails object reads of the
-# checkout tool on a read-only bind mount with "Permission denied"; a plain file copy
-# (clone --no-hardlinks) is not affected, and the copy keeps the test independent of file
-# ownership on the mount.
+# checkout tool on a read-only bind mount with "Permission denied"; a pack transfer is not
+# affected, and the copy keeps the role's own clone independent of file ownership on the mount.
+# On a Linux host the mount keeps the runner's UID, so root reading it trips the "dubious
+# ownership" check. The file:// URL forces the pack transport (a local-path clone opens the
+# source repository in-process), and only the upload-pack reading the mount trusts it.
 - name: Install the version control tool to copy the repository under test
   ansible.builtin.apt:
     name: git
@@ -13,5 +15,11 @@
 
 - name: Copy the repository under test from the read-only mount
   ansible.builtin.command:
-    argv: [git, clone, --no-hardlinks, --no-checkout, /src, /srv/invio-src]
+    argv:
+      - git
+      - clone
+      - --upload-pack=git -c safe.directory=/src/.git upload-pack
+      - --no-checkout
+      - file:///src
+      - /srv/invio-src
     creates: /srv/invio-src
