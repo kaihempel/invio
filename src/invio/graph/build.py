@@ -22,7 +22,7 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from datetime import datetime
-from typing import Protocol, cast
+from typing import Literal, Protocol, cast
 
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
@@ -38,7 +38,7 @@ from invio.graph.nodes.extract import video_path
 from invio.graph.nodes.llm_calls import failure_message
 from invio.graph.nodes.relevance import RelevanceOutcome
 from invio.graph.nodes.summarize_item import SummaryOutcome
-from invio.graph.ports import RunDeps
+from invio.graph.ports import ProgressEvent, RunDeps, RunObserver
 from invio.graph.scope import RunScope
 from invio.graph.state import (
     ItemResult,
@@ -255,7 +255,14 @@ def _bind(fn: StageFn, deps: RunDeps, scope: RunScope) -> _RunNode:
 
 
 def new_scope(
-    deps: RunDeps, *, job_id: int, run_id: int, token: datetime, dry_run: bool
+    deps: RunDeps,
+    *,
+    job_id: int,
+    run_id: int,
+    token: datetime,
+    dry_run: bool,
+    max_items: int | None = None,
+    observer: RunObserver | None = None,
 ) -> RunScope:
     """The :class:`RunScope` of a run that ``run_job`` has claimed and started."""
     return RunScope(
@@ -264,6 +271,8 @@ def new_scope(
         token=token,
         dry_run=dry_run,
         semaphore=asyncio.Semaphore(deps.concurrency),
+        max_items=max_items,
+        observer=observer,
     )
 
 
@@ -299,7 +308,45 @@ def build_graph(deps: RunDeps, scope: RunScope) -> RunGraph:
         except Exception as err:
             return _fail_item(item_id, err)
         result = stages.result_of(final)
+        _report_item(result)
         return {"items": [result], "errors": _node_failures(result)}
+
+    def _report_item(result: ItemResult) -> None:
+        """Count the finished item and tell the observer (an item the boundary failed too)."""
+        failed = [
+            o
+            for o in (result.relevance, result.summary)
+            if o is not None and o.status == ItemStatus.FAILED
+        ]
+        relevant = result.relevance is not None and result.relevance.status == ItemStatus.RELEVANT
+        outcome: Literal["relevant", "irrelevant", "failed"] = (
+            "failed" if failed else "relevant" if relevant else "irrelevant"
+        )
+        _count_item(result.item_id, outcome, failed[0].error if failed else None)
+
+    def _count_item(
+        item_id: int, outcome: Literal["relevant", "irrelevant", "failed"], message: str | None
+    ) -> None:
+        progress = scope.progress
+        progress.processed += 1
+        if outcome == "relevant":
+            progress.relevant += 1
+        elif outcome == "failed":
+            progress.failed += 1
+        ref = scope.item_refs.get(item_id)
+        stage = scope.item_stage.get(item_id, "extract_text")
+        stages.emit(
+            scope,
+            lambda: ProgressEvent(
+                kind="item",
+                stage=stage,
+                counts=progress.snapshot(),
+                item_id=item_id,
+                title=ref.title if ref is not None else None,
+                outcome=outcome,
+                message=message,
+            ),
+        )
 
     def _fail_item(item_id: int, err: Exception) -> RunState:
         stage = scope.item_stage.get(item_id, "extract_text")
@@ -323,6 +370,7 @@ def build_graph(deps: RunDeps, scope: RunScope) -> RunGraph:
         )
         relevance, summary = _failed_outcomes(item_id, stage, message, type(err).__name__)
         result = ItemResult(item_id=item_id, relevance=relevance, summary=summary)
+        _count_item(item_id, "failed", message)
         return {"items": [result], "errors": [error_of(stage, err, item_id=item_id)]}
 
     def fan_out(state: RunState) -> list[Send] | str:

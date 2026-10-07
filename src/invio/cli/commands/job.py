@@ -6,24 +6,34 @@ found / already exists / invalid name / aborted / declined, 2 invalid configurat
 ``_is_interactive`` and ``_edit_text`` functions are test seams.
 """
 
+import asyncio
 import contextlib
 import os
 import sys
-from collections.abc import Iterator
+from collections.abc import Coroutine, Iterator
+from contextlib import AbstractAsyncContextManager
 from datetime import datetime
 from pathlib import Path
-from typing import Annotated
-from zoneinfo import ZoneInfo
+from typing import Annotated, Any
 
 import typer
 import yaml
+from pydantic import ValidationError
 from rich.console import Console
 from rich.table import Table
-from sqlalchemy.exc import SQLAlchemyError
 
 from invio.cli import editor
-from invio.cli.errors import fail
+from invio.cli.errors import fail, mapped_errors
+from invio.cli.progress import RunProgressView
 from invio.cli.prompts import Prompter, QuestionaryPrompter, WizardAborted
+from invio.cli.run_output import (
+    format_cost,
+    format_time,
+    format_tokens,
+    stats_rows,
+    stats_table,
+)
+from invio.cli.runtime import settings_error, setup_runtime
 from invio.cli.source_check import HttpSourceChecker, SourceChecker
 from invio.cli.wizard import WARNING_NO_REGISTRY, run_wizard
 from invio.config.job import (
@@ -34,9 +44,14 @@ from invio.config.job import (
     known_timezones,
     loads_yaml,
 )
-from invio.config.settings import MissingSettingError
+from invio.config.settings import get_settings
+from invio.domain import RunStatus
 from invio.llm.base import ModelRegistryError
 from invio.llm.registry import ModelRegistry, default_registry
+from invio.notify import DatabaseConfigError
+from invio.pipeline import RunDeps
+from invio.pipeline.deps import default_deps
+from invio.pipeline.run import JobBusyError, JobDisabledError, RunResult, run_job_by_name
 from invio.services.jobs import (
     JobExistsError,
     JobNameError,
@@ -46,10 +61,19 @@ from invio.services.jobs import (
     StoredJobConfigError,
     check_job_name,
 )
+from invio.textsafe import strip_control
 
 app = typer.Typer(help="Manage research jobs.", no_args_is_help=True)
 
 _DASH = "—"
+
+
+@app.callback()
+def _setup(ctx: typer.Context) -> None:
+    """Manage research jobs."""
+    # The root callback leaves the runtime setup to this group (``SELF_CONFIGURING_GROUPS``):
+    # a configuration error is "could not start" (1) for ``job run``, where 2 means partial.
+    setup_runtime(config_exit=1 if ctx.invoked_subcommand == "run" else 2)
 
 
 # --- test seams ------------------------------------------------------------------------------
@@ -57,6 +81,16 @@ _DASH = "—"
 
 def _make_service() -> JobService:
     return JobService.from_settings()
+
+
+def _run_deps() -> AbstractAsyncContextManager[RunDeps]:
+    """The production run dependencies (HTTP client, providers, notifier); tests replace this."""
+    return default_deps(get_settings())
+
+
+def _execute(coro: Coroutine[Any, Any, RunResult]) -> RunResult:
+    """Run the coroutine to completion on a fresh event loop (the Ctrl-C test replaces this)."""
+    return asyncio.run(coro)
 
 
 def _make_prompter() -> Prompter:
@@ -105,31 +139,19 @@ def _default_timezone() -> str:
 def _errors() -> Iterator[None]:
     """Map the expected exceptions to a message on stderr and an exit code (no traceback)."""
     try:
-        yield
-    except (JobNotFoundError, JobExistsError) as exc:
+        with mapped_errors(config_exit=2):
+            yield
+    except JobExistsError as exc:
         raise fail(f"Error: {exc}", 1) from exc
     except JobNameError as exc:
         raise fail(f"Error: invalid job name '{exc.name}': {exc.rule}", 1) from exc
-    except JobConfigError as exc:  # includes StoredJobConfigError
-        raise fail(str(exc), 2) from exc
-    except MissingSettingError as exc:
-        raise fail(f"Configuration error: {exc}", 2) from exc
     except (WizardAborted, KeyboardInterrupt, EOFError) as exc:
         raise fail("aborted; nothing saved", 1) from exc
-    except SQLAlchemyError as exc:
-        # Deliberately only the type name: the message may embed the database URL or SQL.
-        raise fail(
-            f"Error: database error ({type(exc).__name__}); "
-            "is the schema current? run 'invio db upgrade'",
-            1,
-        ) from exc
 
 
 def _fmt_next_run(next_run_at: datetime | None, tz: str) -> str:
     """Render ``next_run_at`` as ``YYYY-MM-DD HH:MM <TZ abbr>`` in ``tz`` (``—`` if unset)."""
-    if next_run_at is None:
-        return _DASH
-    return next_run_at.astimezone(ZoneInfo(tz)).strftime("%Y-%m-%d %H:%M %Z")
+    return format_time(next_run_at, tz)
 
 
 def _fmt_frequency(schedule: ScheduleConfig) -> str:
@@ -384,3 +406,133 @@ def import_job(
         record = service.import_yaml(file, name, replace=replace)
         verb = "replaced" if existed and replace else "imported"
         typer.echo(f"{verb} job '{record.name}'")
+
+
+# --- run -------------------------------------------------------------------------------------
+
+
+@contextlib.contextmanager
+def _run_errors() -> Iterator[None]:
+    """Everything that can stop ``job run`` from starting: one stderr line, exit 1.
+
+    Only named types are caught (``typer.Exit`` is a ``RuntimeError``). A configuration problem
+    exits 1 here, not 2: "could not start" is a single exit code for scripts.
+    """
+    try:
+        with mapped_errors(config_exit=1):
+            yield
+    except (DatabaseConfigError, ModelRegistryError) as exc:
+        raise fail(f"Configuration error: {exc}", 1) from exc
+    except ValidationError as exc:
+        raise fail(f"Configuration error: {settings_error(exc)}", 1) from exc
+    except KeyboardInterrupt as exc:
+        raise fail("interrupted; run recorded as failed", 1) from exc
+
+
+async def _run_once(
+    name: str, *, dry_run: bool, max_items: int | None, view: RunProgressView
+) -> RunResult:
+    async with _run_deps() as deps:
+        return await run_job_by_name(
+            name, dry_run=dry_run, max_items=max_items, observer=view, deps=deps
+        )
+
+
+def _stdout_console() -> Console:
+    console = Console(markup=False, highlight=False, emoji=False)
+    if not console.is_terminal:
+        console = Console(markup=False, highlight=False, emoji=False, width=_PIPE_WIDTH)
+    return console
+
+
+def _print_result(result: RunResult, *, show_digest: bool) -> None:
+    """Digest (if asked), the stats table and the usage line, separated by blank lines."""
+    if show_digest:
+        digest = result.digest
+        if digest is None or not digest.item_ids:
+            typer.echo("No digest: nothing relevant was found.")
+        else:
+            typer.echo(f"# {strip_control(digest.title)}\n")
+            typer.echo(strip_control(digest.body, multiline=True))
+        typer.echo()
+    notifications = (
+        None if result.dry_run else (result.notifications_sent, result.notifications_failed)
+    )
+    rows = stats_rows(
+        run_id=result.run_id,
+        status=result.status,
+        dry_run=result.dry_run,
+        stats=result.stats,
+        started_at=result.started_at,
+        finished_at=result.finished_at,
+        notifications=notifications,
+    )
+    _stdout_console().print(stats_table(rows))
+    typer.echo()
+    typer.echo(f"Tokens: {format_tokens(result.stats)} · cost {format_cost(result.stats)}")
+
+
+@app.command("run")
+def run(
+    name: Annotated[str, typer.Argument(help="Job name.")],
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", help="Send nothing and keep only the run row; print the digest."),
+    ] = False,
+    max_items: Annotated[
+        int | None,
+        typer.Option(
+            "--max-items", help="Process at most N items (never more than the job limit)."
+        ),
+    ] = None,
+    verbose: Annotated[
+        bool,
+        typer.Option("--verbose", "-v", help="One stderr line per item; print the digest too."),
+    ] = False,
+) -> None:
+    """Run a job once, now.
+
+    Progress goes to stderr; the digest (dry run or --verbose), the statistics and the token
+    and cost line go to stdout.
+
+    Exit codes: 0 succeeded, 1 failed or could not start, 2 partial.
+
+    Usage errors (an unknown option, a non-numeric --max-items) also exit 2.
+    """
+    if max_items is not None and max_items < 1:
+        raise fail("Error: --max-items must be at least 1", 1)
+    with _run_errors():
+        record = _make_service().get_by_name(name)
+        if not record.enabled:
+            raise fail(
+                f"Error: job '{name}' is disabled; enable it with 'invio job enable {name}'", 1
+            )
+        limit = record.config.limits.max_items_per_run
+        if max_items is not None and max_items > limit:
+            typer.echo(
+                f"note: --max-items {max_items} exceeds the job limit {limit}; using {limit}",
+                err=True,
+            )
+        view = RunProgressView(
+            Console(stderr=True, markup=False, highlight=False, emoji=False), verbose=verbose
+        )
+        try:
+            with view:  # stopped before anything else is printed, also on Ctrl-C
+                result = _execute(_run_once(name, dry_run=dry_run, max_items=max_items, view=view))
+        except JobDisabledError as exc:
+            raise fail(
+                f"Error: job '{name}' is disabled; enable it with 'invio job enable {name}'", 1
+            ) from exc
+        except JobBusyError as exc:
+            when = format_time(exc.locked_until, record.config.schedule.timezone)
+            raise fail(f"Error: job '{name}' is running (locked until {when})", 1) from exc
+    _print_result(result, show_digest=result.dry_run or verbose)
+    if result.status is RunStatus.FAILED:
+        reason = result.error or (result.errors[0].error_class if result.errors else "run failed")
+        raise fail(f"run {result.run_id} failed: {strip_control(reason)}", 1)
+    if result.status is RunStatus.PARTIAL:
+        raise fail(
+            f"run {result.run_id} finished partial: {len(result.errors)} error(s); "
+            f"see 'invio run show {result.run_id}'",
+            2,
+        )

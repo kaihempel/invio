@@ -29,7 +29,7 @@ def test_graph_has_the_new_modules() -> None:
 
 
 def test_only_the_cli_may_import_the_pipeline_package() -> None:
-    # Vacuous for invio.cli until #22: this checks that no lower layer reaches up to it.
+    # The CLI is the one entry point above the pipeline; no lower layer may reach up to it.
     lower = ("db", "llm", "sources", "notify", "scheduling", "services", "graph")
     for package in lower:
         for path in _modules(package):
@@ -49,3 +49,21 @@ def test_retry_is_a_leaf_module() -> None:
 
 def test_source_root_is_the_parent_of_the_package() -> None:
     assert ROOT.parent == SRC
+
+
+def test_new_graph_modules_import_nothing_from_the_upper_layers() -> None:
+    banned = ("invio.cli", "invio.pipeline", "invio.notify", "invio.scheduling")
+    for module in ("errors.py", "ports.py"):
+        for name in _imports_of(ROOT / "graph" / module):
+            assert not _is_within(name, banned), f"graph/{module} imports {name}"
+
+
+def test_the_cli_reaches_the_run_through_the_pipeline_and_services_only() -> None:
+    for module in ("run_output.py", "progress.py", "commands/run.py", "commands/job.py"):
+        for name in _imports_of(ROOT / "cli" / module):
+            assert not _is_within(name, ("invio.db", "invio.graph")), f"cli/{module} imports {name}"
+
+
+def test_textsafe_is_a_leaf_module() -> None:
+    for name in _imports_of(ROOT / "textsafe.py"):
+        assert name.split(".")[0] != "invio", f"textsafe.py imports {name}"

@@ -1,7 +1,6 @@
 """Entry point of the ``invio`` CLI with automatic sub-command discovery."""
 
 import importlib
-import logging
 import pkgutil
 from types import ModuleType
 from typing import Annotated
@@ -10,10 +9,12 @@ import typer
 
 from invio import __version__
 from invio.cli import commands
-from invio.config.settings import unknown_env_keys
-from invio.log import configure_logging
+from invio.cli.runtime import setup_runtime
 
-logger = logging.getLogger(__name__)
+# Groups that run ``setup_runtime`` in their own callback, where the sub-command is known:
+# ``invio job run`` exits 1 on a configuration error, because its exit code 2 means
+# ``partial`` (specs/015-gh-issue-22, FR-014). Every other command exits 2.
+SELF_CONFIGURING_GROUPS = frozenset({"job"})
 
 
 def discover_commands(app: typer.Typer, package: ModuleType) -> list[str]:
@@ -38,22 +39,6 @@ def discover_commands(app: typer.Typer, package: ModuleType) -> list[str]:
     return registered
 
 
-def _setup_runtime() -> None:
-    """Configure JSON logging and warn about ignored ``INVIO_*`` keys.
-
-    Configuration errors (bad ``INVIO_LOG_LEVEL``, missing ``INVIO_ENV_FILE``) end the CLI
-    with exit code 2 and a one-line message instead of a traceback.
-    """
-    try:
-        configure_logging()
-        unknown = unknown_env_keys()
-    except (ValueError, OSError) as exc:
-        typer.echo(f"Configuration error: {exc}", err=True)
-        raise typer.Exit(code=2) from exc
-    for key in unknown:
-        logger.warning("unknown setting ignored", extra={"key": key})
-
-
 def _version_callback(value: bool) -> None:
     if value:
         typer.echo(f"invio {__version__}")
@@ -71,6 +56,7 @@ def create_app(package: ModuleType = commands) -> typer.Typer:
 
     @root.callback()
     def main(
+        ctx: typer.Context,
         version: Annotated[
             bool,
             typer.Option(
@@ -83,7 +69,8 @@ def create_app(package: ModuleType = commands) -> typer.Typer:
         ] = False,
     ) -> None:
         """Invio: AI research system."""
-        _setup_runtime()
+        if ctx.invoked_subcommand not in SELF_CONFIGURING_GROUPS:
+            setup_runtime()
 
     discover_commands(root, package)
     return root

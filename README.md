@@ -488,6 +488,10 @@ exceeded; `partial` when the budget stopped the run or any item failed; otherwis
 (also with no items). `runs.stats` holds the stage counts, tokens, estimated cost and budget
 figures, see
 [`specs/013-gh-issue-19/contracts/run-stats.md`](specs/013-gh-issue-19/contracts/run-stats.md).
+Version 1 gained additive keys with #22 (readers ignore unknown keys and tolerate missing
+ones): `llm_calls_unpriced` (calls without a price), `processed` (items that reached an outcome),
+`errors` (the per-run error list, at most 100 entries, written by `finalize`) and
+`errors_omitted` (only when entries were left out).
 
 `limits.max_llm_tokens_per_run` caps the tokens (input plus output) of the per-item LLM calls.
 Before each relevance or summary call the tracker is checked; once `used` is above the limit no
@@ -514,11 +518,12 @@ always runs and is counted. Limits and known behaviour:
 
 `invio.pipeline.run.run_job(job_id, dry_run=False)` runs one job end to end. It returns a
 `RunResult` (`job_id`, `run_id`, final `status`, `dry_run`, `digest`, `stats`, `errors`,
-`notifications_sent`, `notifications_failed`) for every run that started, whatever its status.
+`notifications_sent`, `notifications_failed`, `error`, `started_at`, `finished_at`) for every
+run that started, whatever its status. `run_job_by_name(name, ...)` resolves a job name first
+(`JobNotFoundError` for an unknown name). Both take `max_items` and an `observer`, see below.
 It raises, before any run row is created or lock is changed, `JobNotFoundError` (unknown id),
 `JobDisabledError` and `JobBusyError` (another run holds an unexpired lock; `locked_until` says
-until when), and `ValueError` for `concurrency < 1`. The CLI command follows in #22 and
-`invio run-due` in #23.
+until when), and `ValueError` for `concurrency < 1` or `max_items < 1`. `invio run-due` follows in #23.
 
 ```python
 import asyncio
@@ -559,6 +564,42 @@ stays as it is, and no item, digest or `llm_usage` row is kept: the work is roll
 only the run row remains, with `stats["dry_run"] = true` and the token figures of the calls
 that were made.
 
+#### `invio job run`
+
+```
+invio job run <name> [--dry-run] [--max-items N] [--verbose|-v]
+```
+
+Runs the job once, now. Progress (one line per stage, or a live panel on a terminal) and notes go
+to **stderr**; the digest (`# <title>` plus the Markdown body, verbatim except that control characters and ANSI escapes are stripped; dry runs and `--verbose`
+only), the statistics table and the `Tokens: in .. · out .. · total .. · cost ..` line go to
+**stdout**, so `invio job run demo --dry-run > digest.md` gives a clean document. Without
+`--dry-run` the run is real: it saves its results, mails the digest and reports the
+`Notifications sent` / `Notifications failed` counts.
+
+- Exit codes: `0` succeeded, `1` failed or could not start (unknown, disabled or busy job,
+  invalid stored config, missing or invalid settings, database error, `--max-items < 1`, Ctrl-C), `2`
+  partial (also Click usage errors). Unlike `invio job show`, an invalid job config exits 1 here.
+  Every refusal is a single stderr line and creates no run row.
+- `--max-items N` caps the items processed in this run at `min(N, limits.max_items_per_run)`;
+  it can only lower the cap, a note is printed when `N` is above the job limit, and the stored
+  config is never changed. In baseline mode (a job's first run) it still caps the items overall.
+- `--verbose` prints one stderr line per item (`item: relevant|irrelevant|failed  <title>`, plus
+  the sanitized message for a failure) and prints the digest of real runs too.
+- Cost: `$0.0103` when every call has a price, `≥ $0.0050 (2 calls without price)` when some
+  have none, `unknown` when none has, `$0.00` without LLM calls.
+- Titles and URLs come from the network: control characters and ANSI escapes are stripped, URLs
+  are shown without query string and fragment.
+
+#### Run history
+
+`invio run list [--job NAME] [--limit N]` lists runs newest first (id, job, start, duration,
+status, found/new/relevant; dry runs are marked `(dry)`). `invio run show <id>` prints one run:
+the statistics, the token usage and **every stored error** with its stage, sanitized message and
+the item's title and URL (or the source position for a source error). The list is written by
+`finalize` into `runs.stats["errors"]`, so it survives later retries and dry runs. A run from
+before this feature has no such list: `show` says "item errors are not available for this run".
+
 Known limitations: the lock has no heartbeat, so a run longer than `INVIO_RUN_LOCK_SECONDS` can
 be overtaken by another one; source types without an adapter yet (`sitemap`, `youtube_*`) are
 skipped with a `source.unsupported` log line; video items use the text of their page until #29.
@@ -594,14 +635,16 @@ marked, so recovering a stale `pending` row can send a duplicate mail.
 
 ```
 src/invio/
-  cli/          Typer app (main.py) and auto-discovered commands/ (db.py, job.py, notify.py);
-                wizard.py, prompts.py (prompt seam), source_check.py, editor.py
+  cli/          Typer app (main.py) and auto-discovered commands/ (db.py, job.py, notify.py,
+                run.py); wizard.py, prompts.py (prompt seam), source_check.py, editor.py,
+                progress.py (live/plain run progress), run_output.py (pure formatters)
   config/       settings, job.py (job file models + YAML load/save)
   domain.py     shared records, status enums, url_hash (stdlib only)
   db/           models, engine/session helpers, repositories.py, migrations/ (Alembic)
-  services/     jobs.py (JobService: job CRUD, YAML import/export)
+  services/     jobs.py (JobService: job CRUD, YAML import/export), runs.py (run history)
   graph/        LangGraph research graph: state, ports, stages, build; nodes/ (LLM stages)
   pipeline/     run orchestration (run_job) and the production wiring of the graph's ports
+  textsafe.py   strips control characters / ANSI from untrusted text (leaf)
   retry.py      call-level retry with exponential backoff (dependency-free leaf)
   sources/      source adapters (rss.py, web.py; browser.py is the only Playwright user, loaded
                 lazily); http.py (SafeHttpClient) with netguard, robots, ratelimit;

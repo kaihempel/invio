@@ -139,3 +139,24 @@ def test_configuration_errors_exit_with_code_2_and_a_clear_message(
     assert "Configuration error:" in result.stderr
     assert expected in result.stderr
     assert "Traceback" not in result.stderr
+
+
+def test_every_self_configuring_group_runs_the_runtime_setup_itself() -> None:
+    """The root callback skips ``setup_runtime`` for these groups: their callback must run it."""
+    import inspect
+
+    import typer
+
+    from invio.cli.main import SELF_CONFIGURING_GROUPS, app
+
+    groups = {
+        info.name: info.typer_instance
+        for info in app.registered_groups
+        if info.name in SELF_CONFIGURING_GROUPS
+    }
+    assert set(groups) == set(SELF_CONFIGURING_GROUPS)
+    for name, group in groups.items():
+        assert isinstance(group, typer.Typer)
+        callback = group.registered_callback
+        assert callback is not None and callback.callback is not None, name
+        assert "setup_runtime(" in inspect.getsource(callback.callback), name

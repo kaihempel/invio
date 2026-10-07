@@ -13,6 +13,7 @@ text.
 import asyncio
 import dataclasses
 import logging
+from collections.abc import Callable
 from datetime import datetime
 from typing import Final
 
@@ -32,6 +33,7 @@ from invio.db.repositories import (
 from invio.db.session import session_scope
 from invio.domain import Candidate, ItemStatus, NotificationStatus, RunStatus
 from invio.graph.budget import BudgetTracker
+from invio.graph.errors import stored_errors
 from invio.graph.nodes.deduplicate import deduplicate as run_deduplicate
 from invio.graph.nodes.extract import extract_item
 from invio.graph.nodes.keyword_filter import keyword_filter
@@ -51,17 +53,29 @@ from invio.graph.nodes.synthesize import (
     entries_from_items,
 )
 from invio.graph.nodes.synthesize import synthesize_digest as run_synthesis
-from invio.graph.ports import DeliveryReport, RunDeps
-from invio.graph.scope import RunScope
-from invio.graph.state import ItemResult, ItemState, ItemUpdate, RunError, RunState, error_of
+from invio.graph.ports import DeliveryReport, ProgressEvent, RunDeps
+from invio.graph.scope import ItemRef, RunScope
+from invio.graph.state import (
+    ItemResult,
+    ItemState,
+    ItemUpdate,
+    RunError,
+    RunStage,
+    RunState,
+    error_of,
+)
 from invio.llm.retry import RetryingProvider
 from invio.retry import retrying
 from invio.sources.errors import FetchError, is_transient_fetch
+from invio.sources.urls import without_query
+from invio.textsafe import strip_control
 
 __all__ = [
     "LockExpiredError",
     "close_work_session",
     "deduplicate",
+    "emit",
+    "emit_stage",
     "ensure_lock_held",
     "extract_text",
     "fetch_sources",
@@ -75,6 +89,7 @@ __all__ = [
     "release_lock",
     "rollback_work_session",
     "score_relevance",
+    "stage_event",
     "summarize",
     "synthesize_digest",
 ]
@@ -129,6 +144,38 @@ def ensure_lock_held(deps: RunDeps, scope: RunScope) -> None:
         raise LockExpiredError(f"the lock of job {scope.job_id} expired at {scope.token}")
 
 
+def stage_event(scope: RunScope, stage: RunStage) -> ProgressEvent:
+    """A ``stage`` event carrying a frozen copy of the run's counts so far."""
+    return ProgressEvent(kind="stage", stage=stage, counts=scope.progress.snapshot())
+
+
+def emit(scope: RunScope, event: ProgressEvent | Callable[[], ProgressEvent]) -> None:
+    """Report progress to the run's observer; never raises and never fails the run.
+
+    ``event`` may be a callable that builds the event, so building (the counts snapshot) is
+    inside the guard too. The first failure is logged (class only) and drops the observer: a
+    broken display is not called again.
+    """
+    observer = scope.observer
+    if observer is None:
+        return
+    try:
+        observer(event() if callable(event) else event)
+    except Exception as err:  # not BaseException: Ctrl-C and cancellation must pass
+        logger.warning("run.observer_failed", extra={"error": type(err).__name__})
+        scope.observer = None
+
+
+def emit_stage(scope: RunScope, stage: RunStage) -> None:
+    """Report that ``stage`` completed."""
+    emit(scope, lambda: stage_event(scope, stage))
+
+
+def item_ref(title: str, url: str) -> ItemRef:
+    """The terminal-safe reference of an item: no control characters, no query or fragment."""
+    return ItemRef(title=strip_control(title, limit=300), url=strip_control(without_query(url)))
+
+
 def source_key(index: int, source: SourceConfig) -> str:
     """The key of a configured source in ``candidates`` and ``RunError.source``."""
     return f"{index}:{source.type}"
@@ -155,6 +202,13 @@ async def load_job(state: RunState, deps: RunDeps, scope: RunScope) -> RunState:
     retrying_provider = RetryingProvider(binding.provider, policy=deps.retry, sleep=deps.sleep)
     scope.binding = dataclasses.replace(binding, provider=retrying_provider)
     scope.budget = BudgetTracker(config.limits.max_llm_tokens_per_run)
+    if scope.max_items is not None:
+        # In memory only: the stored job config is never written. The cap can only go down.
+        limits = config.limits
+        capped = min(scope.max_items, limits.max_items_per_run)
+        scope.config = config.model_copy(
+            update={"limits": limits.model_copy(update={"max_items_per_run": capped})}
+        )
     return {}
 
 
@@ -250,7 +304,10 @@ async def deduplicate(state: RunState, deps: RunDeps, scope: RunScope) -> RunSta
     if not scope.dry_run:
         session.commit()
     scope.item_types.update({item.id: item.type for item in result.items})
+    scope.item_refs.update({item.id: item_ref(item.title, item.url) for item in result.items})
     counts = StageCounts(found=result.stats.found, new=result.stats.new, after_keyword_filter=0)
+    scope.progress.found, scope.progress.new = counts.found, counts.new
+    emit_stage(scope, "deduplicate")
     return {"taken": [item.id for item in result.items], "counts": counts}
 
 
@@ -264,6 +321,8 @@ async def keyword_prefilter(state: RunState, deps: RunDeps, scope: RunScope) -> 
         if keyword_filter(item, config.search.keywords, items).matched:
             selected.append(item_id)
     counts = state.get("counts") or StageCounts(found=0, new=0, after_keyword_filter=0)
+    scope.progress.after_keyword_filter = scope.progress.selected = len(selected)
+    emit_stage(scope, "keyword_prefilter")
     return {
         "selected": selected,
         "counts": dataclasses.replace(counts, after_keyword_filter=len(selected)),
@@ -388,6 +447,7 @@ async def synthesize_digest(state: RunState, deps: RunDeps, scope: RunScope) -> 
     )
     result = await run_synthesis(entries, context)
     scope.synthesis = result
+    emit_stage(scope, "synthesize_digest")
     if not entries:
         return {"digest": None}
     # The graph cannot import notify.render, so the digest title is the job's name.
@@ -457,6 +517,7 @@ async def persist(state: RunState, deps: RunDeps, scope: RunScope) -> RunState:
     status = save(deps.session_factory, session, draft, on_failure=failures.append)
     close_work_session(scope)  # committed or rolled back: free the connection for what follows
     update: RunState = {"status": status, "digest_id": _digest_id(deps, scope)}
+    emit_stage(scope, "persist")
     if failures:
         update["errors"] = [error_of("persist", failures[0])]
     return update
@@ -467,6 +528,7 @@ async def notify(state: RunState, deps: RunDeps, scope: RunScope) -> RunState:
     digest_id = state.get("digest_id")
     status = state.get("status")
     if digest_id is None or status is None or status is RunStatus.FAILED or scope.dry_run:
+        emit_stage(scope, "notify")
         return {}  # nothing stored, a failed run, or a dry run: nothing is sent
     try:
         report = await deps.notify(digest_id)
@@ -476,6 +538,7 @@ async def notify(state: RunState, deps: RunDeps, scope: RunScope) -> RunState:
         scope.delivery = _delivery_from_rows(deps, scope)
         raise
     scope.delivery = report
+    emit_stage(scope, "notify")
     if status is RunStatus.SUCCEEDED and (report.failed > 0 or report.error is not None):
         _update_run_status(deps, scope, RunStatus.PARTIAL)
         return {"status": RunStatus.PARTIAL}
@@ -591,6 +654,23 @@ def record_failure(
     return status
 
 
+def _record_errors(state: RunState, deps: RunDeps, scope: RunScope) -> None:
+    """Store the run's error list in its stats; a failure is logged and never changes the run."""
+    try:
+        entries, omitted = stored_errors(
+            state.get("errors", []), state.get("items", []), scope.item_refs, scope.failure
+        )
+        with session_scope(deps.session_factory) as session:
+            RunRepository(session).record_errors(
+                scope.run_id, [entry.to_json() for entry in entries], omitted=omitted
+            )
+    except Exception as err:
+        logger.warning(
+            "run.errors_not_recorded",
+            extra={"error": type(err).__name__, "db_run_id": scope.run_id},
+        )
+
+
 async def finalize(state: RunState, deps: RunDeps, scope: RunScope) -> RunState:
     """Close the run, set ``next_run_at`` and release the job lock; the only way to ``END``.
 
@@ -605,6 +685,7 @@ async def finalize(state: RunState, deps: RunDeps, scope: RunScope) -> RunState:
         status = record_failure(deps, scope, error, lower_succeeded=fatal.stage == "notify")
     if status is None:
         raise RuntimeError("finalize reached before persist set a status")
+    _record_errors(state, deps, scope)
     next_run_at = release_lock(deps, scope)
     logger.info(
         "run.finalized",
@@ -617,4 +698,5 @@ async def finalize(state: RunState, deps: RunDeps, scope: RunScope) -> RunState:
     )
     close_work_session(scope)
     scope.finalized = True
+    emit_stage(scope, "finalize")
     return {"status": status}

@@ -25,7 +25,7 @@ from invio.db.session import session_scope
 from invio.domain import RunStatus
 from invio.graph.build import build_graph, new_scope
 from invio.graph.nodes.persist import DigestDraft
-from invio.graph.ports import RunDeps
+from invio.graph.ports import RunDeps, RunObserver
 from invio.graph.scope import RunScope
 from invio.graph.stages import record_failure, release_lock, rollback_work_session
 from invio.graph.state import STAGE_ORDER, RunError, RunState
@@ -33,7 +33,7 @@ from invio.log import run_context
 from invio.pipeline.deps import default_deps
 from invio.services.jobs import JobNotFoundError
 
-__all__ = ["JobBusyError", "JobDisabledError", "RunResult", "run_job"]
+__all__ = ["JobBusyError", "JobDisabledError", "RunResult", "run_job", "run_job_by_name"]
 
 logger = logging.getLogger("invio.pipeline")
 
@@ -73,6 +73,9 @@ class RunResult:
     errors: tuple[RunError, ...]
     notifications_sent: int
     notifications_failed: int
+    error: str | None  # runs.error: the sanitized reason of a failed run
+    started_at: datetime
+    finished_at: datetime | None
 
 
 def _sorted_errors(errors: list[RunError]) -> tuple[RunError, ...]:
@@ -90,24 +93,85 @@ async def run_job(
     dry_run: bool = False,
     deps: RunDeps | None = None,
     concurrency: int | None = None,
+    max_items: int | None = None,
+    observer: RunObserver | None = None,
 ) -> RunResult:
     """Run job ``job_id`` once and return the result.
 
     ``deps`` defaults to the production wiring (:func:`~invio.pipeline.deps.default_deps`);
     ``concurrency`` overrides ``deps.concurrency``. A dry run produces the digest in the result
     only: nothing is sent, ``next_run_at`` stays as it is, and only the run row remains.
+
+    ``max_items`` (>= 1) lowers this run's item cap to ``min(max_items, limits.max_items_per_run)``
+    in memory; the stored config is never written. ``observer`` receives progress events; its
+    failures never fail the run.
     """
     if concurrency is not None and concurrency < 1:
         raise ValueError(f"concurrency must be >= 1, got {concurrency}")
+    if max_items is not None and max_items < 1:
+        raise ValueError(f"max_items must be >= 1, got {max_items}")
     if deps is None:
         async with default_deps(get_settings()) as built:
-            return await run_job(job_id, dry_run=dry_run, deps=built, concurrency=concurrency)
+            return await run_job(
+                job_id,
+                dry_run=dry_run,
+                deps=built,
+                concurrency=concurrency,
+                max_items=max_items,
+                observer=observer,
+            )
     if concurrency is not None:
         deps = dataclasses.replace(deps, concurrency=concurrency)
-    return await _run(job_id, dry_run=dry_run, deps=deps)
+    return await _run(job_id, dry_run=dry_run, deps=deps, max_items=max_items, observer=observer)
 
 
-async def _run(job_id: int, *, dry_run: bool, deps: RunDeps) -> RunResult:
+async def run_job_by_name(
+    name: str,
+    *,
+    dry_run: bool = False,
+    deps: RunDeps | None = None,
+    concurrency: int | None = None,
+    max_items: int | None = None,
+    observer: RunObserver | None = None,
+) -> RunResult:
+    """Resolve ``name`` to the job id, then :func:`run_job`.
+
+    An unknown name raises :class:`~invio.services.jobs.JobNotFoundError` before any run row is
+    created or any lock changed. The CLI uses this because it must not import ``invio.db``.
+    """
+    if deps is None:
+        async with default_deps(get_settings()) as built:
+            return await run_job_by_name(
+                name,
+                dry_run=dry_run,
+                deps=built,
+                concurrency=concurrency,
+                max_items=max_items,
+                observer=observer,
+            )
+    with session_scope(deps.session_factory) as session:
+        job = JobRepository(session).get_by_name(name)
+        if job is None:
+            raise JobNotFoundError(name)
+        job_id = job.id
+    return await run_job(
+        job_id,
+        dry_run=dry_run,
+        deps=deps,
+        concurrency=concurrency,
+        max_items=max_items,
+        observer=observer,
+    )
+
+
+async def _run(
+    job_id: int,
+    *,
+    dry_run: bool,
+    deps: RunDeps,
+    max_items: int | None,
+    observer: RunObserver | None,
+) -> RunResult:
     now = deps.clock()
     token = now + deps.lock_ttl
     with session_scope(deps.session_factory) as session:
@@ -127,7 +191,15 @@ async def _run(job_id: int, *, dry_run: bool, deps: RunDeps) -> RunResult:
     except BaseException:
         _release_quietly(deps, job_id, token)
         raise
-    scope = new_scope(deps, job_id=job_id, run_id=run_id, token=token, dry_run=dry_run)
+    scope = new_scope(
+        deps,
+        job_id=job_id,
+        run_id=run_id,
+        token=token,
+        dry_run=dry_run,
+        max_items=max_items,
+        observer=observer,
+    )
     scope.job_name = name
     with run_context(job=name, run_id=str(run_id)):
         logger.info("run.started", extra={"dry_run": dry_run, "job_id": job_id})
@@ -146,6 +218,7 @@ async def _run(job_id: int, *, dry_run: bool, deps: RunDeps) -> RunResult:
         if run is None:
             raise RuntimeError(f"run {run_id} vanished before its result was read")
         status, stats = RunStatus(run.status), dict(run.stats or {})
+        error, started_at, finished_at = run.error, run.started_at, run.finished_at
     delivery = scope.delivery
     return RunResult(
         job_id=job_id,
@@ -157,6 +230,9 @@ async def _run(job_id: int, *, dry_run: bool, deps: RunDeps) -> RunResult:
         errors=_sorted_errors(final.get("errors", [])),
         notifications_sent=delivery.sent if delivery is not None else 0,
         notifications_failed=delivery.failed if delivery is not None else 0,
+        error=error,
+        started_at=started_at,
+        finished_at=finished_at,
     )
 
 
