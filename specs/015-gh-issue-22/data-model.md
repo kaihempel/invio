@@ -11,11 +11,11 @@ which stays at version 1. The other additions are in-memory types.
 |---|---|---|---|---|
 | `llm_calls_unpriced` | int | every layout that has `llm_calls` | `_ledger_stats` | ledger entries with `cost_usd is None` |
 | `processed` | int | normal and dry-run layouts | `build_stats` | items that reached a relevance or summary outcome (rated, summarized or failed) |
-| `errors` | list[StoredError] | every run that reached `finalize` | `finalize` → `RunRepository.record_errors` | the run's errors in stage order, then by item id (R1, R2) |
+| `errors` | list[StoredError] | every finished run | `finalize` or the safety net → `RunRepository.record_errors` | the run's errors in stage order, then by item id (R1, R2) |
 | `errors_omitted` | int | only when > 0 | same | errors beyond `MAX_STORED_ERRORS` (100) that were not stored |
 
-**Legacy runs**: runs recorded before this feature, or runs closed by `run_job`'s safety net,
-have no `errors` key. Readers must treat a missing `errors` key as "unavailable", not as "no
+**Legacy runs**: runs recorded before this feature (or whose error-list write failed) have no
+`errors` key. Runs closed by `run_job`'s safety net store the fatal error only. Readers must treat a missing `errors` key as "unavailable", not as "no
 errors".
 
 ### StoredError (JSON object)

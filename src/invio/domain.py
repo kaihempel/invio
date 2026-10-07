@@ -4,8 +4,8 @@ Dependency-free on purpose: standard library imports only, so any module (source
 notify) can import these without pulling in pydantic, YAML, database or network packages.
 
 Besides the item records it defines the shared status vocabularies (``ItemStatus``,
-``RunStatus``, ``NotificationStatus``), ``COST_PRECISION`` and ``url_hash``, the identity of an
-item within a job.
+``RunStatus``, ``NotificationStatus``), ``COST_PRECISION``, ``STATS_VERSION`` and ``url_hash``,
+the identity of an item within a job.
 """
 
 import hashlib
@@ -18,6 +18,7 @@ from typing import Literal
 ItemType = Literal["article", "video"]
 
 COST_PRECISION = Decimal("0.000001")  # USD cost precision, matches llm_usage.cost_usd (12, 6)
+STATS_VERSION = 1  # layout of runs.stats, see contracts/run-stats.md
 
 
 class ItemStatus(StrEnum):

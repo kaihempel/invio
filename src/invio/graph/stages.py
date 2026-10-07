@@ -13,7 +13,7 @@ text.
 import asyncio
 import dataclasses
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import datetime
 from typing import Final
 
@@ -33,7 +33,7 @@ from invio.db.repositories import (
 from invio.db.session import session_scope
 from invio.domain import Candidate, ItemStatus, NotificationStatus, RunStatus
 from invio.graph.budget import BudgetTracker
-from invio.graph.errors import stored_errors
+from invio.graph.errors import MAX_TITLE_CHARS, stored_errors
 from invio.graph.nodes.deduplicate import deduplicate as run_deduplicate
 from invio.graph.nodes.extract import extract_item
 from invio.graph.nodes.keyword_filter import keyword_filter
@@ -67,7 +67,7 @@ from invio.graph.state import (
 from invio.llm.retry import RetryingProvider
 from invio.retry import retrying
 from invio.sources.errors import FetchError, is_transient_fetch
-from invio.sources.urls import without_query
+from invio.sources.urls import redact_url, without_query
 from invio.textsafe import strip_control
 
 __all__ = [
@@ -85,6 +85,7 @@ __all__ = [
     "load_job",
     "notify",
     "persist",
+    "record_errors",
     "record_failure",
     "release_lock",
     "rollback_work_session",
@@ -172,8 +173,12 @@ def emit_stage(scope: RunScope, stage: RunStage) -> None:
 
 
 def item_ref(title: str, url: str) -> ItemRef:
-    """The terminal-safe reference of an item: no control characters, no query or fragment."""
-    return ItemRef(title=strip_control(title, limit=300), url=strip_control(without_query(url)))
+    """The terminal-safe reference of an item: no control characters, credentials, query or
+    fragment."""
+    return ItemRef(
+        title=strip_control(title, limit=MAX_TITLE_CHARS),
+        url=strip_control(redact_url(without_query(url))),
+    )
 
 
 def source_key(index: int, source: SourceConfig) -> str:
@@ -654,14 +659,21 @@ def record_failure(
     return status
 
 
-def _record_errors(state: RunState, deps: RunDeps, scope: RunScope) -> None:
-    """Store the run's error list in its stats; a failure is logged and never changes the run."""
+def record_errors(
+    deps: RunDeps,
+    scope: RunScope,
+    errors: Sequence[RunError],
+    items: Sequence[ItemResult],
+    failure: BaseException | None,
+) -> None:
+    """Store the run's error list in its stats; a failure is logged and never changes the run.
+
+    Used by ``finalize`` and by the safety net of ``run_job``, which only knows the fatal error.
+    """
     try:
-        entries, omitted = stored_errors(
-            state.get("errors", []), state.get("items", []), scope.item_refs, scope.failure
-        )
+        entries, omitted = stored_errors(errors, items, scope.item_refs, failure)
         with session_scope(deps.session_factory) as session:
-            RunRepository(session).record_errors(
+            scope.errors_recorded = RunRepository(session).record_errors(
                 scope.run_id, [entry.to_json() for entry in entries], omitted=omitted
             )
     except Exception as err:
@@ -678,6 +690,7 @@ async def finalize(state: RunState, deps: RunDeps, scope: RunScope) -> RunState:
     """
     if scope.finalized:
         return {}
+    scope.stage = "finalize"
     fatal = state.get("fatal")
     status = state.get("status")
     if fatal is not None:
@@ -685,7 +698,7 @@ async def finalize(state: RunState, deps: RunDeps, scope: RunScope) -> RunState:
         status = record_failure(deps, scope, error, lower_succeeded=fatal.stage == "notify")
     if status is None:
         raise RuntimeError("finalize reached before persist set a status")
-    _record_errors(state, deps, scope)
+    record_errors(deps, scope, state.get("errors", []), state.get("items", []), scope.failure)
     next_run_at = release_lock(deps, scope)
     logger.info(
         "run.finalized",

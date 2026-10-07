@@ -11,12 +11,12 @@ from sqlalchemy import Engine
 
 from invio.config.settings import MissingSettingError, Settings
 from invio.db.models import Base, Job
-from invio.db.repositories import JobRepository, RunRepository
+from invio.db.repositories import JobRepository
 from invio.db.session import create_db_engine, session_factory, session_scope
 from invio.domain import RunStatus
 from invio.services.jobs import JobNotFoundError
 from invio.services.runs import RunNotFoundError, RunService
-from tests.pipeline_helpers import make_job_config
+from tests.pipeline_helpers import add_run, make_job_config
 
 pytestmark = pytest.mark.usefixtures("clean_jobs")
 
@@ -38,15 +38,15 @@ def _add_run(
     stats: dict[str, Any] | None = None,
     error: str | None = None,
 ) -> int:
-    started = T0 + timedelta(minutes=minutes)
-    with session_scope(session_factory(engine)) as session:
-        runs = RunRepository(session)
-        run = runs.start(job_id, started_at=started)
-        if status is not RunStatus.RUNNING:
-            runs.finish(
-                run, status, stats=stats, error=error, finished_at=started + timedelta(seconds=3)
-            )
-        return run.id
+    return add_run(
+        session_factory(engine),
+        job_id,
+        status,
+        stats=stats,
+        error=error,
+        started_at=T0 + timedelta(minutes=minutes),
+        duration=timedelta(seconds=3),
+    )
 
 
 def _service(engine: Engine) -> RunService:

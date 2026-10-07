@@ -14,7 +14,7 @@ one node would not reach the next (research R10).
 import contextlib
 import dataclasses
 import logging
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, cast
@@ -27,8 +27,13 @@ from invio.graph.build import build_graph, new_scope
 from invio.graph.nodes.persist import DigestDraft
 from invio.graph.ports import RunDeps, RunObserver
 from invio.graph.scope import RunScope
-from invio.graph.stages import record_failure, release_lock, rollback_work_session
-from invio.graph.state import STAGE_ORDER, RunError, RunState
+from invio.graph.stages import (
+    record_errors,
+    record_failure,
+    release_lock,
+    rollback_work_session,
+)
+from invio.graph.state import STAGE_ORDER, RunError, RunState, error_of
 from invio.log import run_context
 from invio.pipeline.deps import default_deps
 from invio.services.jobs import JobNotFoundError
@@ -110,19 +115,12 @@ async def run_job(
         raise ValueError(f"concurrency must be >= 1, got {concurrency}")
     if max_items is not None and max_items < 1:
         raise ValueError(f"max_items must be >= 1, got {max_items}")
-    if deps is None:
-        async with default_deps(get_settings()) as built:
-            return await run_job(
-                job_id,
-                dry_run=dry_run,
-                deps=built,
-                concurrency=concurrency,
-                max_items=max_items,
-                observer=observer,
-            )
-    if concurrency is not None:
-        deps = dataclasses.replace(deps, concurrency=concurrency)
-    return await _run(job_id, dry_run=dry_run, deps=deps, max_items=max_items, observer=observer)
+    async with _deps_or_default(deps) as resolved:
+        if concurrency is not None:
+            resolved = dataclasses.replace(resolved, concurrency=concurrency)
+        return await _run(
+            job_id, dry_run=dry_run, deps=resolved, max_items=max_items, observer=observer
+        )
 
 
 async def run_job_by_name(
@@ -139,29 +137,30 @@ async def run_job_by_name(
     An unknown name raises :class:`~invio.services.jobs.JobNotFoundError` before any run row is
     created or any lock changed. The CLI uses this because it must not import ``invio.db``.
     """
-    if deps is None:
-        async with default_deps(get_settings()) as built:
-            return await run_job_by_name(
-                name,
-                dry_run=dry_run,
-                deps=built,
-                concurrency=concurrency,
-                max_items=max_items,
-                observer=observer,
-            )
-    with session_scope(deps.session_factory) as session:
-        job = JobRepository(session).get_by_name(name)
-        if job is None:
-            raise JobNotFoundError(name)
-        job_id = job.id
-    return await run_job(
-        job_id,
-        dry_run=dry_run,
-        deps=deps,
-        concurrency=concurrency,
-        max_items=max_items,
-        observer=observer,
-    )
+    async with _deps_or_default(deps) as resolved:
+        with session_scope(resolved.session_factory) as session:
+            job = JobRepository(session).get_by_name(name)
+            if job is None:
+                raise JobNotFoundError(name)
+            job_id = job.id
+        return await run_job(
+            job_id,
+            dry_run=dry_run,
+            deps=resolved,
+            concurrency=concurrency,
+            max_items=max_items,
+            observer=observer,
+        )
+
+
+@contextlib.asynccontextmanager
+async def _deps_or_default(deps: RunDeps | None) -> AsyncIterator[RunDeps]:
+    """``deps`` itself, or the production wiring for the duration of the block."""
+    if deps is not None:
+        yield deps
+        return
+    async with default_deps(get_settings()) as built:
+        yield built
 
 
 async def _run(
@@ -240,11 +239,15 @@ def _safety_net(deps: RunDeps, scope: RunScope, error: BaseException) -> None:
     """Record the run failed and release the lock; never raises (the caller re-raises ``error``).
 
     A failing recovery transaction leaves the run ``running`` (``record_failed_run`` logs it);
-    the lock is still released in a separate attempt.
+    the lock is still released in a separate attempt. Unless ``finalize`` already stored the
+    run's error list, the fatal error is stored as its only entry.
     """
     rollback_work_session(scope)  # first: a failing recovery must not leave a transaction open
     with contextlib.suppress(Exception):  # logged by record_failed_run (error class only)
         record_failure(deps, scope, error)
+    if not scope.errors_recorded:
+        # The graph state is gone: store the fatal error at least, so ``run show`` names it.
+        record_errors(deps, scope, [error_of(scope.stage, error)], [], error)
     try:
         release_lock(deps, scope)
     except Exception as release_error:

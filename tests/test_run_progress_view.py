@@ -141,7 +141,7 @@ def test_the_panel_shows_the_stage_counts_and_the_item_bar() -> None:
         rendered = view._render()
 
     text = "\n".join(line.plain for line in rendered.renderables)  # type: ignore[attr-defined]
-    assert "stage: keyword_prefilter" in text
+    assert "stage: items" in text  # keyword_prefilter completed, 1 of 2 items done
     assert "found 9 · new 4 · after filter 0 · relevant 0 · failed 1" in text
     assert "processed 1/2" in text
     assert "item:" not in sink.getvalue()  # not verbose: no per-item lines on the terminal
@@ -162,6 +162,14 @@ def test_strip_control() -> None:
         ("bell\x07\x7fdel", "bell del"),
         ("[bold]markup[/bold]", "[bold]markup[/bold]"),  # markup is text, not stripped
         ("  spaced " + chr(0xA0) + " out  ", "spaced out"),  # a no-break space too
+        ("\x1bPq#0;payload\x1b\\after", "after"),  # DCS, removed whole
+        ("\x1b_apc\x07after", "after"),  # APC
+        ("a\x1b]unterminated b", "a ]unterminated b"),  # never swallows the rest
+        ("evil" + chr(0x202E) + "txt.exe", "eviltxt.exe"),  # bidi override
+        (
+            "in" + chr(0x2066) + "vis" + chr(0x2069) + chr(0x200B) + "ible" + chr(0xFEFF),
+            "invisible",
+        ),
         ("", ""),
     ],
 )
@@ -173,3 +181,35 @@ def test_strip_control_multiline_keeps_the_layout() -> None:
     text = "# T\r\n\r\tcol\x1b[31ma\x1b[0m\tb\x1b]0;x\x07\x00\x7f\x85\n\n  keep  "
 
     assert strip_control(text, multiline=True) == "# T\n\n\tcola\tb\n\n  keep  "
+
+
+def test_strip_control_multiline_keeps_the_text_after_an_unterminated_sequence() -> None:
+    text = "intro \x1b]0;title\nline two\n" + chr(0x202E) + "line three"
+
+    assert strip_control(text, multiline=True) == "intro ]0;title\nline two\nline three"
+
+
+@pytest.mark.parametrize(
+    ("events", "stage"),
+    [
+        ([], "fetch_sources"),
+        ([_stage("deduplicate", found=3, new=3)], "keyword_prefilter"),
+        ([_stage("keyword_prefilter", selected=2)], "items"),
+        ([_stage("keyword_prefilter", selected=2, processed=2)], "synthesize_digest"),
+        ([_stage("keyword_prefilter")], "synthesize_digest"),  # nothing selected
+        ([_stage("synthesize_digest")], "persist"),
+        ([_stage("persist")], "notify"),
+        ([_stage("notify")], "finalize"),
+        ([_stage("finalize")], "done"),
+    ],
+)
+def test_the_panel_names_the_stage_that_runs_now(events: list[ProgressEvent], stage: str) -> None:
+    view = RunProgressView(Console(file=io.StringIO(), force_terminal=True, width=120))
+
+    with view:
+        for event in events:
+            view(event)
+        rendered = view._render()
+
+    first = rendered.renderables[0].plain  # type: ignore[attr-defined]
+    assert first == f"stage: {stage}"

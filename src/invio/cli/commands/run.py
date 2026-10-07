@@ -8,19 +8,16 @@ module-level ``_make_service`` is a test seam.
 from typing import Annotated
 
 import typer
-from rich.console import Console
 
+from invio.cli.console import stdout_console
 from invio.cli.errors import fail, mapped_errors
 from invio.cli.run_output import (
     DASH,
-    format_cost,
     format_duration,
     format_errors,
     format_time,
-    format_tokens,
     runs_table,
-    stats_rows,
-    stats_table,
+    stats_block,
 )
 from invio.domain import RunStatus
 from invio.services.runs import RunService
@@ -28,19 +25,9 @@ from invio.textsafe import strip_control
 
 app = typer.Typer(help="Inspect job runs.", no_args_is_help=True)
 
-_PIPE_WIDTH = 1_000
-
 
 def _make_service() -> RunService:
     return RunService.from_settings()
-
-
-def _console() -> Console:
-    console = Console(markup=False, highlight=False, emoji=False)
-    if not console.is_terminal:
-        # Piped output defaults to 80 columns; never wrap a row for grep/awk.
-        console = Console(markup=False, highlight=False, emoji=False, width=_PIPE_WIDTH)
-    return console
 
 
 @app.command("list")
@@ -56,7 +43,7 @@ def list_runs(
     if not summaries:
         typer.echo("No runs." if job is None else f"No runs for job '{strip_control(job)}'.")
         return
-    _console().print(runs_table(summaries))
+    stdout_console().print(runs_table(summaries))
 
 
 @app.command()
@@ -73,9 +60,11 @@ def show(run_id: Annotated[int, typer.Argument(help="Run id.")]) -> None:
         f"Duration {format_duration(detail.started_at, detail.finished_at)}"
     )
     typer.echo(f"Error     {strip_control(detail.error) if detail.error else DASH}")
-    if detail.status is not RunStatus.RUNNING:
-        typer.echo()
-        rows = stats_rows(
+    if detail.status is RunStatus.RUNNING:
+        return  # no final stats and no error list yet
+    typer.echo()
+    stdout_console().print(
+        stats_block(
             run_id=detail.id,
             status=detail.status,
             dry_run=detail.dry_run,
@@ -84,9 +73,7 @@ def show(run_id: Annotated[int, typer.Argument(help="Run id.")]) -> None:
             finished_at=detail.finished_at,
             notifications=None,
         )
-        _console().print(stats_table(rows))
-        typer.echo()
-        typer.echo(f"Tokens: {format_tokens(detail.stats)} · cost {format_cost(detail.stats)}")
+    )
     typer.echo()
     for line in format_errors(detail.errors, detail.errors_omitted):
         typer.echo(line)

@@ -138,12 +138,14 @@ def stored_errors(
 |---|---|---|---|
 | `llm_calls_unpriced` | int | wherever `llm_calls` is | calls whose cost is unknown |
 | `processed` | int | normal and dry-run layouts (not the recovery layout) | items that reached a relevance or summary outcome (rated, summarized or failed; deviation: both stages, so an item failed at `summarize_item` counts) |
-| `errors` | list[object] | runs closed by `finalize` | see data-model §1 |
+| `errors` | list[object] | runs closed by `finalize` or by the safety net | see data-model §1 |
 | `errors_omitted` | int | only when > 0 | entries beyond the cap |
 
 The `errors` list is written by `finalize`, after the status has been saved and before the lock
 is released, in its own transaction. A failure of that write is logged
-(`run.errors_not_recorded`) and does not change the run's status.
+(`run.errors_not_recorded`) and does not change the run's status. When the graph does not
+reach `finalize` (Ctrl-C, cancellation, a crash), `run_job`'s safety net stores the fatal
+error as the only entry, at the run-level stage that was running.
 
 The #19 invariant "token keys equal `UsageRepository.totals_for_run`" is unchanged for
 non-dry runs. `llm_calls_unpriced` is checked against the ledger.

@@ -28,7 +28,7 @@ class ItemRef:
     """Title and URL of a taken item, captured at deduplication (a dry run rolls the rows back).
 
     Both are untrusted: the title has control characters stripped and is cut, the URL has no
-    query string or fragment (they can hold signed tokens).
+    credentials, query string or fragment (they can hold signed tokens).
     """
 
     title: str
@@ -53,6 +53,8 @@ class RunScope:
     delivery: DeliveryReport | None = None
     failure: BaseException | None = None  # the original exception of the first fatal error
     finalized: bool = False
+    stage: RunStage = "load_job"  # the run-level stage that runs now (items: ``extract_text``)
+    errors_recorded: bool = False  # ``runs.stats["errors"]`` is written; the safety net keeps it
     item_types: dict[int, ItemType] = field(default_factory=dict)  # kind of every taken item
     item_stage: dict[int, RunStage] = field(default_factory=dict)  # last stage an item entered
     max_items: int | None = None  # per-run cap from ``--max-items``; applied in ``load_job``

@@ -58,6 +58,16 @@ def test_cost_of_a_legacy_run_without_the_unpriced_count() -> None:
     assert format_cost(stats) == "≥ $0.0050 (some calls without price)"
 
 
+def test_cost_never_reports_zero_calls_without_price_for_an_incomplete_run() -> None:
+    stats = {
+        "llm_calls": 5,
+        "llm_calls_unpriced": 0,  # disagrees with cost_complete: the count says nothing
+        "cost_complete": False,
+        "estimated_cost_usd": "0.005",
+    }
+    assert format_cost(stats) == "≥ $0.0050 (some calls without price)"
+
+
 def test_cost_tolerates_missing_and_garbage_values() -> None:
     assert format_cost({}) == "$0.00"
     assert format_cost({"llm_calls": 2, "estimated_cost_usd": "oops"}) == "unknown"

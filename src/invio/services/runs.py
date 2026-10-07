@@ -15,12 +15,20 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from invio.config.job import JobConfigError, validate_job
 from invio.config.settings import Settings, get_settings
+from invio.db.models import Run
 from invio.db.repositories import JobRepository, RunRepository
 from invio.db.session import create_db_engine, session_factory, session_scope
 from invio.domain import RunStatus
 from invio.services.jobs import JobNotFoundError
 
-__all__ = ["RunDetail", "RunErrorView", "RunNotFoundError", "RunService", "RunSummary"]
+__all__ = [
+    "RunDetail",
+    "RunErrorView",
+    "RunNotFoundError",
+    "RunService",
+    "RunSummary",
+    "stat_count",
+]
 
 UNREADABLE_ENTRY = "<unreadable error entry>"
 
@@ -82,7 +90,8 @@ def _timezone(config: Mapping[str, Any] | None) -> str:
         return "UTC"
 
 
-def _count(stats: Mapping[str, Any], key: str) -> int | None:
+def stat_count(stats: Mapping[str, Any], key: str) -> int | None:
+    """The integer under ``key``, or ``None`` if it is missing or not an integer (nor a bool)."""
     value = stats.get(key)
     return value if isinstance(value, int) and not isinstance(value, bool) else None
 
@@ -101,7 +110,7 @@ def _parse_entry(raw: object) -> RunErrorView:
                 stage=stage,
                 error_class=error_class,
                 message=message,
-                item_id=_count(raw, "item_id"),
+                item_id=stat_count(raw, "item_id"),
                 title=_text(raw.get("title")),
                 url=_text(raw.get("url")),
                 source=_text(raw.get("source")),
@@ -114,6 +123,23 @@ def _parse_errors(stats: Mapping[str, Any]) -> tuple[RunErrorView, ...] | None:
     if not isinstance(raw, list):
         return None
     return tuple(_parse_entry(entry) for entry in raw)
+
+
+def _summary_fields(run: Run, job_name: str, timezone: str) -> dict[str, Any]:
+    """The :class:`RunSummary` fields of ``run`` (shared by ``list`` and ``get``)."""
+    stats = run.stats or {}
+    return {
+        "id": run.id,
+        "job_name": job_name,
+        "status": RunStatus(run.status),
+        "dry_run": stats.get("dry_run") is True,
+        "started_at": run.started_at,
+        "finished_at": run.finished_at,
+        "found": stat_count(stats, "found"),
+        "new": stat_count(stats, "new"),
+        "relevant": stat_count(stats, "relevant"),
+        "timezone": timezone,
+    }
 
 
 class RunService:
@@ -145,21 +171,7 @@ class RunService:
             for run, name, config in RunRepository(session).list_recent(job_id=job_id, limit=limit):
                 if name not in zones:
                     zones[name] = _timezone(config)
-                stats = run.stats or {}
-                summaries.append(
-                    RunSummary(
-                        id=run.id,
-                        job_name=name,
-                        status=RunStatus(run.status),
-                        dry_run=stats.get("dry_run") is True,
-                        started_at=run.started_at,
-                        finished_at=run.finished_at,
-                        found=_count(stats, "found"),
-                        new=_count(stats, "new"),
-                        relevant=_count(stats, "relevant"),
-                        timezone=zones[name],
-                    )
-                )
+                summaries.append(RunSummary(**_summary_fields(run, name, zones[name])))
             return summaries
 
     def get(self, run_id: int) -> RunDetail:
@@ -171,19 +183,11 @@ class RunService:
             job = JobRepository(session).get(run.job_id)
             name = job.name if job is not None else ""
             stats = dict(run.stats or {})
+            zone = _timezone(job.config if job is not None else None)
             return RunDetail(
-                id=run.id,
-                job_name=name,
-                status=RunStatus(run.status),
-                dry_run=stats.get("dry_run") is True,
-                started_at=run.started_at,
-                finished_at=run.finished_at,
-                found=_count(stats, "found"),
-                new=_count(stats, "new"),
-                relevant=_count(stats, "relevant"),
-                timezone=_timezone(job.config if job is not None else None),
+                **_summary_fields(run, name, zone),
                 error=run.error,
                 stats=stats,
                 errors=_parse_errors(stats),
-                errors_omitted=_count(stats, "errors_omitted") or 0,
+                errors_omitted=stat_count(stats, "errors_omitted") or 0,
             )

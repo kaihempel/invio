@@ -31,6 +31,7 @@ from invio.sources.errors import FetchError
 from tests.conftest import FakeClock
 from tests.pipeline_helpers import (
     RoutedFakeProvider,
+    add_run,
     build_env,
     relevance_reply,
 )
@@ -211,14 +212,8 @@ def test_stored_error_validation() -> None:
 def _finished_run(engine: Engine, stats: dict[str, Any] | None, status: RunStatus) -> int:
     factory = session_factory(engine)
     with session_scope(factory) as session:
-        from invio.db.models import Job as JobModel
-
-        job = JobRepository(session).add(JobModel(name="j", enabled=True, config={}))
-        runs = RunRepository(session)
-        run = runs.start(job.id)
-        if status is not RunStatus.RUNNING:
-            runs.finish(run, status, stats=stats, error="boom")
-        return run.id
+        job_id = JobRepository(session).add(Job(name="j", enabled=True, config={})).id
+    return add_run(factory, job_id, status, stats=stats, error="boom")
 
 
 def _run(engine: Engine, run_id: int) -> Run:

@@ -8,6 +8,7 @@ import pytest
 from sqlalchemy import Engine
 
 from invio.domain import RunStatus
+from invio.llm.base import LLMUnavailableError
 from invio.pipeline import ProgressEvent
 from invio.pipeline.run import run_job
 from tests.conftest import FakeClock
@@ -160,3 +161,35 @@ async def test_item_titles_are_cleaned_and_urls_lose_their_query(
     assert entry["title"] == "Evil title"
     assert entry["url"] == "https://example.com/post-1"
     assert "SECRET" not in str(result.stats)
+
+
+async def test_item_urls_lose_their_credentials(db_engine: Engine, fake_clock: FakeClock) -> None:
+    candidate = dataclasses.replace(
+        make_candidates(1)[0], url="https://user:SECRET@example.com/post-1?token=x"
+    )
+    env = build_env(
+        db_engine,
+        fake_clock,
+        candidates=[candidate],
+        provider=RoutedFakeProvider(relevance=RuntimeError("boom")),
+    )
+
+    result = await run_job(env.job_id, dry_run=True, deps=env.deps)
+
+    (entry,) = result.stats["errors"]
+    assert entry["url"] == "https://example.com/post-1"
+
+
+async def test_a_relevant_item_that_fails_to_summarize_counts_as_relevant_and_failed(
+    db_engine: Engine, fake_clock: FakeClock
+) -> None:
+    provider = RoutedFakeProvider(summarize=LLMUnavailableError("down"))
+    env = build_env(db_engine, fake_clock, provider=provider)
+    recorder = Recorder()
+
+    result = await run_job(env.job_id, deps=env.deps, observer=recorder)
+
+    assert {e.outcome for e in recorder.items} == {"failed"}
+    last = recorder.events[-1].counts
+    assert (last.relevant, last.failed) == (result.stats["relevant"], result.stats["failed"])
+    assert last.relevant == 3

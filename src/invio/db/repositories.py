@@ -18,7 +18,14 @@ from sqlalchemy.orm import Session
 
 from invio.db.models import Digest, Item, Job, LlmUsage, Notification, Run
 from invio.db.types import utcnow
-from invio.domain import COST_PRECISION, Candidate, ItemStatus, NotificationStatus, RunStatus
+from invio.domain import (
+    COST_PRECISION,
+    STATS_VERSION,
+    Candidate,
+    ItemStatus,
+    NotificationStatus,
+    RunStatus,
+)
 
 __all__ = [
     "KEEP",
@@ -168,8 +175,10 @@ class RunRepository:
         run = self._session.get(Run, run_id)
         if run is None or run.status == RunStatus.RUNNING:
             return False
-        # The literal is STATS_VERSION of invio.graph.nodes.persist (db cannot import graph).
-        merged: dict[str, Any] = {**(run.stats or {"version": 1}), "errors": list(entries)}
+        merged: dict[str, Any] = {
+            **(run.stats or {"version": STATS_VERSION}),
+            "errors": list(entries),
+        }
         if omitted > 0:
             merged["errors_omitted"] = omitted
         run.stats = merged

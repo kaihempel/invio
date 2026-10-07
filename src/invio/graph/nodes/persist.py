@@ -38,7 +38,7 @@ from invio.db.repositories import (
     UsageRepository,
 )
 from invio.db.session import session_scope
-from invio.domain import ItemStatus, RunStatus
+from invio.domain import STATS_VERSION, ItemStatus, RunStatus
 from invio.graph.budget import BudgetTracker
 from invio.graph.nodes.llm_calls import failure_message
 from invio.graph.nodes.relevance import RelevanceOutcome
@@ -65,7 +65,6 @@ __all__ = [
 
 logger = logging.getLogger("invio.graph")
 
-STATS_VERSION: Final = 1  # layout of runs.stats, see contracts/run-stats.md
 ALL_FAILED_ERROR: Final = "all attempted items failed"  # runs.error of a run failed by its items
 ALL_SOURCES_FAILED_ERROR: Final = "all sources failed"  # runs.error when no source could be read
 

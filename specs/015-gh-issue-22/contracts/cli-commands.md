@@ -33,8 +33,10 @@ Lives in `src/invio/cli/commands/job.py`, which is the existing `job` group.
 
 ### Progress (stderr)
 
-- **TTY**: a live panel with the current stage, `found N · new N · after filter N · relevant N · failed N`,
-  and a `processed i/n` bar during item processing.
+- **TTY**: a live panel with the stage that runs now (derived from the last completed stage
+  event; `items` while items are processed), `found N · new N · after filter N · relevant N ·
+  failed N`, and a `processed i/n` bar during item processing. An item rated relevant that
+  then fails to summarize counts as relevant and as failed, as in `stats`.
 - **Non-TTY**: one line per stage event, for example:
   ```
   progress: deduplicate found=12 new=5
@@ -132,7 +134,7 @@ Rules:
   `Error` line still shows `runs.error`.
 - An empty list: `Errors: none`.
 - A running run: status `running`, finish and duration shown as `—`, and the stats table
-  omitted. The exit code is 0.
+  and the `Errors` block omitted. The exit code is 0.
 - An unknown id: `Error: run <id> not found`, exit 1.
 - A non-integer id: Click usage error, exit 2.
 

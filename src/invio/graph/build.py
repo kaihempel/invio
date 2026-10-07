@@ -218,6 +218,7 @@ def guarded(
     """
 
     async def run(state: RunState) -> RunState:
+        scope.stage = stage
         try:
             if before is not None:
                 before()
@@ -282,6 +283,7 @@ def build_graph(deps: RunDeps, scope: RunScope) -> RunGraph:
 
     async def process_item(state: ItemTask) -> RunState:
         """Run the item subgraph inside the item's error boundary (research R6)."""
+        scope.stage = "extract_text"
         async with scope.semaphore:
             return await _process(state)
 
@@ -322,16 +324,22 @@ def build_graph(deps: RunDeps, scope: RunScope) -> RunGraph:
         outcome: Literal["relevant", "irrelevant", "failed"] = (
             "failed" if failed else "relevant" if relevant else "irrelevant"
         )
-        _count_item(result.item_id, outcome, failed[0].error if failed else None)
+        _count_item(result.item_id, outcome, failed[0].error if failed else None, relevant=relevant)
 
     def _count_item(
-        item_id: int, outcome: Literal["relevant", "irrelevant", "failed"], message: str | None
+        item_id: int,
+        outcome: Literal["relevant", "irrelevant", "failed"],
+        message: str | None,
+        *,
+        relevant: bool = False,
     ) -> None:
+        """Update the live counts like ``build_stats`` does: an item rated relevant that then
+        failed to summarize counts as relevant and as failed."""
         progress = scope.progress
         progress.processed += 1
-        if outcome == "relevant":
+        if relevant:
             progress.relevant += 1
-        elif outcome == "failed":
+        if outcome == "failed":
             progress.failed += 1
         ref = scope.item_refs.get(item_id)
         stage = scope.item_stage.get(item_id, "extract_text")

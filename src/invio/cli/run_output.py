@@ -11,11 +11,12 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Final
 from zoneinfo import ZoneInfo
 
+from rich.console import Group
 from rich.table import Table
 from rich.text import Text
 
 from invio.domain import RunStatus
-from invio.services.runs import RunErrorView, RunSummary
+from invio.services.runs import RunErrorView, RunSummary, stat_count
 from invio.textsafe import strip_control
 
 __all__ = [
@@ -26,6 +27,7 @@ __all__ = [
     "format_time",
     "format_tokens",
     "runs_table",
+    "stats_block",
     "stats_rows",
     "stats_table",
 ]
@@ -35,14 +37,9 @@ _COST_STEP: Final = Decimal("0.0001")
 _STAGE_WIDTH: Final = 17
 
 
-def _int(stats: Mapping[str, Any], key: str) -> int | None:
-    value = stats.get(key)
-    return value if isinstance(value, int) and not isinstance(value, bool) else None
-
-
 def format_cost(stats: Mapping[str, Any]) -> str:
     """The cost of a run (research R10): exact, a lower bound, ``unknown`` or ``$0.00``."""
-    calls = _int(stats, "llm_calls") or 0
+    calls = stat_count(stats, "llm_calls") or 0
     if calls == 0:
         return "$0.00"
     try:
@@ -51,10 +48,10 @@ def format_cost(stats: Mapping[str, Any]) -> str:
         return "unknown"
     if stats.get("cost_complete") is True:
         return f"${cost}"
-    unpriced = _int(stats, "llm_calls_unpriced")
+    unpriced = stat_count(stats, "llm_calls_unpriced")
     if unpriced is not None and unpriced >= calls:
         return "unknown"
-    if unpriced is None:
+    if not unpriced:  # unknown, or a row whose keys disagree: the count says nothing
         return f"≥ ${cost} (some calls without price)"
     noun = "call" if unpriced == 1 else "calls"
     return f"≥ ${cost} ({unpriced} {noun} without price)"
@@ -63,7 +60,7 @@ def format_cost(stats: Mapping[str, Any]) -> str:
 def format_tokens(stats: Mapping[str, Any]) -> str:
     """``in 48,211 · out 5,120 · total 53,331``."""
     given, produced, total = (
-        _int(stats, k) or 0 for k in ("input_tokens", "output_tokens", "tokens")
+        stat_count(stats, k) or 0 for k in ("input_tokens", "output_tokens", "tokens")
     )
     return f"in {given:,} · out {produced:,} · total {total:,}"
 
@@ -83,13 +80,13 @@ def format_time(moment: datetime | None, tz: str) -> str:
 
 
 def _processed(stats: Mapping[str, Any]) -> str:
-    processed = _int(stats, "processed")
+    processed = stat_count(stats, "processed")
     if processed is not None:
         return str(processed)
-    after_filter = _int(stats, "after_keyword_filter")
+    after_filter = stat_count(stats, "after_keyword_filter")
     if after_filter is None:
         return DASH
-    return str(max(after_filter - (_int(stats, "skipped_budget") or 0), 0))
+    return str(max(after_filter - (stat_count(stats, "skipped_budget") or 0), 0))
 
 
 def stats_rows(
@@ -105,7 +102,7 @@ def stats_rows(
     """The ``Metric | Value`` rows of a run, in the order of contracts/cli-commands.md."""
 
     def count(key: str) -> str:
-        value = _int(stats, key)
+        value = stat_count(stats, key)
         return str(value) if value is not None else DASH
 
     rows = [
@@ -119,11 +116,11 @@ def stats_rows(
         ("Summarized", count("summarized")),
         ("Failed", count("failed")),
     ]
-    if (_int(stats, "skipped_budget") or 0) > 0:
+    if (stat_count(stats, "skipped_budget") or 0) > 0:
         rows.append(("Skipped (budget)", count("skipped_budget")))
-    failed_sources = _int(stats, "sources_failed") or 0
+    failed_sources = stat_count(stats, "sources_failed") or 0
     if failed_sources > 0:
-        rows.append(("Sources failed", f"{failed_sources}/{_int(stats, 'sources') or DASH}"))
+        rows.append(("Sources failed", f"{failed_sources}/{stat_count(stats, 'sources') or DASH}"))
     rows.append(("Duration", format_duration(started_at, finished_at)))
     if notifications is not None:
         rows.append(("Notifications sent", str(notifications[0])))
@@ -139,6 +136,30 @@ def stats_table(rows: Sequence[tuple[str, str]]) -> Table:
     for metric, value in rows:
         table.add_row(Text(metric), Text(value))
     return table
+
+
+def stats_block(
+    *,
+    run_id: int,
+    status: RunStatus,
+    dry_run: bool,
+    stats: Mapping[str, Any],
+    started_at: datetime | None,
+    finished_at: datetime | None,
+    notifications: tuple[int, int] | None,
+) -> Group:
+    """The stats table, a blank line and the ``Tokens: ... · cost ...`` line of a run."""
+    rows = stats_rows(
+        run_id=run_id,
+        status=status,
+        dry_run=dry_run,
+        stats=stats,
+        started_at=started_at,
+        finished_at=finished_at,
+        notifications=notifications,
+    )
+    usage = f"Tokens: {format_tokens(stats)} · cost {format_cost(stats)}"
+    return Group(stats_table(rows), Text(), Text(usage))
 
 
 def _source_label(source: str) -> str:

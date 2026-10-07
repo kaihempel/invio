@@ -6,20 +6,37 @@ untrusted: control characters and ANSI escapes are stripped, and everything is p
 """
 
 from types import TracebackType
-from typing import Self
+from typing import Final, Self
 
 import typer
 from rich.console import Console, Group
 from rich.live import Live
 from rich.text import Text
 
-from invio.pipeline import ProgressEvent, ProgressSnapshot
+from invio.pipeline import ProgressEvent, ProgressSnapshot, RunStage
 from invio.textsafe import strip_control
 
 __all__ = ["RunProgressView"]
 
 # Stage events that come before any item event; every later stage ends the item phase.
-_BEFORE_ITEMS = frozenset({"load_job", "fetch_sources", "deduplicate", "keyword_prefilter"})
+_BEFORE_ITEMS: Final = frozenset({"deduplicate", "keyword_prefilter"})
+# A stage event reports a *completed* stage; the panel shows the one that runs next.
+_RUNNING_AFTER: Final[dict[str, str]] = {
+    "deduplicate": "keyword_prefilter",
+    "synthesize_digest": "persist",
+    "persist": "notify",
+    "notify": "finalize",
+    "finalize": "done",
+}
+
+
+def _current_stage(completed: RunStage | None, counts: ProgressSnapshot) -> str:
+    """The stage that runs now, given the last completed one."""
+    if completed is None:
+        return "fetch_sources"
+    if completed == "keyword_prefilter":
+        return "items" if counts.processed < counts.selected else "synthesize_digest"
+    return _RUNNING_AFTER.get(completed, completed)
 
 
 def _counts_line(counts: ProgressSnapshot) -> str:
@@ -61,7 +78,7 @@ class RunProgressView:
         self._console = console
         self._verbose = verbose
         self._live: Live | None = None
-        self._stage = "starting"
+        self._completed: RunStage | None = None
         self._counts = ProgressSnapshot()
         self._last_items_line: str | None = None
 
@@ -96,14 +113,15 @@ class RunProgressView:
     def __call__(self, event: ProgressEvent) -> None:
         self._counts = event.counts
         if event.kind == "stage":
-            self._stage = event.stage
+            self._completed = event.stage
         if self._live is not None:
             self._on_terminal(event)
         else:
             self._on_pipe(event)
 
     def _render(self) -> Group:
-        lines = [Text(f"stage: {self._stage}"), Text(_counts_line(self._counts))]
+        stage = _current_stage(self._completed, self._counts)
+        lines = [Text(f"stage: {stage}"), Text(_counts_line(self._counts))]
         if self._counts.selected > 0:
             lines.append(Text(f"processed {self._counts.processed}/{self._counts.selected}"))
         return Group(*lines)

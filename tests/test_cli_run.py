@@ -14,7 +14,7 @@ from invio.db.repositories import RunRepository
 from invio.db.session import create_db_engine, session_factory, session_scope
 from invio.domain import RunStatus
 from invio.services.runs import RunService
-from tests.pipeline_helpers import make_job_config, store_job
+from tests.pipeline_helpers import add_run, make_job_config, store_job
 from tests.run_cli_helpers import RunCli, run_cli  # noqa: F401
 
 # The production seam, captured before ``run_cli`` replaces it with the fixture's service.
@@ -36,13 +36,8 @@ def _set_stats(run_cli: RunCli, run_id: int, stats: dict[str, Any] | None) -> No
 
 
 def _add_run(run_cli: RunCli, status: RunStatus, stats: dict[str, Any] | None = None) -> int:
-    with session_scope(run_cli.env.factory) as session:
-        runs = RunRepository(session)
-        started = datetime(2026, 10, 1, tzinfo=UTC)
-        run = runs.start(run_cli.env.job_id, started_at=started)
-        if status is not RunStatus.RUNNING:
-            runs.finish(run, status, stats=stats)
-        return run.id
+    started = datetime(2026, 10, 1, tzinfo=UTC)
+    return add_run(run_cli.env.factory, run_cli.env.job_id, status, stats=stats, started_at=started)
 
 
 # --- run list ------------------------------------------------------------------------------
@@ -140,6 +135,7 @@ def test_show_a_running_run(run_cli: RunCli) -> None:
     assert f"Run {run_id} · job research · running" in result.stdout
     assert "Duration —" in result.stdout
     assert "Metric" not in result.stdout
+    assert "Errors" not in result.stdout  # no error list until the run has finished
 
 
 def test_show_an_unknown_or_malformed_id(run_cli: RunCli) -> None:

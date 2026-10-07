@@ -197,11 +197,17 @@ def test_ctrl_c_exits_1_records_the_run_failed_and_releases_the_lock(run_cli: Ru
     result = run_cli.invoke(["job", "run", "research"])
 
     assert result.exit_code == 1
-    assert "interrupted; run recorded as failed" in result.stderr
+    assert "interrupted; a started run is recorded as failed" in result.stderr
     assert "Traceback" not in result.stderr + result.stdout
     (run,) = run_cli.runs()
     assert run.status == RunStatus.FAILED
     assert run_cli.job_row().locked_until is None
+    # The safety net stores the fatal error, so ``run show`` names it (not a legacy run).
+    (entry,) = (run.stats or {})["errors"]
+    assert (entry["stage"], entry["error_class"]) == ("extract_text", "CancelledError")
+    shown = run_cli.invoke(["run", "show", str(run.id)])
+    assert "not available" not in shown.stdout
+    assert "CancelledError" in shown.stdout
 
 
 def test_a_hostile_digest_is_printed_without_escapes_but_keeps_its_layout(

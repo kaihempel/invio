@@ -7,5 +7,6 @@ e-mail delivery, schedule computation) into the research graph and runs one job
 """
 
 from invio.graph.ports import ProgressEvent, ProgressSnapshot, RunDeps, RunObserver
+from invio.graph.state import RunStage
 
-__all__ = ["ProgressEvent", "ProgressSnapshot", "RunDeps", "RunObserver"]
+__all__ = ["ProgressEvent", "ProgressSnapshot", "RunDeps", "RunObserver", "RunStage"]

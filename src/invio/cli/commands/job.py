@@ -12,27 +12,20 @@ import os
 import sys
 from collections.abc import Coroutine, Iterator
 from contextlib import AbstractAsyncContextManager
-from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any
 
 import typer
 import yaml
 from pydantic import ValidationError
-from rich.console import Console
 from rich.table import Table
 
 from invio.cli import editor
+from invio.cli.console import stderr_console, stdout_console
 from invio.cli.errors import fail, mapped_errors
 from invio.cli.progress import RunProgressView
 from invio.cli.prompts import Prompter, QuestionaryPrompter, WizardAborted
-from invio.cli.run_output import (
-    format_cost,
-    format_time,
-    format_tokens,
-    stats_rows,
-    stats_table,
-)
+from invio.cli.run_output import DASH, format_time, stats_block
 from invio.cli.runtime import settings_error, setup_runtime
 from invio.cli.source_check import HttpSourceChecker, SourceChecker
 from invio.cli.wizard import WARNING_NO_REGISTRY, run_wizard
@@ -65,7 +58,7 @@ from invio.textsafe import strip_control
 
 app = typer.Typer(help="Manage research jobs.", no_args_is_help=True)
 
-_DASH = "—"
+_RUN = "run"  # the name of ``invio job run``; the group callback's exit code depends on it
 
 
 @app.callback()
@@ -73,7 +66,7 @@ def _setup(ctx: typer.Context) -> None:
     """Manage research jobs."""
     # The root callback leaves the runtime setup to this group (``SELF_CONFIGURING_GROUPS``):
     # a configuration error is "could not start" (1) for ``job run``, where 2 means partial.
-    setup_runtime(config_exit=1 if ctx.invoked_subcommand == "run" else 2)
+    setup_runtime(config_exit=1 if ctx.invoked_subcommand == _RUN else 2)
 
 
 # --- test seams ------------------------------------------------------------------------------
@@ -149,11 +142,6 @@ def _errors() -> Iterator[None]:
         raise fail("aborted; nothing saved", 1) from exc
 
 
-def _fmt_next_run(next_run_at: datetime | None, tz: str) -> str:
-    """Render ``next_run_at`` as ``YYYY-MM-DD HH:MM <TZ abbr>`` in ``tz`` (``—`` if unset)."""
-    return format_time(next_run_at, tz)
-
-
 def _fmt_frequency(schedule: ScheduleConfig) -> str:
     when = f"{schedule.time} {schedule.timezone}"
     if schedule.frequency is Frequency.WEEKLY and schedule.weekday is not None:
@@ -161,9 +149,6 @@ def _fmt_frequency(schedule: ScheduleConfig) -> str:
     if schedule.frequency is Frequency.MONTHLY:
         return f"monthly {schedule.day_of_month} {when}"
     return f"daily {when}"
-
-
-_PIPE_WIDTH = 1_000
 
 
 def _yes_no(flag: bool) -> str:
@@ -187,17 +172,13 @@ def list_jobs() -> None:
     for row in summaries:
         config = row.config
         if config is None:
-            frequency, next_run, status = _DASH, _DASH, "invalid config"
+            frequency, next_run, status = DASH, DASH, "invalid config"
         else:
             frequency = _fmt_frequency(config.schedule)
-            next_run = _fmt_next_run(row.next_run_at, config.schedule.timezone)
+            next_run = format_time(row.next_run_at, config.schedule.timezone)
             status = row.last_run_status.value if row.last_run_status else "never run"
         table.add_row(row.name, _yes_no(row.enabled), frequency, next_run, status)
-    console = Console(markup=False, highlight=False, emoji=False)
-    if not console.is_terminal:
-        # Piped output defaults to 80 columns; never truncate cells for grep/awk.
-        console = Console(markup=False, highlight=False, emoji=False, width=_PIPE_WIDTH)
-    console.print(table)
+    stdout_console().print(table)
 
 
 @app.command()
@@ -213,7 +194,7 @@ def show(name: Annotated[str, typer.Argument(help="Job name.")]) -> None:
         tz = record.config.schedule.timezone
         typer.echo(f"name: {record.name}")
         typer.echo(f"enabled: {_yes_no(record.enabled)}")
-        typer.echo(f"next run: {_fmt_next_run(record.next_run_at, tz)}")
+        typer.echo(f"next run: {format_time(record.next_run_at, tz)}")
         typer.echo()
         typer.echo(dump_yaml(record.config), nl=False)
 
@@ -223,7 +204,7 @@ def _stored_yaml(service: JobService, name: str) -> str:
 
 
 def _status_line(verb: str, name: str, record: JobRecord) -> str:
-    next_run = _fmt_next_run(record.next_run_at, record.config.schedule.timezone)
+    next_run = format_time(record.next_run_at, record.config.schedule.timezone)
     return f"{verb} job '{name}' (next run: {next_run})"
 
 
@@ -426,7 +407,7 @@ def _run_errors() -> Iterator[None]:
     except ValidationError as exc:
         raise fail(f"Configuration error: {settings_error(exc)}", 1) from exc
     except KeyboardInterrupt as exc:
-        raise fail("interrupted; run recorded as failed", 1) from exc
+        raise fail("interrupted; a started run is recorded as failed", 1) from exc
 
 
 async def _run_once(
@@ -438,11 +419,8 @@ async def _run_once(
         )
 
 
-def _stdout_console() -> Console:
-    console = Console(markup=False, highlight=False, emoji=False)
-    if not console.is_terminal:
-        console = Console(markup=False, highlight=False, emoji=False, width=_PIPE_WIDTH)
-    return console
+def _disabled(name: str) -> typer.Exit:
+    return fail(f"Error: job '{name}' is disabled; enable it with 'invio job enable {name}'", 1)
 
 
 def _print_result(result: RunResult, *, show_digest: bool) -> None:
@@ -458,21 +436,20 @@ def _print_result(result: RunResult, *, show_digest: bool) -> None:
     notifications = (
         None if result.dry_run else (result.notifications_sent, result.notifications_failed)
     )
-    rows = stats_rows(
-        run_id=result.run_id,
-        status=result.status,
-        dry_run=result.dry_run,
-        stats=result.stats,
-        started_at=result.started_at,
-        finished_at=result.finished_at,
-        notifications=notifications,
+    stdout_console().print(
+        stats_block(
+            run_id=result.run_id,
+            status=result.status,
+            dry_run=result.dry_run,
+            stats=result.stats,
+            started_at=result.started_at,
+            finished_at=result.finished_at,
+            notifications=notifications,
+        )
     )
-    _stdout_console().print(stats_table(rows))
-    typer.echo()
-    typer.echo(f"Tokens: {format_tokens(result.stats)} · cost {format_cost(result.stats)}")
 
 
-@app.command("run")
+@app.command(_RUN)
 def run(
     name: Annotated[str, typer.Argument(help="Job name.")],
     dry_run: Annotated[
@@ -504,25 +481,19 @@ def run(
     with _run_errors():
         record = _make_service().get_by_name(name)
         if not record.enabled:
-            raise fail(
-                f"Error: job '{name}' is disabled; enable it with 'invio job enable {name}'", 1
-            )
+            raise _disabled(name)
         limit = record.config.limits.max_items_per_run
         if max_items is not None and max_items > limit:
             typer.echo(
                 f"note: --max-items {max_items} exceeds the job limit {limit}; using {limit}",
                 err=True,
             )
-        view = RunProgressView(
-            Console(stderr=True, markup=False, highlight=False, emoji=False), verbose=verbose
-        )
+        view = RunProgressView(stderr_console(), verbose=verbose)
         try:
             with view:  # stopped before anything else is printed, also on Ctrl-C
                 result = _execute(_run_once(name, dry_run=dry_run, max_items=max_items, view=view))
-        except JobDisabledError as exc:
-            raise fail(
-                f"Error: job '{name}' is disabled; enable it with 'invio job enable {name}'", 1
-            ) from exc
+        except JobDisabledError as exc:  # disabled between the check above and the claim
+            raise _disabled(name) from exc
         except JobBusyError as exc:
             when = format_time(exc.locked_until, record.config.schedule.timezone)
             raise fail(f"Error: job '{name}' is running (locked until {when})", 1) from exc
