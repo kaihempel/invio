@@ -238,15 +238,15 @@ catches up once after downtime.
 
 ### Tests for User Story 3 ⚠️
 
-- [ ] T044 [P] [US3] Add `test_notify_retry_service_contract` to `tests/test_deploy_units.py`. It has the same assertions as T012 and T018 for `deploy/systemd/invio-notify-retry.service`, with `ExecStart=/opt/invio/.venv/bin/invio notify retry`, `SyslogIdentifier=invio-notify-retry`, `MemoryMax=256M`, `TimeoutStartSec=15min`. Factor the shared base expectations into one dict used by both service tests
-- [ ] T045 [P] [US3] Add `test_notify_retry_timer_contract`: `OnCalendar=hourly`, `Persistent=true`, `RandomizedDelaySec=300`, no `AccuracySec`, `Unit=invio-notify-retry.service`, `WantedBy=timers.target` (FR-003, research R7)
-- [ ] T046 [US3] Extend `deploy/ansible/molecule/default/verify.yml`. `invio-notify-retry.timer` must be enabled and active. `systemctl start invio-notify-retry.service` succeeds, and `journalctl -u invio-notify-retry -o cat` contains `nothing to retry` and passes `check-journal-json.py` (quickstart #12)
+- [X] T044 [P] [US3] Add `test_notify_retry_service_contract` to `tests/test_deploy_units.py`. It has the same assertions as T012 and T018 for `deploy/systemd/invio-notify-retry.service`, with `ExecStart=/opt/invio/.venv/bin/invio notify retry`, `SyslogIdentifier=invio-notify-retry`, `MemoryMax=256M`, `TimeoutStartSec=15min`. Factor the shared base expectations into one dict used by both service tests
+- [X] T045 [P] [US3] Add `test_notify_retry_timer_contract`: `OnCalendar=hourly`, `Persistent=true`, `RandomizedDelaySec=300`, no `AccuracySec`, `Unit=invio-notify-retry.service`, `WantedBy=timers.target` (FR-003, research R7)
+- [X] T046 [US3] Extend `deploy/ansible/molecule/default/verify.yml`. `invio-notify-retry.timer` must be enabled and active. `systemctl start invio-notify-retry.service` succeeds, and `journalctl -u invio-notify-retry -o cat` contains `nothing to retry` and passes `check-journal-json.py` (quickstart #12)
 
 ### Implementation for User Story 3
 
-- [ ] T047 [P] [US3] Create `deploy/systemd/invio-notify-retry.service`, mirroring `invio-run-due.service` (same `[Unit]`, same base `[Service]` keys, `Environment`), with the values from T044
-- [ ] T048 [P] [US3] Create `deploy/systemd/invio-notify-retry.timer` with the values from T045
-- [ ] T049 [US3] Add relative symlinks `deploy/ansible/roles/invio/files/invio-notify-retry.service` and `.timer` → `../../../../systemd/…`. Extend `invio_units` and `invio_timers` in `deploy/ansible/roles/invio/vars/main.yml` with the two units and the timer
+- [X] T047 [P] [US3] Create `deploy/systemd/invio-notify-retry.service`, mirroring `invio-run-due.service` (same `[Unit]`, same base `[Service]` keys, `Environment`), with the values from T044
+- [X] T048 [P] [US3] Create `deploy/systemd/invio-notify-retry.timer` with the values from T045
+- [X] T049 [US3] Add relative symlinks `deploy/ansible/roles/invio/files/invio-notify-retry.service` and `.timer` → `../../../../systemd/…`. Extend `invio_units` and `invio_timers` in `deploy/ansible/roles/invio/vars/main.yml` with the two units and the timer
 - [ ] T050 [US3] Run `deploy/scripts/verify-units.sh` (must print nothing), `uv run pytest tests/test_deploy_units.py`, and `molecule test` (default). Document the notify-retry timer in `docs/deployment.md` "Install manually" and "Operating" (exit code 1 when a notification failed or was given up shows as a failed unit; the next hour retries)
 
 **Checkpoint**: Both timers are installed by hand or by the role; failed mails are resent hourly

@@ -1,0 +1,13 @@
+# Missed triggers run once after boot (Persistent=true). The random delay keeps the hourly retry
+# from always starting together with the run-due trigger at :00.
+[Unit]
+Description=invio: retry failed notifications hourly
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+RandomizedDelaySec=300
+Unit=invio-notify-retry.service
+
+[Install]
+WantedBy=timers.target

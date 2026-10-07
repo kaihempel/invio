@@ -262,8 +262,20 @@ def _assert_service_contract(name: str, per_service: dict[str, str]) -> None:
     assert not service["EnvironmentFile"][0].startswith("-")
 
 
+NOTIFY_RETRY = {
+    "ExecStart": "/opt/invio/.venv/bin/invio notify retry",
+    "SyslogIdentifier": "invio-notify-retry",
+    "MemoryMax": "256M",
+    "TimeoutStartSec": "15min",
+}
+
+
 def test_run_due_service_contract() -> None:
     _assert_service_contract("invio-run-due.service", RUN_DUE)
+
+
+def test_notify_retry_service_contract() -> None:
+    _assert_service_contract("invio-notify-retry.service", NOTIFY_RETRY)
 
 
 def _assert_timer_contract(name: str, timer: dict[str, str], unit_name: str) -> None:
@@ -472,3 +484,13 @@ def test_env_template_escapes_backslash_and_quote_in_plain_values_and_keeps_doll
     text = _render_template("invio.env.j2", **{**ENV_VARS, "invio_http_contact": value})
     assert _env_pairs(text)["INVIO_HTTP_CONTACT"] == value
     assert '"a\\"b\\\\c $HOME `id` ${X}"' in text
+
+
+def test_notify_retry_timer_contract() -> None:
+    unit = load("invio-notify-retry.timer")
+    assert "AccuracySec" not in unit["Timer"]  # the 1 min default is fine for an hourly retry
+    _assert_timer_contract(
+        "invio-notify-retry.timer",
+        {"OnCalendar": "hourly", "Persistent": "true", "RandomizedDelaySec": "300"},
+        "invio-notify-retry.service",
+    )

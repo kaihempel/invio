@@ -7,8 +7,10 @@
   vars:
     invio_timer_names:
       - invio-run-due.timer
+      - invio-notify-retry.timer
     invio_service_names:
       - invio-run-due.service
+      - invio-notify-retry.service
   tasks:
     # --- Catch-up after downtime (US1 scenario 3, SC-003, quickstart #20) ---------------------
     - name: Stop the timers

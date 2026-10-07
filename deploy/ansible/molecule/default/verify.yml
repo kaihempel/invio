@@ -28,6 +28,7 @@
         argv: [systemctl, is-enabled, "{{ item }}"]
       loop:
         - invio-run-due.timer
+        - invio-notify-retry.timer
       register: invio_enabled
       changed_when: false
       failed_when: invio_enabled.stdout != 'enabled'
@@ -37,6 +38,7 @@
         argv: [systemctl, is-active, "{{ item }}"]
       loop:
         - invio-run-due.timer
+        - invio-notify-retry.timer
       register: invio_active
       changed_when: false
       failed_when: invio_active.stdout != 'active'
@@ -216,6 +218,78 @@
         - name: Reload systemd after removing the drop-in
           ansible.builtin.systemd_service:
             daemon_reload: true
+
+    # The notify-retry command exists today, so this start is a hard gate (no guard).
+    - name: Check the notify-retry service
+      block:
+        - name: Remember the start time of the notify-retry check
+          ansible.builtin.command:
+            argv: [date, +%s]
+          register: invio_notify_start
+          changed_when: false
+
+        - name: Start the notify-retry service
+          ansible.builtin.command:
+            argv: [systemctl, start, invio-notify-retry.service]
+          changed_when: true
+
+        - name: Check the notify-retry result
+          ansible.builtin.command:
+            argv: [systemctl, show, -p, Result, --value, invio-notify-retry.service]
+          register: invio_notify_result
+          changed_when: false
+          failed_when: invio_notify_result.stdout != 'success'
+
+        - name: Read the notify-retry journal
+          ansible.builtin.shell: |
+            journalctl --sync
+            journalctl -u invio-notify-retry -o cat --since "@{{ invio_notify_start.stdout }}"
+          args:
+            executable: /bin/bash
+          register: invio_notify_journal
+          changed_when: false
+          no_log: true
+
+        - name: Check that the retry reported nothing to do
+          ansible.builtin.assert:
+            that:
+              - "'nothing to retry' in invio_notify_journal.stdout_lines"
+            quiet: true
+          no_log: true
+
+        - name: Check the notify-retry journal contract and that no secret leaked
+          ansible.builtin.command:
+            argv: [/usr/local/bin/check-journal-json.py, --allow-no-json]
+            stdin: "{{ invio_notify_journal.stdout }}"
+          environment:
+            INVIO_CHECK_SECRETS: "{{ invio_verify_secrets }}"
+          changed_when: false
+          no_log: true
+
+    - name: Read the next elapse of the notify-retry timer
+      ansible.builtin.command:
+        argv: [systemctl, show, invio-notify-retry.timer, -p, NextElapseUSecRealtime, --value]
+      register: invio_notify_next
+      changed_when: false
+
+    - name: Convert it to epoch seconds and read the current time
+      ansible.builtin.command:
+        argv: [date, -d, "{{ invio_notify_next.stdout }}", +%s]
+      register: invio_notify_next_epoch
+      changed_when: false
+
+    - name: Read the current time
+      ansible.builtin.command:
+        argv: [date, +%s]
+      register: invio_now_epoch
+      changed_when: false
+
+    - name: Check that the next notify-retry run is at most 65 minutes ahead (hourly + 5 min)
+      ansible.builtin.assert:
+        that:
+          - (invio_notify_next_epoch.stdout | int) - (invio_now_epoch.stdout | int) > 0
+          - (invio_notify_next_epoch.stdout | int) - (invio_now_epoch.stdout | int) <= 3900
+        quiet: true
 
     - name: Read the next elapse of the run-due timer
       ansible.builtin.command:
