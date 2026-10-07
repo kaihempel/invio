@@ -89,10 +89,12 @@
       no_log: true
 
     - name: Check that the grants only cover the invio schema
+      vars:
+        invio_grant_pattern: '^GRANT (USAGE ON \*\.\*|ALL PRIVILEGES ON `invio`\.\*) TO `invio`@`localhost`'
       ansible.builtin.assert:
         that:
           - invio_grants.stdout_lines | length > 0
-          - invio_grants.stdout_lines | reject('match', '^GRANT (USAGE ON \*\.\*|ALL PRIVILEGES ON `invio`\.\*) TO `invio`@`localhost`') | list | length == 0
+          - invio_grants.stdout_lines | reject('match', invio_grant_pattern) | list | length == 0
           - invio_grants.stdout_lines | select('match', '^GRANT ALL PRIVILEGES ON `invio`\.\* ') | list | length == 1
         quiet: true
 
@@ -344,7 +346,7 @@
     - name: Turn the properties into systemd-run arguments
       ansible.builtin.set_fact:
         invio_sandbox_args: >-
-          {% set out = [] %}{% for prop in invio_sandbox_props %}{% set _ = out.extend(['-p', prop]) %}{% endfor %}{{ out }}
+          {% set out = [] %}{% for p in invio_sandbox_props %}{% set _ = out.extend(['-p', p]) %}{% endfor %}{{ out }}
 
     # Each probe target is writable or readable for invio by its permissions alone, so only the
     # sandbox can deny it: directories owned by invio under /etc, /opt and /srv (ProtectSystem),
@@ -374,13 +376,23 @@
               + invio_sandbox_args
               + ['/bin/sh', '-c', item.script] }}
           loop:
-            - {name: write /etc owned by invio, script: "touch /etc/invio-probe/x 2>/dev/null && echo WRITTEN || echo DENIED", want: DENIED}
-            - {name: write /opt owned by invio, script: "touch /opt/invio-probe/x 2>/dev/null && echo WRITTEN || echo DENIED", want: DENIED}
-            - {name: write /srv owned by invio, script: "touch /srv/invio-probe/x 2>/dev/null && echo WRITTEN || echo DENIED", want: DENIED}
-            - {name: read under /home, script: "cat /home/probe/secret 2>/dev/null && echo READ || echo DENIED", want: DENIED}
+            - name: write /etc owned by invio
+              script: "touch /etc/invio-probe/x 2>/dev/null && echo WRITTEN || echo DENIED"
+              want: DENIED
+            - name: write /opt owned by invio
+              script: "touch /opt/invio-probe/x 2>/dev/null && echo WRITTEN || echo DENIED"
+              want: DENIED
+            - name: write /srv owned by invio
+              script: "touch /srv/invio-probe/x 2>/dev/null && echo WRITTEN || echo DENIED"
+              want: DENIED
+            - name: read under /home
+              script: "cat /home/probe/secret 2>/dev/null && echo READ || echo DENIED"
+              want: DENIED
             - {name: list /home, script: "ls -A /home 2>/dev/null || true", want: ""}
             - {name: write the state directory, script: "touch /var/lib/invio/probe && echo OK", want: OK}
-            - {name: sudo with a NOPASSWD rule, script: "sudo -n /bin/true >/dev/null 2>&1 && echo ALLOWED || echo DENIED", want: DENIED}
+            - name: sudo with a NOPASSWD rule
+              script: "sudo -n /bin/true >/dev/null 2>&1 && echo ALLOWED || echo DENIED"
+              want: DENIED
             - name: resolve localhost
               script: >-
                 /opt/invio/.venv/bin/python -c "import socket;

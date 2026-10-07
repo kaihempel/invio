@@ -39,8 +39,10 @@
     mode: "0755"
 
 - name: Download the pinned uv release
+  vars:
+    invio_uv_archive: "uv-{{ ansible_architecture }}-unknown-linux-gnu.tar.gz"
   ansible.builtin.get_url:
-    url: "https://github.com/astral-sh/uv/releases/download/{{ invio_uv_version }}/uv-{{ ansible_architecture }}-unknown-linux-gnu.tar.gz"
+    url: "https://github.com/astral-sh/uv/releases/download/{{ invio_uv_version }}/{{ invio_uv_archive }}"
     dest: "/var/cache/invio-uv/uv-{{ invio_uv_version }}-{{ ansible_architecture }}.tar.gz"
     checksum: "sha256:{{ invio_uv_sha256[ansible_architecture] }}"
     owner: root

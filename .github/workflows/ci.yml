@@ -1,3 +1,4 @@
+---
 name: CI
 
 on:
@@ -38,7 +39,7 @@ jobs:
         run: uv run pytest --cov
 
   deploy-static:
-    # Static checks for deploy/: unit verification, Ansible lint and the unit contract tests.
+    # Static checks for deploy/: unit verification, YAML and Ansible lint and the unit contract tests.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -61,6 +62,9 @@ jobs:
           -r deploy/ansible/requirements.yml
           -r deploy/ansible/molecule/requirements.yml
           -p deploy/ansible/.collections
+
+      - name: Lint all YAML files (yamllint, config in .yamllint)
+        run: uv run --locked --group deploy yamllint --strict .
 
       - name: Lint the Ansible role
         working-directory: deploy/ansible
