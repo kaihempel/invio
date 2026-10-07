@@ -104,16 +104,36 @@ def test_deploy_collection_requirement_files_exist() -> None:
 
 
 def _leak_check_command() -> list[str]:
-    step = _step(DEPLOY, "molecule", "Converge verbosely and check the log for secrets")
-    assert step["shell"] == "bash"  # GitHub runs bash with -eo pipefail, so tee keeps the status
-    assert step["working-directory"] == "deploy/ansible"
+    converge = _step(DEPLOY, "molecule", "Converge verbosely")
+    assert (
+        converge["shell"] == "bash"
+    )  # GitHub runs bash with -eo pipefail, so tee keeps the status
+    (line,) = _run_lines(converge)
+    assert "molecule converge" in line and "-v" in shlex.split(line)
+    assert "| tee converge.log" in line
+    step = _step(DEPLOY, "molecule", "Check the converge log for secrets")
+    assert step["working-directory"] == converge["working-directory"] == "deploy/ansible"
     (line,) = [ln for ln in _run_lines(step) if "check-no-secrets.sh" in ln]
     argv = shlex.split(line)
     assert (ANSIBLE / argv[0]).resolve() == REPO / "deploy" / "scripts" / "check-no-secrets.sh"
-    converge = [ln for ln in _run_lines(step) if "molecule converge" in ln]
-    assert converge and "-v" in shlex.split(converge[0]) and "| tee converge.log" in converge[0]
     assert argv[1] == "converge.log"
     return argv[2:]
+
+
+def test_leak_check_and_destroy_run_even_when_converge_fails() -> None:
+    names = [step.get("name") for step in _steps(DEPLOY, "molecule")]
+    converge = names.index("Converge verbosely")
+    assert names[converge + 1 : converge + 3] == [
+        "Check the converge log for secrets",
+        "Destroy the converge instances",
+    ]
+    for name in names[converge + 1 : converge + 3]:
+        assert "always()" in _step(DEPLOY, "molecule", name)["if"]
+
+
+@pytest.mark.parametrize("workflow", ["deploy.yml", "ci.yml"])
+def test_workflow_token_is_read_only(workflow: str) -> None:
+    assert load_workflow(workflow)["permissions"] == {"contents": "read"}
 
 
 def _scenario_secrets(scenario: str) -> set[str]:
@@ -179,3 +199,9 @@ def test_deploy_static_is_not_in_the_opt_in_workflow() -> None:
     for job in CI["jobs"].values():
         for step in job["steps"]:
             assert not re.search(r"\bmolecule (test|converge|verify|create)\b", step.get("run", ""))
+
+
+def test_deploy_static_fails_instead_of_skipping_deploy_tests() -> None:
+    step = _step(CI, "deploy-static", "Unit contract tests")
+    assert step["env"]["INVIO_REQUIRE_DEPLOY_TOOLS"] == "1"
+    assert "--group deploy" in step["run"]

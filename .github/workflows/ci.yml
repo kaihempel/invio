@@ -4,6 +4,9 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   checks:
     runs-on: ubuntu-latest
@@ -64,7 +67,10 @@ jobs:
         run: uv run --locked --group deploy ansible-lint
 
       - name: Unit contract tests
-        run: uv run --locked pytest tests/test_deploy_*.py
+        env:
+          # fail instead of skip when ansible-playbook or systemd-analyze is missing
+          INVIO_REQUIRE_DEPLOY_TOOLS: "1"
+        run: uv run --locked --group deploy pytest -rs tests/test_deploy_*.py
 
   mariadb:
     # Optional: runs the persistence tests against a real MariaDB (non-blocking).

@@ -8,6 +8,8 @@ on:
   workflow_dispatch:
   schedule:
     # weekly, to notice upstream changes (Debian images, uv, PyPI) even when deploy/ is untouched
+    # On a scheduled run the update test starts from the previous commit on main (REF~1), not
+    # from the last release: it is a smoke test of the update path, not a release upgrade test.
     - cron: "17 4 * * 1"
   pull_request:
     paths:
@@ -25,6 +27,9 @@ on:
       - "pyproject.toml"
       - "uv.lock"
       - "src/invio/db/**"
+
+permissions:
+  contents: read
 
 jobs:
   molecule:
@@ -62,13 +67,24 @@ jobs:
           -r deploy/ansible/molecule/requirements.yml
           -p deploy/ansible/.collections
 
-      - name: Converge verbosely and check the log for secrets
+      - name: Converge verbosely
         shell: bash
         working-directory: deploy/ansible
         run: |
           uv run --locked --only-group deploy molecule converge -s ${{ matrix.scenario }} -- -v 2>&1 | tee converge.log
+
+      - name: Check the converge log for secrets
+        # always(): a failed converge is when the verbose log is most likely to leak
+        if: ${{ always() && hashFiles('deploy/ansible/converge.log') != '' }}
+        shell: bash
+        working-directory: deploy/ansible
+        run: |
           ../scripts/check-no-secrets.sh converge.log ci-secret-db ci-secret-mistral ci-secret-admin
-          uv run --locked --only-group deploy molecule destroy -s ${{ matrix.scenario }}
+
+      - name: Destroy the converge instances
+        if: ${{ always() }}
+        working-directory: deploy/ansible
+        run: uv run --locked --only-group deploy molecule destroy -s ${{ matrix.scenario }}
 
       - name: Molecule test
         working-directory: deploy/ansible

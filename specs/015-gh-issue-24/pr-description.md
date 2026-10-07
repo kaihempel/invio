@@ -29,6 +29,12 @@ invio can now run unattended on a Debian 12 or 13 server.
 
 `src/invio/` is not changed.
 
+> **Provisionally verified: journal JSON for `invio run-due`.** `invio run-due` does not exist
+> until #23 is merged. Molecule therefore skips the run-due start (`TODO(#23)` guard) and checks
+> the journal contract on the real `invio-run-due.service` with `ExecStart` temporarily swapped
+> for `invio db upgrade`. The acceptance criterion "journalctl -u invio-run-due shows JSON log
+> lines" is only fully verified once #23 lands and the guard is removed (see "Status of #23").
+
 ## New dependency group (constitution: justify new dependencies)
 
 `pyproject.toml` gets a non-default dependency group `deploy` (`ansible-core>=2.17,<2.19`,
@@ -112,7 +118,8 @@ has `--if-available` for pre-commit; CI never passes it.
 
 ## Local verification
 
-Run on Docker Desktop (macOS, arm64) with `INVIO_TEST_SRC` pointing at a clone of the worktree:
+Run on Docker Desktop (macOS, arm64) with `INVIO_TEST_SRC` pointing at a clone of the worktree.
+These are local results only; they are **not yet verified in CI**:
 
 - `molecule test` for `default` (Debian 12 and 13) and for `external-db`: all stages passed
   (converge, idempotence, side effect, verify).
@@ -122,3 +129,10 @@ Run on Docker Desktop (macOS, arm64) with `INVIO_TEST_SRC` pointing at a clone o
   `deploy.yml` repeats this for both scenarios.
 
 CI (`deploy.yml`) remains the authoritative run.
+Each `deploy.yml` matrix job runs a verbose converge (for the secret-leak check), destroys it and
+then runs the full `molecule test`, so a job takes roughly twice as long as one `molecule test`.
+
+`ci.yml` `deploy-static` sets `INVIO_REQUIRE_DEPLOY_TOOLS=1`, so a deploy test that would skip
+because `ansible-playbook` or `systemd-analyze` is missing fails the job instead
+(`tests/conftest.py`). Both workflows run with a read-only `GITHUB_TOKEN`; in `deploy.yml` the
+leak check and the destroy also run after a failed converge.

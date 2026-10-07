@@ -37,6 +37,24 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
             item.add_marker(skip)
 
 
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[None]) -> pytest.TestReport:
+    """Turn skipped deploy tests into failures when ``INVIO_REQUIRE_DEPLOY_TOOLS=1``.
+
+    The deploy tests skip without ``ansible-playbook`` or ``systemd-analyze``. CI sets the
+    variable so a missing tool fails the job instead of hiding the tests.
+    """
+    report: pytest.TestReport = yield
+    if (
+        report.skipped
+        and os.environ.get("INVIO_REQUIRE_DEPLOY_TOOLS") == "1"
+        and item.path.name.startswith("test_deploy_")
+    ):
+        report.outcome = "failed"
+        report.longrepr = f"skipped although INVIO_REQUIRE_DEPLOY_TOOLS=1: {report.longrepr}"
+    return report
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _discovered_providers() -> None:
     """Run real provider discovery once, so provider modules register in the real registry.
