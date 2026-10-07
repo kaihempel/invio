@@ -230,6 +230,37 @@ JOURNAL_ENV = frozenset(
         "XDG_CACHE_HOME=/var/lib/invio/cache",
     }
 )
+HARDENING: Expected = {
+    # required by the issue (FR-006)
+    "NoNewPrivileges": "yes",
+    "ProtectSystem": "strict",
+    "ProtectHome": "yes",
+    "PrivateTmp": "yes",
+    # additional low-risk set (research R8)
+    "PrivateDevices": "yes",
+    "ProtectKernelTunables": "yes",
+    "ProtectKernelModules": "yes",
+    "ProtectKernelLogs": "yes",
+    "ProtectControlGroups": "yes",
+    "ProtectClock": "yes",
+    "ProtectHostname": "yes",
+    "RestrictSUIDSGID": "yes",
+    "RestrictRealtime": "yes",
+    "RestrictNamespaces": "yes",
+    "LockPersonality": "yes",
+    "SystemCallArchitectures": "native",
+    "RestrictAddressFamilies": {"AF_UNIX", "AF_INET", "AF_INET6"},
+    "CapabilityBoundingSet": set(),
+}
+FORBIDDEN = ("MemoryDenyWriteExecute", "PrivateNetwork", "IPAddressDeny", "DynamicUser")
+# Directives that could run another command (possibly as root) are not part of the contract.
+FORBIDDEN_EXEC = ("ExecStartPre", "ExecStartPost", "ExecStop", "ExecStopPost", "ExecReload")
+ALLOWED_SERVICE_KEYS = frozenset(
+    {"Environment", "ExecStart", "SyslogIdentifier", "MemoryMax", "TimeoutStartSec"}
+    | set(SERVICE_BASE)
+    | set(HARDENING)
+)
+ALLOWED_UNIT_KEYS = frozenset({"Description", *SERVICE_UNIT})
 PER_SERVICE_KEYS = ("ExecStart", "SyslogIdentifier", "MemoryMax", "TimeoutStartSec")
 RUN_DUE = {
     "ExecStart": "/opt/invio/.venv/bin/invio run-due",
@@ -250,9 +281,8 @@ def _assert_service_contract(name: str, per_service: dict[str, str]) -> None:
     assert set(unit) == {"Unit", "Service"}, "services have no [Install] section (FR-004)"
     assert unit["Unit"]["Description"][0] != ""
     assert_directives(unit, "Unit", SERVICE_UNIT)
-    assert_directives(
-        unit, "Service", {**SERVICE_BASE, "Environment": set(JOURNAL_ENV), **per_service}
-    )
+    expected: Expected = {**SERVICE_BASE, **HARDENING, "Environment": set(JOURNAL_ENV)}
+    assert_directives(unit, "Service", {**expected, **per_service})
     service = unit["Service"]
     # stdout and stderr go to the journal by default (research R9): no override
     assert "StandardOutput" not in service
@@ -494,3 +524,53 @@ def test_notify_retry_timer_contract() -> None:
         {"OnCalendar": "hourly", "Persistent": "true", "RandomizedDelaySec": "300"},
         "invio-notify-retry.service",
     )
+
+
+SERVICES = ("invio-run-due.service", "invio-notify-retry.service")
+
+
+def _exec_start_command(value: str) -> str:
+    """Strip systemd's ExecStart prefixes (``-@:+!``) to expose the command."""
+    return value.lstrip("-@:+!")
+
+
+@pytest.mark.parametrize("name", SERVICES)
+def test_services_have_no_unlisted_directives(name: str) -> None:
+    unit = load(name)
+    assert set(unit["Unit"]) <= ALLOWED_UNIT_KEYS, set(unit["Unit"]) - ALLOWED_UNIT_KEYS
+    assert set(unit["Service"]) <= ALLOWED_SERVICE_KEYS, set(unit["Service"]) - ALLOWED_SERVICE_KEYS
+    for key in (*FORBIDDEN, *FORBIDDEN_EXEC):
+        assert key not in unit["Service"], f"{key} is forbidden"
+    assert unit["Service"]["User"] != ["root"]
+    (exec_start,) = unit["Service"]["ExecStart"]
+    assert exec_start == _exec_start_command(exec_start), "ExecStart must have no prefix"
+    assert exec_start.startswith("/opt/invio/.venv/bin/invio ")
+
+
+def test_services_differ_only_in_the_per_service_keys() -> None:
+    run_due, notify = (load(name)["Service"] for name in SERVICES)
+    assert set(run_due) == set(notify)
+    differing = {key for key in run_due if run_due[key] != notify[key]}
+    assert differing == set(PER_SERVICE_KEYS)
+    assert load(SERVICES[0])["Unit"].keys() == load(SERVICES[1])["Unit"].keys()
+
+
+def test_exec_start_prefix_helper() -> None:
+    assert _exec_start_command("-/bin/x") == "/bin/x"
+    assert _exec_start_command("+!@:/bin/x") == "/bin/x"
+    assert _exec_start_command("/bin/x") == "/bin/x"
+
+
+def test_systemd_directory_has_no_drop_ins_or_stray_files() -> None:
+    entries = sorted(path.name for path in SYSTEMD.iterdir())
+    assert not [name for name in entries if name.endswith(".d")]
+    assert all(name.endswith((".service", ".timer")) for name in entries)
+
+
+def test_memory_override_template(tmp_path: Path) -> None:
+    text = _render_template("memory-override.conf.j2", memory_max="2G")
+    path = tmp_path / "50-invio-role.conf"
+    path.write_text(text, encoding="utf-8")
+    unit = parse_unit(path)
+    assert unit == {"Service": {"MemoryMax": ["2G"]}}
+    assert "Managed by Ansible role invio" in text.splitlines()[0]

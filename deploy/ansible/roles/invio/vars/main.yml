@@ -22,3 +22,11 @@ invio_llm_providers:
   - openai
   - anthropic
   - google
+# Memory ceilings: a drop-in is written only when the value differs from the shipped default.
+invio_memory_overrides:
+  - unit: invio-run-due.service
+    value: "{{ invio_run_due_memory_max }}"
+    default: 1G
+  - unit: invio-notify-retry.service
+    value: "{{ invio_notify_retry_memory_max }}"
+    default: 256M
