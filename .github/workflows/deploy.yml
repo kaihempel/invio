@@ -71,6 +71,14 @@ jobs:
           -r deploy/ansible/molecule/requirements.yml
           -p deploy/ansible/.collections
 
+      # Outside converge.log: the create stage prints the platform definitions, and the
+      # external-db server container gets its root password through its environment.
+      - name: Create and prepare the test instances
+        working-directory: deploy/ansible
+        run: |
+          uv run --locked --only-group deploy molecule create -s ${{ matrix.scenario }}
+          uv run --locked --only-group deploy molecule prepare -s ${{ matrix.scenario }}
+
       - name: Converge verbosely
         shell: bash
         working-directory: deploy/ansible
