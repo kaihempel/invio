@@ -3,7 +3,7 @@
 # matching secret, never the secret itself.
 #
 # usage: check-no-secrets.sh <logfile> <secret>...
-# exit:  0 no secret found, 1 a secret was found, 2 usage error
+# exit:  0 no secret found, 1 a secret was found, 2 usage error or unreadable log
 set -euo pipefail
 
 if [ "$#" -lt 2 ]; then
@@ -36,9 +36,15 @@ for secret in "$@"; do
     if [ -z "$secret" ]; then
         continue
     fi
-    if grep -qF -e "$secret" "$log"; then
+    # grep exits 2 for a read error; that must not count as "not found".
+    rc=0
+    grep -qF -e "$secret" "$log" || rc=$?
+    if [ "$rc" -eq 0 ]; then
         echo "secret #$index appears in $log" >&2
         found=1
+    elif [ "$rc" -gt 1 ]; then
+        echo "error: cannot read $log" >&2
+        exit 2
     fi
 done
 exit "$found"

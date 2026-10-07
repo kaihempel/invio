@@ -2,6 +2,7 @@
 """Check journal output of invio services (SC-007): JSON log lines and no secrets.
 
 usage: journalctl -u invio-run-due -o cat | check-journal-json.py [--allow-no-json]
+       [--require-secrets]
 
 Every line that starts with ``{`` must be a JSON object with string ``level`` and ``message``
 keys. Other lines (plain stdout summaries such as ``nothing to retry``) are allowed. Without
@@ -9,7 +10,9 @@ keys. Other lines (plain stdout summaries such as ``nothing to retry``) are allo
 
 Secrets: ``INVIO_CHECK_SECRETS`` holds newline-separated values (empty entries are ignored,
 values shorter than 8 characters are rejected). Each value is searched in its raw, URL-encoded,
-backslash-escaped and JSON-escaped form in every line.
+backslash-escaped and JSON-escaped form in every line. With ``--require-secrets`` an empty
+``INVIO_CHECK_SECRETS`` is a usage error, so a caller that forgets to set it cannot pass.
+Lines are split on ``\n`` only: a JSON record may contain unescaped U+2028 or U+0085.
 
 Exit codes: 0 pass, 1 violation, 2 usage error or no input, 3 unexpected internal error.
 Messages contain line numbers and fixed reasons only, never the text of a line or a secret.
@@ -35,10 +38,13 @@ def _variants(secret: str) -> set[str]:
     }
 
 
-def _load_secrets() -> list[set[str]] | None:
+def _load_secrets(*, required: bool) -> list[set[str]] | None:
     """Return the variants of each configured secret, or ``None`` for a usage error."""
     raw = os.environ.get("INVIO_CHECK_SECRETS", "")
     secrets = [entry for entry in raw.split("\n") if entry.strip()]
+    if required and not secrets:
+        print("error: --require-secrets given but INVIO_CHECK_SECRETS is empty", file=sys.stderr)
+        return None
     if any(len(entry) < MIN_SECRET_LENGTH for entry in secrets):
         print(
             f"error: each secret in INVIO_CHECK_SECRETS must have at least {MIN_SECRET_LENGTH} "
@@ -65,18 +71,24 @@ def _check_json_line(line: str) -> str | None:
 
 def run(argv: list[str]) -> int:
     allow_no_json = False
+    require_secrets = False
     for arg in argv:
         if arg == "--allow-no-json":
             allow_no_json = True
+        elif arg == "--require-secrets":
+            require_secrets = True
         else:
-            print("usage: check-journal-json.py [--allow-no-json]", file=sys.stderr)
+            print(
+                "usage: check-journal-json.py [--allow-no-json] [--require-secrets]",
+                file=sys.stderr,
+            )
             return 2
-    secrets = _load_secrets()
+    secrets = _load_secrets(required=require_secrets)
     if secrets is None:
         return 2
 
     text = sys.stdin.buffer.read().decode("utf-8", errors="replace")
-    lines = text.splitlines()
+    lines = [line.removesuffix("\r") for line in text.split("\n")]
     if not any(line.strip() for line in lines):
         print("error: no log lines on stdin", file=sys.stderr)
         return 2

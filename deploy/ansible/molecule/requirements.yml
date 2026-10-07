@@ -2,6 +2,6 @@
 # Test-only collections: the Molecule Docker driver needs community.docker.
 collections:
   - name: community.docker
-    version: ">=3.10.0"
+    version: "==5.4.0"
   - name: ansible.mysql
-    version: ">=4.2.1"
+    version: "==5.2.0"

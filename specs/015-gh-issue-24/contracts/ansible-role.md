@@ -1,7 +1,7 @@
 # Contract: Ansible role `invio`
 
 Location: `deploy/ansible/roles/invio/`. Example playbook: `deploy/ansible/playbook.example.yml`.
-Collections: `deploy/ansible/requirements.yml` (`community.mysql`).
+Collections: `deploy/ansible/requirements.yml` (`ansible.mysql`, exact version pinned).
 Research: [R1–R6](../research.md), [R10](../research.md#r10--mariadb-handling-clarification-q2), [R11](../research.md#r11--units-in-the-repository-vs-units-installed-by-the-role).
 
 ## Requirements
@@ -18,7 +18,7 @@ Research: [R1–R6](../research.md), [R10](../research.md#r10--mariadb-handling-
 
 | Variable | Rule |
 |---|---|
-| `invio_git_repo` | non-empty (URL or local path) |
+| `invio_git_repo` | non-empty (URL or local path); no credentials in the URL |
 | `invio_git_version` | non-empty; tag or commit recommended |
 | `invio_db_password` | non-empty, no newline |
 | `invio_smtp_host`, `invio_smtp_from` | non-empty |
@@ -26,7 +26,8 @@ Research: [R1–R6](../research.md), [R10](../research.md#r10--mariadb-handling-
 | `invio_llm_api_keys` | dict with at least one non-empty value; keys in `mistral`, `openai`, `anthropic`, `google` |
 | `invio_db_admin_user`, `invio_db_admin_password` | required **only** when `invio_mariadb_manage_server` is `false` and `invio_db_host` isn't `localhost` |
 
-All string variables that go into the env file must not contain newlines. Every failure message
+`invio_mariadb_manage_server: true` requires `invio_db_host: localhost`.
+All string variables that go into the env file must not contain newlines or carriage returns. Every failure message
 names the variable (for example `invio_db_password is required`). Validation runs before any task
 that changes the host.
 
@@ -69,8 +70,10 @@ that changes the host.
 
 ## Tags
 
-`invio`, `invio:validate`, `invio:mariadb`, `invio:config`, `invio:install`, `invio:units`.
-`invio:config` lets the operator update secrets without touching the code.
+`invio`, `invio:validate`, `invio:mariadb`, `invio:account`, `invio:config`, `invio:install`,
+`invio:units`. `invio:config` lets the operator update secrets without touching the code.
+`invio:install` also selects the unit tasks, so an update run with only that tag starts the
+timers it stopped.
 
 ## Behavioural guarantees
 

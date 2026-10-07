@@ -16,9 +16,8 @@ from pathlib import Path
 
 import pytest
 
-REPO = Path(__file__).resolve().parents[1]
-SCRIPTS = REPO / "deploy" / "scripts"
-SYSTEMD = REPO / "deploy" / "systemd"
+from tests.deploy_helpers import SCRIPTS, SYSTEMD
+
 VERIFY_UNITS = SCRIPTS / "verify-units.sh"
 NO_SECRETS = SCRIPTS / "check-no-secrets.sh"
 BASH = shutil.which("bash") or "/bin/bash"
@@ -119,6 +118,24 @@ def test_no_secrets_finds_a_secret_in_a_log_with_binary_bytes(tmp_path: Path) ->
     assert no_secrets(path, "ci-secret-db").returncode == 1
 
 
+def test_no_secrets_all_secrets_empty_is_a_usage_error(log: Path) -> None:
+    for secrets in (("",), ("", "")):
+        result = no_secrets(log, *secrets)
+        assert result.returncode == 2, secrets
+        assert "usage" in result.stderr or "empty" in result.stderr
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads files regardless of their mode")
+def test_no_secrets_unreadable_log_is_an_error_not_a_pass(log: Path) -> None:
+    log.chmod(0)
+    try:
+        result = no_secrets(log, "not-in-the-log")
+    finally:
+        log.chmod(0o644)
+    assert result.returncode == 2
+    assert "cannot read" in result.stderr
+
+
 def test_no_secrets_does_not_decode_url_encoding(log: Path) -> None:
     # Documents the limit: only the raw form is searched. The CI secrets therefore must not
     # contain characters that urlencode changes (see test_deploy_workflows).
@@ -209,7 +226,22 @@ def test_verify_units_fails_without_a_unit(stub_analyze: Path, tmp_path: Path) -
     assert not (tmp_path / "args.txt").exists(), "systemd-analyze must not run"
 
 
-def test_verify_units_rejects_unknown_arguments(stub_analyze: Path, tmp_path: Path) -> None:
+def test_verify_units_verifies_every_copied_unit_not_only_invio_ones(
+    stub_analyze: Path, tmp_path: Path
+) -> None:
+    tree = tmp_path / "repo"
+    (tree / "deploy" / "scripts").mkdir(parents=True)
+    (tree / "deploy" / "systemd").mkdir()
+    (tree / "deploy" / "systemd" / "other-thing.timer").write_text("[Timer]\n", encoding="utf-8")
+    (tree / "deploy" / "systemd" / "invio-a.service").write_text("[Service]\n", encoding="utf-8")
+    script = Path(shutil.copy2(VERIFY_UNITS, tree / "deploy" / "scripts"))
+    result = verify_units(stub_analyze, tmp_path, script=script)
+    assert result.returncode == 0, result.stderr
+    args = (tmp_path / "args.txt").read_text(encoding="utf-8").splitlines()
+    assert sorted(Path(arg).name for arg in args[2:]) == ["invio-a.service", "other-thing.timer"]
+
+
+def test_verify_units_rejects_unknown_arguments() -> None:
     result = _run([BASH, str(VERIFY_UNITS), "--bogus"])
     assert result.returncode == 2
     assert "usage:" in result.stderr
@@ -271,25 +303,3 @@ def test_verify_units_real_systemd_rejects_a_broken_unit(
 def test_verify_units_real_systemd_accepts_the_shipped_units() -> None:
     result = _run([BASH, str(VERIFY_UNITS)])
     assert (result.returncode, result.stdout, result.stderr) == (0, "", "")
-
-
-def test_no_secrets_all_secrets_empty_is_a_usage_error(log: Path) -> None:
-    for secrets in (("",), ("", "")):
-        result = no_secrets(log, *secrets)
-        assert result.returncode == 2, secrets
-        assert "usage" in result.stderr or "empty" in result.stderr
-
-
-def test_verify_units_verifies_every_copied_unit_not_only_invio_ones(
-    stub_analyze: Path, tmp_path: Path
-) -> None:
-    tree = tmp_path / "repo"
-    (tree / "deploy" / "scripts").mkdir(parents=True)
-    (tree / "deploy" / "systemd").mkdir()
-    (tree / "deploy" / "systemd" / "other-thing.timer").write_text("[Timer]\n", encoding="utf-8")
-    (tree / "deploy" / "systemd" / "invio-a.service").write_text("[Service]\n", encoding="utf-8")
-    script = Path(shutil.copy2(VERIFY_UNITS, tree / "deploy" / "scripts"))
-    result = verify_units(stub_analyze, tmp_path, script=script)
-    assert result.returncode == 0, result.stderr
-    args = (tmp_path / "args.txt").read_text(encoding="utf-8").splitlines()
-    assert sorted(Path(arg).name for arg in args[2:]) == ["invio-a.service", "other-thing.timer"]

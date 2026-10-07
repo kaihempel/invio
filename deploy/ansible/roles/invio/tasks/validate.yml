@@ -21,7 +21,7 @@
       - item in vars
       - lookup('vars', item) is string
       - lookup('vars', item) | length > 0
-      - "'\\n' not in lookup('vars', item)"
+      - "'\\n' not in lookup('vars', item) and '\\r' not in lookup('vars', item)"
     fail_msg: "{{ item }} is required and must be a non-empty single-line string"
     quiet: true
   loop:
@@ -31,6 +31,16 @@
     - invio_smtp_host
     - invio_smtp_from
     - invio_http_contact
+
+- name: Check that invio_git_repo carries no credentials
+  ansible.builtin.assert:
+    that:
+      - invio_git_repo is not search('^https?://[^/@]+@')
+      - invio_git_repo is not search('^[A-Za-z][A-Za-z0-9+.-]*://[^/@:]+:[^/@]*@')
+    fail_msg: >-
+      invio_git_repo must not contain a user name or token (it would be stored readable in
+      /opt/invio/.git/config); use an SSH URL with invio_git_key_file instead
+    quiet: true
 
 - name: Check the git version is a tag or a full commit SHA
   ansible.builtin.assert:
@@ -43,7 +53,7 @@
   ansible.builtin.assert:
     that:
       - lookup('vars', item) is string or lookup('vars', item) is number
-      - "'\\n' not in (lookup('vars', item) | string)"
+      - "'\\n' not in (lookup('vars', item) | string) and '\\r' not in (lookup('vars', item) | string)"
     fail_msg: "{{ item }} must be a single-line string"
     quiet: true
   loop:
@@ -62,7 +72,7 @@
   ansible.builtin.assert:
     that:
       - lookup('vars', item) is string
-      - "'\\n' not in lookup('vars', item)"
+      - "'\\n' not in lookup('vars', item) and '\\r' not in lookup('vars', item)"
     fail_msg: "{{ item }} must be a single-line string"
     quiet: true
   loop:
@@ -83,7 +93,7 @@
       - invio_llm_api_keys is mapping
       - invio_llm_api_keys | dict2items | selectattr('value', 'truthy') | list | length > 0
       - invio_llm_api_keys.keys() | list | difference(invio_llm_providers) | length == 0
-      - invio_llm_api_keys.values() | map('string') | join('|') is not search('\n')
+      - invio_llm_api_keys.values() | map('string') | join('|') is not search('[\r\n]')
     fail_msg: >-
       invio_llm_api_keys must be a mapping from provider (mistral, openai, anthropic, google)
       to a single-line API key, with at least one non-empty key
@@ -95,11 +105,12 @@
       - invio_env_extra is mapping
       - invio_env_extra.keys() | reject('match', '^INVIO_[A-Z0-9_]+$') | list | length == 0
       - invio_env_extra.keys() | list | intersect(invio_managed_env_keys) | length == 0
-      - invio_env_extra.values() | map('string') | join('|') is not search('\n')
+      - invio_env_extra.values() | select('boolean') | list | length == 0
+      - invio_env_extra.values() | map('string') | join('|') is not search('[\r\n]')
     fail_msg: >-
       invio_env_extra must be a mapping whose keys match ^INVIO_[A-Z0-9_]+$, are not set by
       the role itself (use the dedicated invio_* variable instead; INVIO_ENV_FILE is never set)
-      and whose values are single-line strings
+      and whose values are single-line strings or numbers (quote booleans: "true")
     quiet: true
 
 - name: Check the database administrator for an external server
@@ -114,6 +125,16 @@
       invio_mariadb_manage_server is false and invio_db_host is not localhost
     quiet: true
   when: not invio_mariadb_manage_server and invio_db_host != 'localhost'
+
+- name: Check that a managed server is local
+  ansible.builtin.assert:
+    that:
+      - invio_db_host == 'localhost'
+    fail_msg: >-
+      invio_mariadb_manage_server installs a local server: set invio_db_host to localhost, or set
+      invio_mariadb_manage_server to false for a remote server
+    quiet: true
+  when: invio_mariadb_manage_server
 
 - name: Check the memory limits and the update timeout
   ansible.builtin.assert:

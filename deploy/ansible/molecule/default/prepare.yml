@@ -3,21 +3,8 @@
   hosts: all
   become: true
   tasks:
-    # The role clones from a copy of the mounted repository that lives on the container's own
-    # file system. Docker Desktop (macOS) fails object reads of the checkout tool on a read-only
-    # bind mount with "Permission denied"; a plain file copy (clone --no-hardlinks) is not affected, and
-    # the copy keeps the test independent of file ownership on the mount.
-    - name: Install the version control tool to copy the repository under test
-      ansible.builtin.apt:
-        name: git
-        state: present
-        update_cache: true
-        cache_valid_time: 3600
-
-    - name: Copy the repository under test from the read-only mount
-      ansible.builtin.command:
-        argv: [git, clone, --no-hardlinks, --no-checkout, /src, /srv/invio-src]
-        creates: /srv/invio-src
+    - name: Copy the repository under test
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/../shared/tasks/copy-source.yml"
 
     - name: Run the role with an empty database password
       block:

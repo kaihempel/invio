@@ -20,7 +20,7 @@ describes the same steps by hand. Paths on the host:
 | `/opt/invio` | Git checkout (root-owned), `/opt/invio/.venv` the virtual environment |
 | `/opt/invio-python` | uv-managed Python 3.12 |
 | `/usr/local/bin/uv` | pinned uv |
-| `/etc/invio/invio.env` | settings and secrets (`invio:invio`, mode `0600`) |
+| `/etc/invio/invio.env` | settings and secrets (`root:invio`, mode `0640`) |
 | `/etc/invio/deployed-revision` | commit that was last migrated |
 | `/var/lib/invio` | state, cache and archive; the only path the services may write |
 | `/etc/systemd/system/invio-*` | the four units, copied unchanged from `deploy/systemd/` |
@@ -73,7 +73,7 @@ Required (validated first; a failure names the variable and nothing on the host 
 
 | Variable | Rule |
 |---|---|
-| `invio_git_repo` | URL or path of the repository |
+| `invio_git_repo` | URL or path of the repository; no user name or token in it (use `invio_git_key_file`) |
 | `invio_git_version` | tag or full 40-character commit SHA (abbreviated SHAs are rejected) |
 | `invio_db_password` | non-empty, single line |
 | `invio_smtp_host`, `invio_smtp_from` | non-empty |
@@ -85,7 +85,7 @@ Optional (defaults in `defaults/main.yml`):
 
 | Variable | Default |
 |---|---|
-| `invio_mariadb_manage_server` | `true` |
+| `invio_mariadb_manage_server` | `true` (requires `invio_db_host: localhost`) |
 | `invio_db_host`, `invio_db_port`, `invio_db_name`, `invio_db_user`, `invio_db_user_host` | `localhost`, `3306`, `invio`, `invio`, `localhost` |
 | `invio_git_key_file` | unset (deploy key on the target, for private repositories) |
 | `invio_uv_version`, `invio_uv_sha256` | pinned release; the checksum is a mapping keyed by CPU architecture (`x86_64`, `aarch64`) |
@@ -119,7 +119,8 @@ differs from the database host. The role never drops a database, user or table.
 ### Tags
 
 `invio` (everything), `invio:validate`, `invio:mariadb`, `invio:account`, `invio:config`,
-`invio:install`, `invio:units`. `invio:validate` always runs.
+`invio:install`, `invio:units`. `invio:validate` always runs. `invio:install` also runs
+the unit tasks: an update stops the timers, and they must be started again in the same run.
 
 ## Install manually
 
@@ -173,7 +174,7 @@ role uses.
 
    ```bash
    install -d -o root -g invio -m 0750 /etc/invio
-   install -o invio -g invio -m 0600 /opt/invio/deploy/env/invio.env.example /etc/invio/invio.env
+   install -o root -g invio -m 0640 /opt/invio/deploy/env/invio.env.example /etc/invio/invio.env
    ```
 
    Edit `/etc/invio/invio.env` and replace every placeholder (see
@@ -185,7 +186,8 @@ role uses.
    ```bash
    systemd-run --wait --pipe --collect --quiet --uid=invio --gid=invio \
      -p EnvironmentFile=/etc/invio/invio.env -p WorkingDirectory=/var/lib/invio \
-     -p StateDirectory=invio -E PYTHONDONTWRITEBYTECODE=1 -E HOME=/var/lib/invio \
+     -p StateDirectory=invio -p StateDirectoryMode=0750 -p UMask=0027 \
+     -E PYTHONDONTWRITEBYTECODE=1 -E HOME=/var/lib/invio -E XDG_CACHE_HOME=/var/lib/invio/cache \
      /opt/invio/.venv/bin/invio db upgrade
    ```
 
@@ -212,7 +214,7 @@ The services read `/etc/invio/invio.env` through systemd's `EnvironmentFile=` (w
 | Path | Owner:group | Mode |
 |---|---|---|
 | `/etc/invio/` | `root:invio` | `0750` |
-| `/etc/invio/invio.env` | `invio:invio` | `0600` |
+| `/etc/invio/invio.env` | `root:invio` | `0640` |
 | `/etc/invio/deployed-revision` | `root:root` | `0644` (commit that was last migrated; not secret) |
 
 Format: one `KEY="value"` per line, only `INVIO_*` keys, no newlines in values. Write a backslash
@@ -346,7 +348,8 @@ UV_PYTHON_PREFERENCE=only-managed UV_PYTHON=3.12.13 UV_CACHE_DIR=/var/cache/invi
   uv sync --locked --no-dev --no-editable --compile-bytecode
 systemd-run --wait --pipe --collect --quiet --uid=invio --gid=invio \
   -p EnvironmentFile=/etc/invio/invio.env -p WorkingDirectory=/var/lib/invio \
-  -p StateDirectory=invio -E PYTHONDONTWRITEBYTECODE=1 -E HOME=/var/lib/invio \
+  -p StateDirectory=invio -p StateDirectoryMode=0750 -p UMask=0027 \
+  -E PYTHONDONTWRITEBYTECODE=1 -E HOME=/var/lib/invio -E XDG_CACHE_HOME=/var/lib/invio/cache \
   /opt/invio/.venv/bin/invio db upgrade
 git -C /opt/invio rev-parse HEAD > /etc/invio/deployed-revision
 cp /opt/invio/deploy/systemd/invio-*.service /opt/invio/deploy/systemd/invio-*.timer \

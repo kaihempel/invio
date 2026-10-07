@@ -7,7 +7,7 @@ Research: [R6](../research.md#r6--env-file-format-location-and-permissions).
 | Path | Owner:Group | Mode | Notes |
 |---|---|---|---|
 | `/etc/invio/` | `root:invio` | `0750` | Others can't list or traverse the directory |
-| `/etc/invio/invio.env` | `invio:invio` | `0600` | Only root and `invio` can read it (FR-011, SC-006) |
+| `/etc/invio/invio.env` | `root:invio` | `0640` | Only root and `invio` can read it, only root can change it (FR-011, SC-006) |
 | `/etc/invio/deployed-revision` | `root:root` | `0644` | Commit that was last migrated (R4); not secret |
 
 ## Format

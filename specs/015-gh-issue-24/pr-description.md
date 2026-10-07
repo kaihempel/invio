@@ -22,10 +22,13 @@ invio can now run unattended on a Debian 12 or 13 server.
   `check-no-secrets.sh`), `docs/deployment.md` (install by hand, operate, update, recover,
   troubleshoot) and a README section.
 - Tests: `tests/test_deploy_units.py` (unit contract, symlinks, env example, env template
-  rendering and escaping, memory drop-in template), `tests/test_deploy_journal_check.py`, a
-  `deploy-static` CI job (unit verification, ansible-lint, contract tests), pre-commit hooks, and
-  the opt-in `deploy.yml` workflow (Molecule scenarios `default` on Debian 12 and 13, and
-  `external-db`).
+  rendering and escaping, memory drop-in template), `tests/test_deploy_role.py` (defaults and
+  required variables against the contract, cross-file invariants, task order and tags, `no_log`,
+  `validate.yml` run with `ansible-playbook`), `tests/test_deploy_scripts.py`,
+  `tests/test_deploy_journal_check.py`, `tests/test_deploy_workflows.py` (shared helpers in
+  `tests/deploy_helpers.py`), a `deploy-static` CI job (unit verification, ansible-lint, contract
+  tests), pre-commit hooks, and the opt-in `deploy.yml` workflow (Molecule scenarios `default` on
+  Debian 12 and 13, and `external-db`).
 
 `src/invio/` is not changed.
 
@@ -48,7 +51,7 @@ installs no Ansible package (checked). The deploy jobs use `--group deploy` /
 | Item | What changed and why |
 |---|---|
 | D2 | `molecule-plugins[docker]>=25` resolves (26.9.28), so the lower bound `>=23.7` from the blueprint was not needed. The group stays as written in T002. |
-| Collection | The role and the tests use `ansible.mysql` (`>=4.2.1`), not `community.mysql`. `community.mysql` 5.x only forwards to it and `ansible-lint` (production profile, `fqcn`) demands the canonical name. `requirements.yml` lists `ansible.mysql`. |
+| Collection | The role and the tests use `ansible.mysql` (pinned `==5.2.0`; `community.docker` `==5.4.0` for Molecule), not `community.mysql`. `community.mysql` 5.x only forwards to it and `ansible-lint` (production profile, `fqcn`) demands the canonical name. `requirements.yml` lists `ansible.mysql`. |
 | D14 | `invio_uv_sha256` is a mapping keyed by `ansible_architecture` (`x86_64`, `aarch64`) instead of one string, so the role also works on arm64 hosts and arm64 CI/dev machines. Pinned to uv 0.12.23 (same `version:` in `setup-uv` in `deploy.yml`). Contract table "pinned values matching CI" still holds. |
 | Python pin | `invio_python_version` is the full patch version `3.12.13`, and `uv python install --no-bin` keeps uv from writing into `/root/.local/bin` (reviewer M6). The change report comes from parsing uv's output. |
 | D3 | The check-mode git probe does not fail for an unknown ref, so on the update path the role first runs `git fetch --tags origin` and `git rev-parse --verify --quiet <ref>^{commit}` (falling back to `origin/<ref>`), and fails with "does not exist" before it stops any timer. Verified by Molecule. |
@@ -66,9 +69,10 @@ installs no Ansible package (checked). The deploy jobs use `--group deploy` /
 | Molecule dependency | Molecule 26's galaxy dependency step reports "Missing roles requirements file" and does not use `requirements-file`. Collections are installed ahead of time into `deploy/ansible/.collections` (`ansible.cfg`, CI step, docs), also for `ansible-lint` (`offline: true`). |
 | QA fixes | `validate.yml` reads values with `lookup('vars', item)`, so values that reference other variables (`vault_*`) are validated; `invio_env_extra` may not set keys the role writes (list `invio_managed_env_keys`, kept in step with the template by a test); the env template's `q()` refuses newlines as defence in depth; with the server switch off and `invio_db_host: localhost` the role now administers the server over the root socket (no admin variables needed, as the contract says; it waits for `/run/mysqld/mysqld.sock` instead of TCP); `verify-units.sh` verifies every copied unit; `check-no-secrets.sh` exits 2 when all secrets are empty. `contracts/ansible-role.md` now states the full Python patch version (3.12.13) and the per-architecture `invio_uv_sha256` mapping. |
 | Test repository copy | D24 mounts the repository read-only at `/src`. Docker Desktop on macOS fails object reads of the checkout tool on that mount with "Permission denied" (flaky, even for a fresh clone). Both `prepare.yml` files therefore copy `/src` with `git clone --no-hardlinks` to `/srv/invio-src` on the container's own file system, and `invio_git_repo` is `/srv/invio-src` (the update test resolves `REF~1` there). The mount and the `safe.directory` entry in `/etc/gitconfig` are still used for that copy. Harmless on CI. |
-| `deploy.yml` | Besides the T042 paths it also watches `pyproject.toml`, `uv.lock` and `src/invio/db/**`, and has a weekly schedule. The update test converges `REF~1`, which is the first parent (the base branch tip on pull requests, because CI tests the merge commit). |
-| `deploy-static` | Uses `uv run --locked --group deploy ...` and also runs `tests/test_deploy_journal_check.py`. `verify-units.sh` copies the host's `*.target` files into the temporary root because `systemd-analyze --root` otherwise cannot find `sysinit.target`, and it propagates systemd-analyze's exit code. |
+| `deploy.yml` | Besides the T042 paths it also watches `pyproject.toml`, `uv.lock`, `src/invio/db/**` and `src/invio/cli/**` (the verify step checks CLI output), and has a weekly schedule. The update test converges `REF~1`, which is the first parent (the base branch tip on pull requests, because CI tests the merge commit). |
+| `deploy-static` | Uses `uv run --locked --group deploy ...` and runs every `tests/test_deploy_*.py`. `verify-units.sh` copies the host's `*.target` files into the temporary root because `systemd-analyze --root` otherwise cannot find `sysinit.target`, and it propagates systemd-analyze's exit code. |
 | Env template | Values are written as `KEY="value"` through a `q()` macro; DB user and password are URL-encoded with `/` encoded too (D22). The tests render the template with plain Jinja (`StrictUndefined`, `autoescape=False`) and round-trip a hostile password through systemd's unquoting and `sqlalchemy.make_url`. |
+| Review fixes | `/etc/invio/invio.env` is `root:invio 0640` (contract changed from `invio:invio 0600`: the service reads its settings but cannot rewrite them). A local server managed by another tool is reached over the Unix socket too, as `env-file.md` says. `validate.yml` rejects `\r`, booleans in `invio_env_extra`, credentials in `invio_git_repo` and `invio_mariadb_manage_server: true` with a remote `invio_db_host`. The tag `invio:install` also selects the unit tasks, so an update run with only that tag starts the timers again. The update gate fetches from `invio_git_repo` (not the recorded `origin`), quotes the key path, and reports a wait timeout with a readable message. The migration uses the units' `StateDirectoryMode`, `UMask` and `XDG_CACHE_HOME`. `check-no-secrets.sh` exits 2 on an unreadable log; `check-journal-json.py` splits on `\n` only and has `--require-secrets` (used by Molecule). The sandbox probes target paths that only the sandbox can deny (directories owned by `invio` under `/etc`, `/opt`, `/srv`, and a `NOPASSWD` sudo rule). |
 
 ## Status of #23 (R14)
 

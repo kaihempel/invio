@@ -9,17 +9,16 @@
   loop: "{{ invio_units }}"
   notify: invio daemon-reload
 
-- name: Create the drop-in directories for changed memory limits
+# The drop-in directories always exist, so switching back to the default leaves no empty
+# directory behind; operators' own drop-ins (systemctl edit) live there too.
+- name: Create the drop-in directories
   ansible.builtin.file:
-    path: "/etc/systemd/system/{{ item.unit }}.d"
+    path: "/etc/systemd/system/{{ item }}.d"
     state: directory
     owner: root
     group: root
     mode: "0755"
-  loop: "{{ invio_memory_overrides }}"
-  loop_control:
-    label: "{{ item.unit }}"
-  when: item.value | string != item.default
+  loop: "{{ invio_services }}"
 
 - name: Write the memory limit drop-ins
   ansible.builtin.template:

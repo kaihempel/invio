@@ -1,14 +1,14 @@
 """Contract tests for the systemd units, env example and Ansible role files in ``deploy/``.
 
-The expectations come from ``specs/015-gh-issue-24/contracts``. The unit parser is deliberately
-small: it supports exactly what the shipped units use and raises on anything else, so a unit
-cannot silently use syntax that these tests would misread.
+The expectations come from ``specs/015-gh-issue-24/contracts``. The unit parser
+(``tests/deploy_helpers.py``) is deliberately small: it supports exactly what the shipped units
+use and raises on anything else, so a unit cannot silently use syntax that these tests would
+misread.
 """
 
 from __future__ import annotations
 
 import os
-import re
 from pathlib import Path
 
 import jinja2
@@ -16,43 +16,17 @@ import pytest
 from sqlalchemy.engine import make_url
 
 from invio.config.settings import unknown_env_keys
+from tests.deploy_helpers import (
+    ENV_EXAMPLE,
+    ENV_KEYS,
+    ROLE,
+    SERVICES,
+    SYSTEMD,
+    Unit,
+    parse_unit,
+)
 
-REPO = Path(__file__).resolve().parents[1]
-SYSTEMD = REPO / "deploy" / "systemd"
-ROLE = REPO / "deploy" / "ansible" / "roles" / "invio"
-ENV_EXAMPLE = REPO / "deploy" / "env" / "invio.env.example"
-
-Unit = dict[str, dict[str, list[str]]]
 Expected = dict[str, str | set[str]]
-
-_SECTION = re.compile(r"^\[([A-Za-z]+)\]$")
-
-
-def parse_unit(path: Path) -> Unit:
-    """Parse a systemd unit: section -> key -> list of values (one entry per assignment).
-
-    Full-line ``#`` and ``;`` comments and blank lines are skipped, repeated keys accumulate and an
-    empty assignment (``Key=``) is one empty value. Line continuations are not supported and
-    raise ``ValueError``.
-    """
-    unit: Unit = {}
-    section: str | None = None
-    for number, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
-        line = raw.strip()
-        if not line or line[0] in "#;":
-            continue
-        if line.endswith("\\"):
-            raise ValueError(f"{path}:{number}: line continuations are not supported")
-        match = _SECTION.match(line)
-        if match:
-            section = match.group(1)
-            unit.setdefault(section, {})
-            continue
-        if section is None or "=" not in line:
-            raise ValueError(f"{path}:{number}: cannot parse {line!r}")
-        key, _, value = line.partition("=")
-        unit[section].setdefault(key.strip(), []).append(value.strip())
-    return unit
 
 
 def assert_directives(unit: Unit, section: str, expected: Expected) -> None:
@@ -185,23 +159,7 @@ def test_env_example_has_only_placeholders() -> None:
 def test_env_example_lists_every_documented_key_and_not_env_file() -> None:
     keys = set(_env_example_values())
     assert "INVIO_ENV_FILE" not in keys
-    assert keys == {
-        "INVIO_DATABASE_URL",
-        "INVIO_SMTP_HOST",
-        "INVIO_SMTP_PORT",
-        "INVIO_SMTP_SECURITY",
-        "INVIO_SMTP_FROM",
-        "INVIO_SMTP_USER",
-        "INVIO_SMTP_PASSWORD",
-        "INVIO_MISTRAL_API_KEY",
-        "INVIO_OPENAI_API_KEY",
-        "INVIO_ANTHROPIC_API_KEY",
-        "INVIO_GOOGLE_API_KEY",
-        "INVIO_LOG_LEVEL",
-        "INVIO_HTTP_CONTACT",
-        "INVIO_ARCHIVE_DIR",
-        "INVIO_HEALTHCHECK_URL",
-    }
+    assert keys == set(ENV_KEYS)
 
 
 # --- unit contracts (contracts/systemd-units.md) -----------------------------------------------
@@ -252,9 +210,8 @@ HARDENING: Expected = {
     "RestrictAddressFamilies": {"AF_UNIX", "AF_INET", "AF_INET6"},
     "CapabilityBoundingSet": set(),
 }
-FORBIDDEN = ("MemoryDenyWriteExecute", "PrivateNetwork", "IPAddressDeny", "DynamicUser")
-# Directives that could run another command (possibly as root) are not part of the contract.
-FORBIDDEN_EXEC = ("ExecStartPre", "ExecStartPost", "ExecStop", "ExecStopPost", "ExecReload")
+# Everything else is rejected, among others MemoryDenyWriteExecute, PrivateNetwork and
+# DynamicUser, and directives that could run another command (ExecStartPre, ExecStop, ...).
 ALLOWED_SERVICE_KEYS = frozenset(
     {"Environment", "ExecStart", "SyslogIdentifier", "MemoryMax", "TimeoutStartSec"}
     | set(SERVICE_BASE)
@@ -418,25 +375,7 @@ def test_env_template_renders_the_documented_keys_in_fixed_order() -> None:
     assert text.isascii()
     assert text.endswith("\n")
     keys = [ln.partition("=")[0] for ln in text.splitlines() if ln and not ln.startswith("#")]
-    assert keys == [
-        "INVIO_DATABASE_URL",
-        "INVIO_SMTP_HOST",
-        "INVIO_SMTP_PORT",
-        "INVIO_SMTP_SECURITY",
-        "INVIO_SMTP_FROM",
-        "INVIO_SMTP_USER",
-        "INVIO_SMTP_PASSWORD",
-        "INVIO_ANTHROPIC_API_KEY",
-        "INVIO_GOOGLE_API_KEY",
-        "INVIO_MISTRAL_API_KEY",
-        "INVIO_OPENAI_API_KEY",
-        "INVIO_LOG_LEVEL",
-        "INVIO_HTTP_CONTACT",
-        "INVIO_ARCHIVE_DIR",
-        "INVIO_HEALTHCHECK_URL",
-        "INVIO_HTTP_RESPECT_ROBOTS",
-        "INVIO_MAX_PARALLEL_ITEMS",
-    ]
+    assert keys == [*ENV_KEYS, "INVIO_HTTP_RESPECT_ROBOTS", "INVIO_MAX_PARALLEL_ITEMS"]
     assert "Managed by Ansible role invio" in text.splitlines()[0]
     assert "INVIO_ENV_FILE" not in keys
 
@@ -473,12 +412,11 @@ def test_env_template_output_has_only_known_settings(
     ("host", "managed", "socket"),
     [
         ("localhost", True, True),
-        ("localhost", False, False),
-        ("dbserver", True, False),
+        ("localhost", False, True),  # local server managed by another tool: same socket
         ("dbserver", False, False),
     ],
 )
-def test_env_template_uses_the_unix_socket_only_for_a_managed_local_server(
+def test_env_template_uses_the_unix_socket_for_a_local_server(
     host: str, managed: bool, socket: bool
 ) -> None:
     text = _render_template(
@@ -526,25 +464,11 @@ def test_notify_retry_timer_contract() -> None:
     )
 
 
-SERVICES = ("invio-run-due.service", "invio-notify-retry.service")
-
-
-def _exec_start_command(value: str) -> str:
-    """Strip systemd's ExecStart prefixes (``-@:+!``) to expose the command."""
-    return value.lstrip("-@:+!")
-
-
 @pytest.mark.parametrize("name", SERVICES)
 def test_services_have_no_unlisted_directives(name: str) -> None:
     unit = load(name)
     assert set(unit["Unit"]) <= ALLOWED_UNIT_KEYS, set(unit["Unit"]) - ALLOWED_UNIT_KEYS
     assert set(unit["Service"]) <= ALLOWED_SERVICE_KEYS, set(unit["Service"]) - ALLOWED_SERVICE_KEYS
-    for key in (*FORBIDDEN, *FORBIDDEN_EXEC):
-        assert key not in unit["Service"], f"{key} is forbidden"
-    assert unit["Service"]["User"] != ["root"]
-    (exec_start,) = unit["Service"]["ExecStart"]
-    assert exec_start == _exec_start_command(exec_start), "ExecStart must have no prefix"
-    assert exec_start.startswith("/opt/invio/.venv/bin/invio ")
 
 
 def test_services_differ_only_in_the_per_service_keys() -> None:
@@ -553,12 +477,6 @@ def test_services_differ_only_in_the_per_service_keys() -> None:
     differing = {key for key in run_due if run_due[key] != notify[key]}
     assert differing == set(PER_SERVICE_KEYS)
     assert load(SERVICES[0])["Unit"].keys() == load(SERVICES[1])["Unit"].keys()
-
-
-def test_exec_start_prefix_helper() -> None:
-    assert _exec_start_command("-/bin/x") == "/bin/x"
-    assert _exec_start_command("+!@:/bin/x") == "/bin/x"
-    assert _exec_start_command("/bin/x") == "/bin/x"
 
 
 def test_systemd_directory_has_no_drop_ins_or_stray_files() -> None:
@@ -583,10 +501,18 @@ def test_memory_override_template(tmp_path: Path) -> None:
         {"invio_smtp_from": "a\rb"},
         {"invio_llm_api_keys": {"openai": "k\nINVIO_Y=2"}},
         {"invio_env_extra": {"INVIO_Z": "v\nINVIO_W=3"}},
-        {"invio_db_password": "p\nINVIO_V=4"},
+        {"invio_db_host": "local\nINVIO_V=4"},
+        {"invio_db_name": "in\rvio"},
     ],
 )
 def test_env_template_refuses_values_with_newlines(override: dict[str, object]) -> None:
     """Defense in depth: validate.yml checks the inputs, the template refuses them too."""
     with pytest.raises(jinja2.UndefinedError, match="newline"):
         _render_template("invio.env.j2", **{**ENV_VARS, **override})
+
+
+def test_env_template_url_encodes_a_newline_in_the_database_credentials() -> None:
+    # User and password are URL-encoded, so a newline cannot start a new line in the env file.
+    text = _render_template("invio.env.j2", **{**ENV_VARS, "invio_db_password": "p\nINVIO_V=4"})
+    assert "INVIO_V" not in _env_pairs(text)
+    assert make_url(_env_pairs(text)["INVIO_DATABASE_URL"]).password == "p\nINVIO_V=4"

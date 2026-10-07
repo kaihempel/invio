@@ -29,11 +29,26 @@
           - "'invio' in invio_dbinfo.users['%']"
         quiet: true
 
+    - name: Read the env file
+      ansible.builtin.slurp:
+        src: /etc/invio/invio.env
+      register: invio_env_file
+      no_log: true
+
+    - name: Check that the application connects to the external server over TCP
+      ansible.builtin.assert:
+        that:
+          - (invio_env_file.content | b64decode) is search('^INVIO_DATABASE_URL="mysql\+pymysql://[^"]*@dbserver:3306/invio\?charset=utf8mb4"$', multiline=true)
+          - "'unix_socket' not in (invio_env_file.content | b64decode)"
+        quiet: true
+      no_log: true
+
     - name: Check that the timers are active
       ansible.builtin.command:
         argv: [systemctl, is-active, "{{ item }}"]
       loop:
         - invio-run-due.timer
+        - invio-notify-retry.timer
       register: invio_active
       changed_when: false
       failed_when: invio_active.stdout != 'active'

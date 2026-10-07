@@ -20,6 +20,8 @@
   ansible.builtin.import_tasks: install.yml
   tags: [invio, "invio:install"]
 
+# Also tagged invio:install: an update run with --tags invio:install stops the timers, so the
+# unit tasks must run with it to start them again.
 - name: Install the units and start the timers
   ansible.builtin.import_tasks: units.yml
-  tags: [invio, "invio:units"]
+  tags: [invio, "invio:units", "invio:install"]

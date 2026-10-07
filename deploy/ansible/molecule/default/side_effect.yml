@@ -9,11 +9,14 @@
     invio_timer_names:
       - invio-run-due.timer
       - invio-notify-retry.timer
-    invio_service_names:
-      - invio-run-due.service
-      - invio-notify-retry.service
   tasks:
     # --- Memory limit drop-in (FR-008, US4 scenario 5, quickstart #22) -------------------------
+    - name: Read the MemoryMax of the default install
+      ansible.builtin.command:
+        argv: [systemctl, show, -p, MemoryMax, --value, invio-run-due.service]
+      register: invio_memory_before
+      changed_when: false
+
     - name: Converge with a larger memory limit for run-due
       ansible.builtin.include_role:
         name: invio
@@ -57,7 +60,7 @@
       ansible.builtin.assert:
         that:
           - not invio_dropin_gone.stat.exists
-          - invio_memory_default.stdout == '1073741824'
+          - invio_memory_default.stdout == invio_memory_before.stdout
         quiet: true
 
     # --- Update path (FR-021, US6, quickstart #15, #16, #25) -----------------------------------
@@ -86,8 +89,10 @@
     - name: Check that the timers were restarted and the parent revision was migrated
       ansible.builtin.assert:
         that:
+          - invio_snapshot_before.revision == invio_ref
           - invio_snapshot_after.timers != invio_snapshot_before.timers
           - invio_snapshot_after.revision == invio_parent.stdout
+          - invio_snapshot_after.mtimes[0] != invio_snapshot_before.mtimes[0]
           - invio_snapshot_after.active
         quiet: true
 
@@ -157,76 +162,64 @@
         quiet: true
 
     # --- A running service delays the update (US6 scenario 3, quickstart #24) ------------------
-    - name: Create the runtime drop-in directory
-      ansible.builtin.file:
-        path: /run/systemd/system/invio-run-due.service.d
-        state: directory
-        mode: "0755"
+    - name: Update while a slow service runs
+      block:
+        - name: Make the run-due service slow
+          ansible.builtin.include_tasks: tasks/runtime-dropin.yml
+          vars:
+            invio_dropin_name: 60-sleep.conf
+            invio_dropin_content: |
+              [Service]
+              ExecStart=
+              ExecStart=/bin/sleep 90
 
-    - name: Write the sleep drop-in
-      ansible.builtin.copy:
-        dest: /run/systemd/system/invio-run-due.service.d/60-sleep.conf
-        content: |
-          [Service]
-          ExecStart=
-          ExecStart=/bin/sleep 90
-        mode: "0644"
+        - name: Start the slow service without waiting
+          ansible.builtin.command:
+            argv: [systemctl, start, --no-block, invio-run-due.service]
+          changed_when: true
 
-    - name: Reload systemd
-      ansible.builtin.systemd_service:
-        daemon_reload: true
+        - name: Converge the parent commit while the service runs
+          ansible.builtin.include_role:
+            name: invio
+          vars:
+            invio_git_version: "{{ invio_parent.stdout }}"
 
-    - name: Start the slow service without waiting
-      ansible.builtin.command:
-        argv: [systemctl, start, --no-block, invio-run-due.service]
-      changed_when: true
+        - name: Read when the timer was stopped, when the service ended and the revision was written
+          ansible.builtin.command:
+            argv: "{{ item }}"
+          loop:
+            - [systemctl, show, -p, ActiveExitTimestamp, --value, invio-run-due.timer]
+            - [systemctl, show, -p, ExecMainExitTimestamp, --value, invio-run-due.service]
+          register: invio_wait_times
+          changed_when: false
 
-    - name: Converge the parent commit while the service runs
-      ansible.builtin.include_role:
-        name: invio
-      vars:
-        invio_git_version: "{{ invio_parent.stdout }}"
+        - name: Convert them to epoch seconds
+          ansible.builtin.command:
+            argv: [date, -d, "{{ item.stdout }}", +%s]
+          loop: "{{ invio_wait_times.results }}"
+          loop_control:
+            label: "{{ item.item[3] }}"
+          register: invio_wait_epochs
+          changed_when: false
 
-    - name: Read when the timer was stopped, when the service ended and the revision was written
-      ansible.builtin.command:
-        argv: "{{ item }}"
-      loop:
-        - [systemctl, show, -p, ActiveExitTimestamp, --value, invio-run-due.timer]
-        - [systemctl, show, -p, ExecMainExitTimestamp, --value, invio-run-due.service]
-      register: invio_wait_times
-      changed_when: false
+        - name: Read the modification time of the revision file
+          ansible.builtin.stat:
+            path: /etc/invio/deployed-revision
+          register: invio_wait_revision
 
-    - name: Convert them to epoch seconds
-      ansible.builtin.command:
-        argv: [date, -d, "{{ item.stdout }}", +%s]
-      loop: "{{ invio_wait_times.results }}"
-      loop_control:
-        label: "{{ item.item[3] }}"
-      register: invio_wait_epochs
-      changed_when: false
-
-    - name: Read the modification time of the revision file
-      ansible.builtin.stat:
-        path: /etc/invio/deployed-revision
-      register: invio_wait_revision
-
-    # The timer stops first, while the service still runs; the checkout (and so the revision
-    # file) comes only after the service ended.
-    - name: Check the order of events
-      ansible.builtin.assert:
-        that:
-          - invio_wait_epochs.results[0].stdout | int < invio_wait_epochs.results[1].stdout | int
-          - invio_wait_epochs.results[1].stdout | int <= invio_wait_revision.stat.mtime | int
-        quiet: true
-
-    - name: Remove the sleep drop-in
-      ansible.builtin.file:
-        path: /run/systemd/system/invio-run-due.service.d/60-sleep.conf
-        state: absent
-
-    - name: Reload systemd after removing the drop-in
-      ansible.builtin.systemd_service:
-        daemon_reload: true
+        # The timer stops first, while the service still runs; the checkout (and so the revision
+        # file) comes only after the service ended.
+        - name: Check the order of events
+          ansible.builtin.assert:
+            that:
+              - invio_wait_epochs.results[0].stdout | int < invio_wait_epochs.results[1].stdout | int
+              - invio_wait_epochs.results[1].stdout | int <= invio_wait_revision.stat.mtime | int
+            quiet: true
+      always:
+        - name: Remove the sleep drop-in
+          ansible.builtin.include_tasks: tasks/runtime-dropin.yml
+          vars:
+            invio_dropin_name: 60-sleep.conf
 
     - name: Converge the commit under test again after the wait test
       ansible.builtin.include_role:
@@ -269,7 +262,7 @@
       loop: "{{ invio_timer_names }}"
       changed_when: true
 
-    - name: Read the seconds since the last quarter hour
+    - name: Read the current time in epoch seconds
       ansible.builtin.command:
         argv: [date, +%s]
       register: invio_now

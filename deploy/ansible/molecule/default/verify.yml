@@ -54,9 +54,9 @@
     - name: Check the owners and modes
       ansible.builtin.assert:
         that:
-          - invio_stat.results[0].stat.pw_name == 'invio'
+          - invio_stat.results[0].stat.pw_name == 'root'
           - invio_stat.results[0].stat.gr_name == 'invio'
-          - invio_stat.results[0].stat.mode == '0600'
+          - invio_stat.results[0].stat.mode == '0640'
           - invio_stat.results[1].stat.pw_name == 'root'
           - invio_stat.results[1].stat.gr_name == 'invio'
           - invio_stat.results[1].stat.mode == '0750'
@@ -136,19 +136,10 @@
       when: invio_run_due_help.rc != 0
 
     - name: Start the real run-due service (only when issue 23 provides the command)
+      ansible.builtin.include_tasks: tasks/start-service.yml
+      vars:
+        invio_service: invio-run-due.service
       when: invio_run_due_help.rc == 0
-      block:
-        - name: Start the service
-          ansible.builtin.command:
-            argv: [systemctl, start, invio-run-due.service]
-          changed_when: true
-
-        - name: Read its result
-          ansible.builtin.command:
-            argv: [systemctl, show, -p, Result, --value, invio-run-due.service]
-          register: invio_run_due_result
-          changed_when: false
-          failed_when: invio_run_due_result.stdout != 'success'
 
     # The journal contract is checked on the real unit and its sandbox. While `run-due` does not
     # exist, a drop-in swaps ExecStart for `invio db upgrade`, which logs JSON lines too.
@@ -160,37 +151,20 @@
           register: invio_probe_start
           changed_when: false
 
-        - name: Create the drop-in directory
-          ansible.builtin.file:
-            path: /run/systemd/system/invio-run-due.service.d
-            state: directory
-            mode: "0755"
-
         - name: Swap ExecStart for a command that exists today
-          ansible.builtin.copy:
-            dest: /run/systemd/system/invio-run-due.service.d/90-journal-probe.conf
-            content: |
+          ansible.builtin.include_tasks: tasks/runtime-dropin.yml
+          vars:
+            invio_dropin_name: 90-journal-probe.conf
+            invio_dropin_content: |
               [Service]
               ExecStart=
               ExecStart=/opt/invio/.venv/bin/invio db upgrade
-            mode: "0644"
           when: invio_run_due_help.rc != 0
 
-        - name: Reload systemd
-          ansible.builtin.systemd_service:
-            daemon_reload: true
-
-        - name: Start the service
-          ansible.builtin.command:
-            argv: [systemctl, start, invio-run-due.service]
-          changed_when: true
-
-        - name: Check the result
-          ansible.builtin.command:
-            argv: [systemctl, show, -p, Result, --value, invio-run-due.service]
-          register: invio_probe_result
-          changed_when: false
-          failed_when: invio_probe_result.stdout != 'success'
+        - name: Start the run-due service for the journal check
+          ansible.builtin.include_tasks: tasks/start-service.yml
+          vars:
+            invio_service: invio-run-due.service
 
         - name: Copy the journal checker
           ansible.builtin.copy:
@@ -202,22 +176,28 @@
           ansible.builtin.shell: |
             set -o pipefail
             journalctl --sync
-            journalctl -u invio-run-due -o cat --since "@{{ invio_probe_start.stdout }}" | /usr/local/bin/check-journal-json.py
+            journalctl -u invio-run-due -o cat --since "@{{ invio_probe_start.stdout }}" \
+              | /usr/local/bin/check-journal-json.py --require-secrets
           args:
             executable: /bin/bash
           environment:
             INVIO_CHECK_SECRETS: "{{ invio_verify_secrets }}"
+          register: invio_journal_check
           changed_when: false
+          failed_when: false
           no_log: true
-      always:
-        - name: Remove the drop-in
-          ansible.builtin.file:
-            path: /run/systemd/system/invio-run-due.service.d/90-journal-probe.conf
-            state: absent
 
-        - name: Reload systemd after removing the drop-in
-          ansible.builtin.systemd_service:
-            daemon_reload: true
+        # The checker prints line numbers and fixed reasons only, so its stderr is safe to show.
+        - name: Report the result of the run-due journal check
+          ansible.builtin.assert:
+            that: invio_journal_check.rc == 0
+            fail_msg: "check-journal-json.py failed: {{ invio_journal_check.stderr }}"
+            quiet: true
+      always:
+        - name: Remove the journal probe drop-in
+          ansible.builtin.include_tasks: tasks/runtime-dropin.yml
+          vars:
+            invio_dropin_name: 90-journal-probe.conf
 
     # The notify-retry command exists today, so this start is a hard gate (no guard).
     - name: Check the notify-retry service
@@ -229,16 +209,9 @@
           changed_when: false
 
         - name: Start the notify-retry service
-          ansible.builtin.command:
-            argv: [systemctl, start, invio-notify-retry.service]
-          changed_when: true
-
-        - name: Check the notify-retry result
-          ansible.builtin.command:
-            argv: [systemctl, show, -p, Result, --value, invio-notify-retry.service]
-          register: invio_notify_result
-          changed_when: false
-          failed_when: invio_notify_result.stdout != 'success'
+          ansible.builtin.include_tasks: tasks/start-service.yml
+          vars:
+            invio_service: invio-notify-retry.service
 
         - name: Read the notify-retry journal
           ansible.builtin.shell: |
@@ -259,12 +232,20 @@
 
         - name: Check the notify-retry journal contract and that no secret leaked
           ansible.builtin.command:
-            argv: [/usr/local/bin/check-journal-json.py, --allow-no-json]
+            argv: [/usr/local/bin/check-journal-json.py, --allow-no-json, --require-secrets]
             stdin: "{{ invio_notify_journal.stdout }}"
           environment:
             INVIO_CHECK_SECRETS: "{{ invio_verify_secrets }}"
+          register: invio_notify_check
           changed_when: false
+          failed_when: false
           no_log: true
+
+        - name: Report the result of the notify-retry journal check
+          ansible.builtin.assert:
+            that: invio_notify_check.rc == 0
+            fail_msg: "check-journal-json.py failed: {{ invio_notify_check.stderr }}"
+            quiet: true
 
     - name: Read the next elapse of the notify-retry timer
       ansible.builtin.command:
@@ -364,47 +345,66 @@
         invio_sandbox_args: >-
           {% set out = [] %}{% for prop in invio_sandbox_props %}{% set _ = out.extend(['-p', prop]) %}{% endfor %}{{ out }}
 
-    - name: Create the paths that the sandbox must keep read-only or hidden
-      ansible.builtin.shell: |
-        set -e
-        install -d -o invio -g invio -m 0755 /srv/invio-probe
-        install -d -m 0755 /home/probe
-        printf 'secret\n' > /home/probe/secret
-        chmod 0644 /home/probe/secret
-      args:
-        executable: /bin/bash
-      changed_when: true
+    # Each probe target is writable or readable for invio by its permissions alone, so only the
+    # sandbox can deny it: directories owned by invio under /etc, /opt and /srv (ProtectSystem),
+    # a world-readable file under /home (ProtectHome) and a passwordless sudo rule for invio
+    # (NoNewPrivileges).
+    - name: Run the sandbox probes
+      block:
+        - name: Create the paths that the sandbox must keep read-only or hidden
+          ansible.builtin.shell: |
+            set -e
+            for dir in /etc/invio-probe /opt/invio-probe /srv/invio-probe; do
+              install -d -o invio -g invio -m 0755 "$dir"
+            done
+            install -d -m 0755 /home/probe
+            printf 'secret\n' > /home/probe/secret
+            chmod 0644 /home/probe/secret
+            printf 'invio ALL=(root) NOPASSWD: /bin/true\n' > /etc/sudoers.d/invio-probe
+            chmod 0440 /etc/sudoers.d/invio-probe
+          args:
+            executable: /bin/bash
+          changed_when: true
 
-    - name: Run the sandbox probes as the service account with the unit's properties
-      ansible.builtin.command:
-        argv: >-
-          {{ ['systemd-run', '--wait', '--pipe', '--collect', '--uid=invio', '--gid=invio']
-          + invio_sandbox_args
-          + ['/bin/sh', '-c', item.script] }}
-      loop:
-        - {name: write /opt/invio, script: "touch /opt/invio/x 2>/dev/null && echo WRITTEN || echo DENIED", want: DENIED}
-        - {name: write /etc, script: "touch /etc/x 2>/dev/null && echo WRITTEN || echo DENIED", want: DENIED}
-        - {name: write /srv owned by invio, script: "touch /srv/invio-probe/x 2>/dev/null && echo WRITTEN || echo DENIED", want: DENIED}
-        - {name: read under /home, script: "cat /home/probe/secret 2>/dev/null && echo READ || echo DENIED", want: DENIED}
-        - {name: list /home, script: "ls -A /home 2>/dev/null || true", want: ""}
-        - {name: write the state directory, script: "touch /var/lib/invio/probe && echo OK", want: OK}
-        - {name: sudo, script: "sudo -n true >/dev/null 2>&1 && echo ALLOWED || echo DENIED", want: DENIED}
-        - name: resolve localhost
-          script: >-
-            /opt/invio/.venv/bin/python -c "import socket;
-            socket.getaddrinfo('localhost', 80, flags=socket.AI_ADDRCONFIG)" && echo OK
-          want: OK
-      loop_control:
-        label: "{{ item.name }}"
-      register: invio_probes
-      changed_when: false
-      failed_when: invio_probes.rc != 0 or invio_probes.stdout | trim != item.want
+        - name: Run the sandbox probes as the service account with the unit's properties
+          ansible.builtin.command:
+            argv: >-
+              {{ ['systemd-run', '--wait', '--pipe', '--collect', '--uid=invio', '--gid=invio']
+              + invio_sandbox_args
+              + ['/bin/sh', '-c', item.script] }}
+          loop:
+            - {name: write /etc owned by invio, script: "touch /etc/invio-probe/x 2>/dev/null && echo WRITTEN || echo DENIED", want: DENIED}
+            - {name: write /opt owned by invio, script: "touch /opt/invio-probe/x 2>/dev/null && echo WRITTEN || echo DENIED", want: DENIED}
+            - {name: write /srv owned by invio, script: "touch /srv/invio-probe/x 2>/dev/null && echo WRITTEN || echo DENIED", want: DENIED}
+            - {name: read under /home, script: "cat /home/probe/secret 2>/dev/null && echo READ || echo DENIED", want: DENIED}
+            - {name: list /home, script: "ls -A /home 2>/dev/null || true", want: ""}
+            - {name: write the state directory, script: "touch /var/lib/invio/probe && echo OK", want: OK}
+            - {name: sudo with a NOPASSWD rule, script: "sudo -n /bin/true >/dev/null 2>&1 && echo ALLOWED || echo DENIED", want: DENIED}
+            - name: resolve localhost
+              script: >-
+                /opt/invio/.venv/bin/python -c "import socket;
+                socket.getaddrinfo('localhost', 80, flags=socket.AI_ADDRCONFIG)" && echo OK
+              want: OK
+          loop_control:
+            label: "{{ item.name }}"
+          register: invio_probes
+          changed_when: false
+          failed_when: invio_probes.rc != 0 or invio_probes.stdout | trim != item.want
 
-    - name: Remove the probe artefacts
-      ansible.builtin.file:
-        path: "{{ item }}"
-        state: absent
-      loop:
-        - /var/lib/invio/probe
-        - /srv/invio-probe
-        - /home/probe
+        # Without the sandbox the sudo rule works: proves that the sudo probe can fail.
+        - name: Check that the sudo rule works outside the sandbox
+          ansible.builtin.command:
+            argv: [systemd-run, --wait, --pipe, --collect, --uid=invio, --gid=invio, sudo, -n, /bin/true]
+          changed_when: false
+      always:
+        - name: Remove the probe artefacts
+          ansible.builtin.file:
+            path: "{{ item }}"
+            state: absent
+          loop:
+            - /etc/sudoers.d/invio-probe
+            - /var/lib/invio/probe
+            - /etc/invio-probe
+            - /opt/invio-probe
+            - /srv/invio-probe
+            - /home/probe

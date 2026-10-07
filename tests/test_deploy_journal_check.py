@@ -10,14 +10,13 @@ import json
 import os
 import subprocess
 import sys
-from pathlib import Path
 from urllib.parse import quote
 
 import pytest
 
-REPO = Path(__file__).resolve().parents[1]
-SCRIPT = REPO / "deploy" / "scripts" / "check-journal-json.py"
-NO_SECRETS_SCRIPT = REPO / "deploy" / "scripts" / "check-no-secrets.sh"
+from tests.deploy_helpers import SCRIPTS
+
+SCRIPT = SCRIPTS / "check-journal-json.py"
 
 GOOD = json.dumps({"level": "INFO", "message": "run started", "run_id": "abc"})
 SECRET = "s3cret-pass/word"
@@ -152,9 +151,38 @@ def test_secret_absent_passes() -> None:
 
 
 def test_short_secret_is_rejected_as_usage_error() -> None:
-    result = run(f"{GOOD}\n", "short")
+    result = run(f"{GOOD}\n", "zq7x")
     assert result.returncode == 2
-    assert "short" not in output(result).replace("shorter", "")
+    assert "zq7x" not in output(result)
+
+
+def test_require_secrets_rejects_a_missing_or_empty_secret_list() -> None:
+    for secrets in (None, "", "\n \n"):
+        result = run(f"{GOOD}\n", secrets, "--require-secrets")
+        assert result.returncode == 2, secrets
+        assert "INVIO_CHECK_SECRETS is empty" in output(result)
+
+
+def test_require_secrets_passes_with_secrets() -> None:
+    assert run(f"{GOOD}\n", SECRET, "--require-secrets").returncode == 0
+
+
+@pytest.mark.parametrize("separator", ["\u2028", "\u2029", "\x85"])
+def test_unicode_line_separators_inside_a_record_do_not_split_it(separator: str) -> None:
+    # A JSON logger with ensure_ascii=False writes these characters unescaped.
+    record = json.dumps({"level": "INFO", "message": f"a{separator}b"}, ensure_ascii=False)
+    assert separator in record
+    result = run(f"{record}\n")
+    assert result.returncode == 0, output(result)
+
+
+def test_secret_next_to_a_unicode_separator_is_found() -> None:
+    record = json.dumps({"level": "INFO", "message": f"x\u2028{SECRET}"}, ensure_ascii=False)
+    assert run(f"{record}\n", SECRET).returncode == 1
+
+
+def test_crlf_line_endings_are_accepted() -> None:
+    assert run(f"{GOOD}\r\nnothing to retry\r\n").returncode == 0
 
 
 def test_invalid_utf8_input_does_not_crash() -> None:
@@ -162,17 +190,8 @@ def test_invalid_utf8_input_does_not_crash() -> None:
     assert result.returncode == 0, output(result)
 
 
-def test_unexpected_error_exits_3_without_traceback(tmp_path: Path) -> None:
+def test_unexpected_error_exits_3_without_traceback() -> None:
     # A closed stdin makes reading raise; the script must report a fixed message.
-    result = subprocess.run(
-        [sys.executable, str(SCRIPT)],
-        stdin=subprocess.DEVNULL,
-        capture_output=True,
-        text=True,
-        check=False,
-        env={k: v for k, v in os.environ.items() if k != "INVIO_CHECK_SECRETS"},
-    )
-    assert result.returncode == 2  # DEVNULL is empty input
     broken = subprocess.run(
         [
             sys.executable,
@@ -187,21 +206,3 @@ def test_unexpected_error_exits_3_without_traceback(tmp_path: Path) -> None:
     assert broken.returncode == 3
     assert "Traceback" not in broken.stderr
     assert "internal error" in broken.stderr
-
-
-@pytest.mark.skipif(not NO_SECRETS_SCRIPT.exists(), reason="check-no-secrets.sh not created yet")
-def test_check_no_secrets_script(tmp_path: Path) -> None:
-    log = tmp_path / "converge.log"
-    log.write_text("play ok\nTOKEN=abc-secret-1\n", encoding="utf-8")
-    clean = subprocess.run(
-        [str(NO_SECRETS_SCRIPT), str(log), "other-secret"], capture_output=True, text=True
-    )
-    assert clean.returncode == 0
-    hit = subprocess.run(
-        [str(NO_SECRETS_SCRIPT), str(log), "other-secret", "abc-secret-1"],
-        capture_output=True,
-        text=True,
-    )
-    assert hit.returncode == 1
-    assert "abc-secret-1" not in hit.stdout + hit.stderr
-    assert "2" in hit.stdout + hit.stderr

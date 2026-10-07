@@ -17,6 +17,7 @@ from invio.db import migrate
 from invio.db.models import Base, Job
 from invio.db.session import create_db_engine, session_factory, session_scope
 from tests.db_helpers import TEST_DATABASE_URL, uses_sqlite
+from tests.deploy_helpers import is_unwanted_deploy_skip
 
 if TYPE_CHECKING:
     from invio.config.job import ScheduleConfig
@@ -45,10 +46,8 @@ def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[None]) ->
     variable so a missing tool fails the job instead of hiding the tests.
     """
     report: pytest.TestReport = yield
-    if (
-        report.skipped
-        and os.environ.get("INVIO_REQUIRE_DEPLOY_TOOLS") == "1"
-        and item.path.name.startswith("test_deploy_")
+    if is_unwanted_deploy_skip(
+        report, item.path, os.environ.get("INVIO_REQUIRE_DEPLOY_TOOLS") == "1"
     ):
         report.outcome = "failed"
         report.longrepr = f"skipped although INVIO_REQUIRE_DEPLOY_TOOLS=1: {report.longrepr}"

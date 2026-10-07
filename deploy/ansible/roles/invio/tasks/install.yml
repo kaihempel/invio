@@ -93,7 +93,7 @@
   register: invio_installed
 
 - name: Probe the checkout (check mode)
-  ansible.builtin.git:
+  ansible.builtin.git: &invio_git_checkout
     repo: "{{ invio_git_repo }}"
     dest: /opt/invio
     version: "{{ invio_git_version }}"
@@ -107,11 +107,19 @@
 - name: Prepare an existing installation for the update
   when: invio_checkout_probe.changed and invio_installed.stat.exists
   block:
+    # Fetch from invio_git_repo, not from the recorded origin: the repository may have moved.
     - name: Fetch the remote refs (the probe does not fail for an unknown ref)
       ansible.builtin.command:
-        argv: [git, -C, /opt/invio, fetch, --tags, origin]
+        argv:
+          - git
+          - -C
+          - /opt/invio
+          - fetch
+          - --tags
+          - "{{ invio_git_repo }}"
+          - "+refs/heads/*:refs/remotes/origin/*"
       environment: >-
-        {{ {'GIT_SSH_COMMAND': 'ssh -i ' ~ invio_git_key_file
+        {{ {'GIT_SSH_COMMAND': 'ssh -i ' ~ (invio_git_key_file | quote)
         ~ ' -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new'}
         if invio_git_key_file is defined else {} }}
       changed_when: false
@@ -143,31 +151,26 @@
         state: stopped
       loop: "{{ invio_timers }}"
 
-    - name: Wait until no invio service is running
-      ansible.builtin.command:
-        argv: "{{ ['systemctl', 'is-active'] + invio_services }}"
-      register: invio_wait
-      until: invio_wait.stdout_lines | intersect(invio_busy_states) | length == 0
-      retries: "{{ ((invio_update_wait_timeout | int) / 10) | round(0, 'ceil') | int }}"
-      delay: 10
-      changed_when: false
-      failed_when: false
-
-    - name: Check that the services stopped in time
-      ansible.builtin.assert:
-        that: invio_wait.stdout_lines | intersect(invio_busy_states) | length == 0
-        fail_msg: "services still running after {{ invio_update_wait_timeout }} s"
-        quiet: true
+    # Ansible fails a task whose retries are exhausted regardless of failed_when, so the
+    # readable message comes from the rescue.
+    - name: Wait for running services
+      block:
+        - name: Wait until no invio service is running
+          ansible.builtin.command:
+            argv: "{{ ['systemctl', 'is-active'] + invio_services }}"
+          register: invio_wait
+          until: invio_wait.stdout_lines | intersect(invio_busy_states) | length == 0
+          retries: "{{ ((invio_update_wait_timeout | int) / 10) | round(0, 'ceil') | int }}"
+          delay: 10
+          changed_when: false
+          failed_when: false
+      rescue:
+        - name: Report the services that did not stop in time
+          ansible.builtin.fail:
+            msg: "services still running after {{ invio_update_wait_timeout }} s; the timers stay stopped"
 
 - name: Check out the code
-  ansible.builtin.git:
-    repo: "{{ invio_git_repo }}"
-    dest: /opt/invio
-    version: "{{ invio_git_version }}"
-    key_file: "{{ invio_git_key_file | default(omit) }}"
-    ssh_opts: >-
-      {{ '-o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new'
-      if invio_git_key_file is defined else omit }}
+  ansible.builtin.git: *invio_git_checkout
   register: invio_checkout
 
 - name: Install the locked dependencies into the venv
@@ -214,10 +217,16 @@
           - WorkingDirectory=/var/lib/invio
           - -p
           - StateDirectory=invio
+          - -p
+          - StateDirectoryMode=0750
+          - -p
+          - UMask=0027
           - -E
           - PYTHONDONTWRITEBYTECODE=1
           - -E
           - HOME=/var/lib/invio
+          - -E
+          - XDG_CACHE_HOME=/var/lib/invio/cache
           - /opt/invio/.venv/bin/invio
           - db
           - upgrade

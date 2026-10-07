@@ -19,6 +19,8 @@ on:
       - "pyproject.toml"
       - "uv.lock"
       - "src/invio/db/**"
+      # the verify step checks CLI output ("database at revision", "nothing to retry")
+      - "src/invio/cli/**"
   push:
     paths:
       - "deploy/**"
@@ -27,6 +29,8 @@ on:
       - "pyproject.toml"
       - "uv.lock"
       - "src/invio/db/**"
+      # the verify step checks CLI output ("database at revision", "nothing to retry")
+      - "src/invio/cli/**"
 
 permissions:
   contents: read

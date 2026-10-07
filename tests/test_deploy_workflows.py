@@ -16,11 +16,10 @@ from urllib.parse import quote
 import pytest
 import yaml
 
-REPO = Path(__file__).resolve().parents[1]
+from tests.deploy_helpers import ANSIBLE, MOLECULE, REPO, ROLE, is_unwanted_deploy_skip, load_yaml
+
 WORKFLOWS = REPO / ".github" / "workflows"
-ANSIBLE = REPO / "deploy" / "ansible"
-MOLECULE = ANSIBLE / "molecule"
-DEFAULTS = ANSIBLE / "roles" / "invio" / "defaults" / "main.yml"
+DEFAULTS = ROLE / "defaults" / "main.yml"
 
 
 def load_workflow(name: str) -> dict[str, Any]:
@@ -65,14 +64,14 @@ def test_deploy_workflow_is_opt_in_and_triggered_by_deploy_changes() -> None:
 
 
 def test_deploy_trigger_paths_match_existing_files() -> None:
-    files = [
-        path.relative_to(REPO).as_posix()
-        for path in REPO.rglob("*")
-        if path.is_file() and ".venv" not in path.parts and ".git" not in path.parts
-    ]
     for pattern in DEPLOY["on"]["push"]["paths"]:
-        glob = pattern.replace("**", "*")
-        assert any(fnmatch.fnmatch(name, glob) for name in files), f"{pattern} matches nothing"
+        # Path.glob treats "*" and "**" like GitHub's filter: "*" stays within one directory.
+        assert any(path.is_file() for path in REPO.glob(pattern)), f"{pattern} matches nothing"
+
+
+def test_deploy_runs_when_the_cli_output_checked_by_molecule_changes() -> None:
+    # verify.yml greps "database at revision" and "nothing to retry" from src/invio/cli.
+    assert "src/invio/cli/**" in DEPLOY["on"]["push"]["paths"]
 
 
 def test_deploy_matrix_covers_every_molecule_scenario() -> None:
@@ -101,6 +100,15 @@ def test_deploy_collection_requirement_files_exist() -> None:
     paths = re.findall(r"-r (\S+)", step["run"])
     assert paths == ["deploy/ansible/requirements.yml", "deploy/ansible/molecule/requirements.yml"]
     assert all((REPO / path).is_file() for path in paths)
+
+
+def test_collections_are_pinned_exactly_and_consistently() -> None:
+    pins: dict[str, str] = {}
+    for path in (ANSIBLE / "requirements.yml", MOLECULE / "requirements.yml"):
+        for collection in load_yaml(path)["collections"]:
+            version = collection["version"]
+            assert re.fullmatch(r"==\d+\.\d+\.\d+", version), f"{path}: {collection}"
+            assert pins.setdefault(collection["name"], version) == version, collection["name"]
 
 
 def _leak_check_command() -> list[str]:
@@ -205,3 +213,27 @@ def test_deploy_static_fails_instead_of_skipping_deploy_tests() -> None:
     step = _step(CI, "deploy-static", "Unit contract tests")
     assert step["env"]["INVIO_REQUIRE_DEPLOY_TOOLS"] == "1"
     assert "--group deploy" in step["run"]
+
+
+def _report(outcome: str, **extra: str) -> pytest.TestReport:
+    report = pytest.TestReport("t", ("t.py", 0, "t"), {}, outcome, None, "call")  # type: ignore[arg-type]
+    for key, value in extra.items():
+        setattr(report, key, value)
+    return report
+
+
+@pytest.mark.parametrize(
+    ("report", "name", "required", "unwanted"),
+    [
+        (_report("skipped"), "test_deploy_x.py", True, True),
+        (_report("skipped"), "test_deploy_x.py", False, False),
+        (_report("skipped"), "test_other.py", True, False),
+        (_report("skipped", wasxfail=""), "test_deploy_x.py", True, False),
+        (_report("passed"), "test_deploy_x.py", True, False),
+    ],
+    ids=["skip", "not-required", "other-module", "xfail", "passed"],
+)
+def test_only_real_skips_of_deploy_tests_fail_when_tools_are_required(
+    report: pytest.TestReport, name: str, required: bool, unwanted: bool
+) -> None:
+    assert is_unwanted_deploy_skip(report, Path(name), required) is unwanted

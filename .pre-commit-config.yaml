@@ -15,7 +15,7 @@ repos:
         pass_filenames: false
       - id: ansible-lint
         name: ansible-lint (deploy/ansible, install collections first)
-        entry: bash -c 'cd deploy/ansible && uv run --group deploy ansible-lint'
+        entry: bash -c 'cd deploy/ansible && uv run --locked --group deploy ansible-lint'
         language: system
         files: ^deploy/ansible/
         pass_filenames: false

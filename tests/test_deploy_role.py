@@ -17,18 +17,27 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import jinja2
 import pytest
 import yaml
 
-from tests.test_deploy_units import parse_unit
+from tests.deploy_helpers import (
+    ANSIBLE,
+    ENV_EXAMPLE,
+    ENV_KEYS,
+    REPO,
+    ROLE,
+    ROLE_VARS,
+    SERVICES,
+    SYSTEMD,
+    TIMERS,
+    UNITS,
+    load_yaml,
+    parse_unit,
+)
 
-REPO = Path(__file__).resolve().parents[1]
-ANSIBLE = REPO / "deploy" / "ansible"
-ROLE = ANSIBLE / "roles" / "invio"
-SYSTEMD = REPO / "deploy" / "systemd"
 CONTRACT = REPO / "specs" / "015-gh-issue-24" / "contracts" / "ansible-role.md"
 DOCS = REPO / "docs" / "deployment.md"
-ENV_EXAMPLE = REPO / "deploy" / "env" / "invio.env.example"
 
 SECRET_VARS = (
     "invio_db_password",
@@ -40,12 +49,9 @@ SECRET_VARS = (
 )
 
 
-def load_yaml(path: Path) -> Any:
-    return yaml.safe_load(path.read_text(encoding="utf-8"))
-
-
 DEFAULTS: dict[str, Any] = load_yaml(ROLE / "defaults" / "main.yml")
-ROLE_VARS: dict[str, Any] = load_yaml(ROLE / "vars" / "main.yml")
+# Contract rows whose default column is prose rather than one value per variable.
+PROSE_DEFAULT_ROWS = frozenset({"invio_uv_version"})
 
 
 def _contract_section(title: str) -> list[tuple[list[str], str]]:
@@ -90,7 +96,6 @@ def test_contract_tables_parse() -> None:
 
 
 def test_defaults_match_the_contract_table() -> None:
-    # The uv checksum row is prose plus a per-architecture mapping and is not compared here.
     for names, raw in _contract_section("### Defaults"):
         if raw.startswith("unset"):
             for name in names:
@@ -98,11 +103,13 @@ def test_defaults_match_the_contract_table() -> None:
             continue
         for name in names:
             assert name in DEFAULTS, f"{name} is in the contract but not in defaults/main.yml"
-        values = re.findall(r"`([^`]*)`", raw)
+        if names[0] in PROSE_DEFAULT_ROWS:
+            continue  # "pinned uv release (matches setup-uv in CI)", compared elsewhere
+        # The values are the backticked words before an optional "(explanation)".
+        values = re.findall(r"`([^`]*)`", raw.split("(", 1)[0])
         if len(values) == 1:
             values *= len(names)  # "`invio_user` / `invio_group` | `invio`"
-        if len(values) != len(names):
-            continue  # prose such as "pinned values matching CI"
+        assert len(values) == len(names), f"cannot read the defaults of {names} from {raw!r}"
         for name, value in zip(names, values, strict=True):
             assert DEFAULTS[name] == yaml.safe_load(value), name
 
@@ -113,12 +120,13 @@ def test_defaults_define_nothing_beyond_the_contract() -> None:
 
 
 def test_required_variables_have_no_default_and_are_validated() -> None:
-    validate = (ROLE / "tasks" / "validate.yml").read_text(encoding="utf-8")
+    # Parsed tasks, not the raw file: a mention in a comment does not count.
+    validate = yaml.safe_dump(_task_file("validate.yml"))
     required = {name for names, _ in _contract_section("### Required") for name in names}
     assert "invio_db_password" in required
     for name in required:
         assert name not in DEFAULTS, f"required {name} must not have a default (FR-016)"
-        assert name in validate, f"validate.yml does not check {name}"
+        assert re.search(rf"\b{name}\b", validate), f"validate.yml does not check {name}"
 
 
 def test_example_playbook_sets_every_unconditionally_required_variable() -> None:
@@ -137,14 +145,13 @@ def test_example_playbook_sets_every_unconditionally_required_variable() -> None
 
 def test_role_unit_lists_match_the_shipped_units() -> None:
     shipped = sorted(path.name for path in SYSTEMD.iterdir())
-    assert sorted(ROLE_VARS["invio_units"]) == shipped
-    assert ROLE_VARS["invio_timers"] == [
-        n for n in ROLE_VARS["invio_units"] if n.endswith(".timer")
-    ]
-    assert ROLE_VARS["invio_services"] == [
-        n for n in ROLE_VARS["invio_units"] if n.endswith(".service")
-    ]
-    for timer in ROLE_VARS["invio_timers"]:
+    assert sorted(UNITS) == shipped
+    env = jinja2.Environment(undefined=jinja2.StrictUndefined)
+    env.tests["match"] = lambda value, pattern: re.match(pattern, value) is not None  # Ansible's
+    for var, names in (("invio_timers", TIMERS), ("invio_services", SERVICES)):
+        rendered = env.from_string(ROLE_VARS[var]).render(invio_units=UNITS)
+        assert rendered == str(names), var
+    for timer in TIMERS:
         unit = parse_unit(SYSTEMD / timer)
         assert unit["Timer"]["Unit"] == [timer.replace(".timer", ".service")]
 
@@ -168,7 +175,7 @@ def test_memory_defaults_equal_the_unit_so_no_drop_in_is_written_by_default(
 
 
 def test_service_account_matches_the_units() -> None:
-    for service in ROLE_VARS["invio_services"]:
+    for service in SERVICES:
         unit = parse_unit(SYSTEMD / service)["Service"]
         assert unit["User"] == [DEFAULTS["invio_user"]]
         assert unit["Group"] == [DEFAULTS["invio_group"]]
@@ -205,8 +212,8 @@ def test_meta_platforms_match_the_validated_debian_versions() -> None:
     (debian,) = meta["galaxy_info"]["platforms"]
     assert debian["name"] == "Debian"
     assert sorted(debian["versions"]) == ["bookworm", "trixie"]  # Debian 12 and 13
-    validate = (ROLE / "tasks" / "validate.yml").read_text(encoding="utf-8")
-    assert "ansible_distribution_major_version in ['12', '13']" in validate
+    # validate.yml accepting exactly 12 and 13 is run in test_validate_accepts_debian_13 and the
+    # debian-11 case of test_validate_rejects_bad_input_naming_the_variable.
 
 
 # --- task order, tags and secrets (FR-011, FR-016, FR-017) -------------------------------------
@@ -224,6 +231,8 @@ def test_task_order_and_tags_follow_the_contract() -> None:
         "units.yml",
     ]
     assert "always" in main[0]["tags"], "validation must run with every tag selection"
+    # An update with --tags invio:install stops the timers; the unit tasks must start them again.
+    assert "invio:install" in main[-1]["tags"]
     tags = {tag for task in main for tag in task["tags"]}
     contract_tags = set(re.findall(r"`(invio(?::[a-z]+)?)`", _contract_text("## Tags")))
     assert contract_tags <= tags, contract_tags - tags
@@ -265,8 +274,9 @@ def test_env_file_task_is_secret_and_has_the_contract_permissions() -> None:
     env = tasks["Write the env file"]
     assert env["no_log"] is True
     template = env["ansible.builtin.template"]
-    assert (template["dest"], template["mode"]) == ("/etc/invio/invio.env", "0600")
-    assert (template["owner"], template["group"]) == ("{{ invio_user }}", "{{ invio_group }}")
+    assert (template["dest"], template["mode"]) == ("/etc/invio/invio.env", "0640")
+    # root owns the file: the service account can read its settings but not rewrite them.
+    assert (template["owner"], template["group"]) == ("root", "{{ invio_group }}")
 
 
 def test_account_is_a_system_user_without_login_or_home_content() -> None:
@@ -298,7 +308,9 @@ def test_role_never_drops_anything() -> None:
             for module in ("ansible.mysql.mysql_db", "ansible.mysql.mysql_user"):
                 if module in task:
                     assert task[module]["state"] == "present"
-            assert "DROP" not in yaml.safe_dump(task).upper()
+            text = yaml.safe_dump(task)
+            assert not re.search(r"\bDROP\s+(DATABASE|SCHEMA|USER|TABLE)\b", text, re.I)
+            assert "mysql_query" not in text
 
 
 # --- validate.yml with ansible-playbook (FR-016, US5 sc.6) -------------------------------------
@@ -408,6 +420,22 @@ def test_validate_accepts_all_optional_variables(tmp_path: Path) -> None:
 
 @needs_ansible
 @pytest.mark.parametrize(
+    "override",
+    [
+        {"ansible_distribution_major_version": "13"},
+        {"invio_git_repo": "ssh://git@example.com/invio.git"},
+        {"invio_git_repo": "git@example.com:org/invio.git"},
+        {"invio_git_repo": "/srv/invio-src"},
+    ],
+    ids=["debian-13", "ssh-url-with-user", "scp-like", "local-path"],
+)
+def test_validate_accepts(tmp_path: Path, override: dict[str, Any]) -> None:
+    result = run_validate(tmp_path, {**VALID, **override})
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@needs_ansible
+@pytest.mark.parametrize(
     "name",
     [
         "invio_git_repo",
@@ -428,6 +456,11 @@ def test_validate_names_a_missing_required_variable(tmp_path: Path, name: str) -
     [
         ({"invio_db_password": ""}, "invio_db_password is required"),
         ({"invio_db_password": "qa-secret-db-1\nINVIO_X=1"}, "invio_db_password is required"),
+        ({"invio_db_password": "qa-secret-db-1\rINVIO_X=1"}, "invio_db_password is required"),
+        ({"invio_git_repo": "https://user:tok@example.com/i.git"}, "invio_git_repo must not"),
+        ({"invio_git_repo": "https://tok@example.com/i.git"}, "invio_git_repo must not"),
+        ({"invio_env_extra": {"INVIO_X": True}}, "invio_env_extra"),
+        ({"invio_db_host": "db.example.com"}, "invio_mariadb_manage_server installs a local"),
         ({"invio_git_version": "0123abc"}, "abbreviated commit SHA"),
         ({"invio_llm_api_keys": {"mistral": ""}}, "invio_llm_api_keys"),
         ({"invio_llm_api_keys": {"cohere": "qa-secret-llm-1"}}, "invio_llm_api_keys"),
@@ -448,6 +481,11 @@ def test_validate_names_a_missing_required_variable(tmp_path: Path, name: str) -
     ids=[
         "empty-password",
         "newline-password",
+        "carriage-return-password",
+        "repo-with-password",
+        "repo-with-token",
+        "extra-boolean",
+        "managed-server-remote-host",
         "short-sha",
         "no-llm-key",
         "unknown-provider",
@@ -509,14 +547,10 @@ def test_managed_env_keys_list_matches_what_the_template_writes() -> None:
     template = (ROLE / "templates" / "invio.env.j2").read_text(encoding="utf-8")
     written = set(re.findall(r"^(INVIO_[A-Z_]+)=", template, flags=re.M))
     written.discard("INVIO_")
-    providers = yaml.safe_load((ROLE / "vars" / "main.yml").read_text(encoding="utf-8"))[
-        "invio_llm_providers"
-    ]
+    providers = ROLE_VARS["invio_llm_providers"]
     written |= {f"INVIO_{provider.upper()}_API_KEY" for provider in providers}
-    managed = yaml.safe_load((ROLE / "vars" / "main.yml").read_text(encoding="utf-8"))[
-        "invio_managed_env_keys"
-    ]
-    assert set(managed) == written | {"INVIO_ENV_FILE"}
+    assert set(ENV_KEYS) == written
+    assert ROLE_VARS["invio_managed_env_keys"] == [*ENV_KEYS, "INVIO_ENV_FILE"]
 
 
 def _login_arguments() -> list[tuple[str, dict[str, Any]]]:
@@ -531,6 +565,7 @@ def _login_arguments() -> list[tuple[str, dict[str, Any]]]:
 
 @pytest.mark.parametrize(
     ("manage", "host", "uses_admin"),
+    # A managed server on a remote host is rejected by validate.yml.
     [(True, "localhost", False), (False, "localhost", False), (False, "db.example.com", True)],
 )
 def test_database_login_needs_the_admin_account_only_for_a_remote_host(
@@ -541,8 +576,6 @@ def test_database_login_needs_the_admin_account_only_for_a_remote_host(
     The login arguments are rendered with the admin variables undefined: for a local server
     (managed or not) rendering must not need them and must fall back to the root socket.
     """
-    import jinja2
-
     omit = "__omit__"
     env = jinja2.Environment(undefined=jinja2.StrictUndefined)
     variables: dict[str, Any] = {
