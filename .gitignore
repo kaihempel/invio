@@ -88,6 +88,8 @@ credentials.json
 .venv
 .venvs
 env/
+!deploy/env/
+deploy/ansible/.collections/
 venv/
 ENV/
 env.bak/

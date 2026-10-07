@@ -13,3 +13,15 @@ repos:
         language: system
         types: [python]
         pass_filenames: false
+      - id: ansible-lint
+        name: ansible-lint (deploy/ansible, install collections first)
+        entry: bash -c 'cd deploy/ansible && uv run --group deploy ansible-lint'
+        language: system
+        files: ^deploy/ansible/
+        pass_filenames: false
+      - id: verify-units
+        name: verify systemd units (skipped without systemd-analyze)
+        entry: deploy/scripts/verify-units.sh --if-available
+        language: system
+        files: ^deploy/systemd/
+        pass_filenames: false

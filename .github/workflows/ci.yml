@@ -34,6 +34,38 @@ jobs:
       - name: Tests (pytest)
         run: uv run pytest --cov
 
+  deploy-static:
+    # Static checks for deploy/: unit verification, Ansible lint and the unit contract tests.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          python-version: "3.12"
+
+      - name: Install dependencies (with the deploy group)
+        run: uv sync --locked --group deploy
+
+      - name: Verify systemd units
+        run: deploy/scripts/verify-units.sh
+
+      - name: Install Ansible collections
+        run: >-
+          uv run --locked --group deploy ansible-galaxy collection install
+          -r deploy/ansible/requirements.yml
+          -r deploy/ansible/molecule/requirements.yml
+          -p deploy/ansible/.collections
+
+      - name: Lint the Ansible role
+        working-directory: deploy/ansible
+        run: uv run --locked --group deploy ansible-lint
+
+      - name: Unit contract tests
+        run: uv run --locked pytest tests/test_deploy_units.py tests/test_deploy_journal_check.py
+
   mariadb:
     # Optional: runs the persistence tests against a real MariaDB (non-blocking).
     runs-on: ubuntu-latest

@@ -1,0 +1,7 @@
+---
+# Collections the role needs on the controller (production).
+# Install: uv run --group deploy ansible-galaxy collection install \
+#   -r requirements.yml -p .collections
+collections:
+  - name: community.mysql
+    version: ">=3.9.0"
