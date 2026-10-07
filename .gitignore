@@ -88,12 +88,13 @@ credentials.json
 .venv
 .venvs
 env/
-!deploy/env/
 deploy/ansible/.collections/
 venv/
 ENV/
 env.bak/
 venv.bak/
+# Keep the deploy env templates (ENV/ also matches on case-insensitive filesystems)
+!deploy/env/
 
 # mypy
 .mypy_cache/
