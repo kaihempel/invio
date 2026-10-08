@@ -57,7 +57,7 @@ async def default_deps(
     engine = create_db_engine(check_database_url(settings.require_secret("database_url")))
     providers: list[LLMProvider] = []
     web: WebPageSource | None = None
-    youtube: YoutubeSource | None = None
+    youtube = _youtube_source(settings)
     try:
         client = SafeHttpClient(
             HttpClientConfig.from_settings(settings),
@@ -68,7 +68,6 @@ async def default_deps(
         web = WebPageSource(client)
         rss = RssFeedSource(client)
         sitemap = SitemapUrlSource(client)
-        youtube = youtube_source = _youtube_source(settings)
         web_source = web
 
         async def fetch_source(config: SourceConfig) -> list[Candidate]:
@@ -79,7 +78,7 @@ async def default_deps(
             if config.type == "sitemap":
                 return await sitemap.fetch(config)
             if isinstance(config, YoutubeChannelSource | YoutubePlaylistSource):
-                return await youtube_source.fetch(config)
+                return await youtube.fetch(config)
             assert_never(config)
 
         async def fetch_page(url: str) -> str:
@@ -124,8 +123,7 @@ async def default_deps(
                 lock_ttl=timedelta(seconds=settings.run_lock_seconds),
             )
     finally:
-        if youtube is not None:
-            youtube.close()
+        youtube.close()
         await _close_all(web, providers, engine)
 
 

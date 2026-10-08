@@ -12,6 +12,7 @@ import copy
 import json
 import re
 import time
+import weakref
 from collections import Counter, deque
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -332,6 +333,8 @@ class FakePorts:
         self._youtube_source = YoutubeSource(
             extract=self._extract_youtube, timeout=5.0, cookies_file=youtube_cookies_file
         )
+        # no teardown hook reaches the ports: release the worker pool with the object
+        weakref.finalize(self, self._youtube_source.close)
         self.sources = {source_key(url): outcome for url, outcome in (sources or {}).items()}
         self.pages = dict(pages or {})
         self.notifier = notifier or RecordingNotifier()
@@ -365,12 +368,10 @@ class FakePorts:
         return result
 
     async def fetch_source(self, config: SourceConfig) -> list[Candidate]:
-        if isinstance(config, YoutubeChannelSource | YoutubePlaylistSource):
-            url = (
-                config.channel_id
-                if isinstance(config, YoutubeChannelSource)
-                else config.playlist_id
-            )
+        if isinstance(config, YoutubeChannelSource):
+            url = config.channel_id
+        elif isinstance(config, YoutubePlaylistSource):
+            url = config.playlist_id
         else:
             url = str(getattr(config, "url"))  # noqa: B009 - not every source type has a url
         self.calls.append(("source", url))

@@ -13,7 +13,7 @@ import os
 import re
 import secrets
 import stat
-from collections.abc import Hashable, Mapping
+from collections.abc import Callable, Hashable, Mapping
 from enum import StrEnum
 from pathlib import Path
 from typing import Annotated, Any, Final, Literal, Self, get_args
@@ -427,6 +427,20 @@ def parse_youtube_playlist(value: str) -> str:
     return value
 
 
+def _locator_check(parse: Callable[[str], object]) -> Callable[[object], object]:
+    """A ``before`` validator that runs ``parse`` on a non-empty string and returns it unchanged.
+
+    ``before``: the base model strips whitespace first, which would hide " UC1".
+    """
+
+    def check(value: object) -> object:
+        if isinstance(value, str) and value:
+            parse(value)
+        return value
+
+    return check
+
+
 class YoutubeChannelSource(_StrictModel):
     """A YouTube channel (id, ``@handle`` or channel URL); its latest videos are collected.
 
@@ -442,13 +456,9 @@ class YoutubeChannelSource(_StrictModel):
     max_age_days: StrictInt | None = Field(default=None, ge=1)
     max_items: StrictInt = Field(default=20, ge=1, le=200)
 
-    # ``before``: the base model strips whitespace first, which would hide " UC1".
-    @field_validator("channel_id", mode="before")
-    @classmethod
-    def _valid_locator(cls, value: object) -> object:
-        if isinstance(value, str) and value:
-            parse_youtube_channel(value)
-        return value
+    valid_locator = field_validator("channel_id", mode="before")(
+        _locator_check(parse_youtube_channel)
+    )
 
 
 class YoutubePlaylistSource(_StrictModel):
@@ -467,12 +477,9 @@ class YoutubePlaylistSource(_StrictModel):
     max_age_days: StrictInt | None = Field(default=None, ge=1)
     max_items: StrictInt = Field(default=20, ge=1, le=200)
 
-    @field_validator("playlist_id", mode="before")
-    @classmethod
-    def _valid_locator(cls, value: object) -> object:
-        if isinstance(value, str) and value:
-            parse_youtube_playlist(value)
-        return value
+    valid_locator = field_validator("playlist_id", mode="before")(
+        _locator_check(parse_youtube_playlist)
+    )
 
 
 _SourceUnion = RssSource | WebSource | SitemapSource | YoutubeChannelSource | YoutubePlaylistSource

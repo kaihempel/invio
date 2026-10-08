@@ -36,8 +36,8 @@ import tempfile
 from collections.abc import Callable, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, contextmanager
-from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from functools import cache, partial
 from pathlib import Path
 from typing import Final, Literal, Self
@@ -50,7 +50,7 @@ from invio.config.job import (
 )
 from invio.domain import Candidate, url_hash
 from invio.sources.errors import FetchError
-from invio.sources.freshness import clamp_or_expire
+from invio.sources.freshness import age_cutoff, clamp_or_expire
 
 __all__ = ["Extractor", "YoutubeSource"]
 
@@ -184,12 +184,12 @@ class YoutubeSource:
 
         videos = _videos(_entries(info, url))
         now = self._now()
-        cutoff = now - timedelta(days=config.max_age_days) if config.max_age_days else None
+        cutoff = age_cutoff(now, config.max_age_days)
         kept: list[_Video] = []
         for video in videos:
             keep, published = clamp_or_expire(video.published, now, cutoff)
             if keep:
-                kept.append(_Video(video.id, video.title, published))
+                kept.append(replace(video, published=published))
         return [
             Candidate(
                 url=video.url,
@@ -294,7 +294,7 @@ def _videos(entries: list[object]) -> list[_Video]:
             continue
         videos[video.id] = video
     if skipped:
-        _log.debug("skipped unusable youtube entries", extra={"count": skipped})
+        _log.debug("source.youtube_entries_skipped", extra={"count": skipped})
     return list(videos.values())
 
 
@@ -310,6 +310,7 @@ def _video(entry: object) -> _Video | None:
     if not title or title in _PLACEHOLDER_TITLES:
         return None
     availability = entry.get("availability")
+    # ``isinstance``: an unhashable value must not reach the frozenset lookup
     if isinstance(availability, str) and availability in _HIDDEN_AVAILABILITY:
         return None
     return _Video(video_id, title, _published_at(entry))
@@ -388,7 +389,7 @@ def _classify_safely(exc: BaseException) -> tuple[str, int | None]:
     try:
         return _classify(exc)
     except Exception as failure:  # e.g. an exception whose ``__str__`` raises
-        _log.debug("youtube error classification failed", extra={"error": type(failure).__name__})
+        _log.debug("source.youtube_classify_failed", extra={"error": type(failure).__name__})
         return "invalid_response", None
 
 
@@ -403,7 +404,7 @@ def _classify(exc: BaseException) -> tuple[str, int | None]:
         status = _http_status(node)
         if status is not None:
             return "http_status", status
-    network = (*_network_errors().transport, URLError, OSError)
+    network = (*_network_errors().transport, URLError, ConnectionError)
     if any(isinstance(n, network) for n in nodes):
         return "connection_failed", None
     text = " ".join(str(n) for n in nodes).lower()
@@ -414,8 +415,9 @@ def _classify(exc: BaseException) -> tuple[str, int | None]:
     if (
         _has_code(text, "404")
         or "does not exist" in text
-        or "private" in text
-        or "unavailable" in text
+        or "is private" in text
+        or "video unavailable" in text
+        or "playlist is unavailable" in text
     ):
         return "http_status", 404
     return "invalid_response", None

@@ -240,7 +240,8 @@ sources:
   placeholder or yt-dlp's `availability`), or that lack an id or title, are skipped.
 * `INVIO_YOUTUBE_TIMEOUT_SECONDS` (default 60) is the limit for one listing. It is best effort:
   a timed-out listing fails the source at once, but its worker thread runs on until yt-dlp's own
-  per-request socket timeout (at most 20 s) ends it; at most four such threads exist.
+  per-request socket timeout (at most 20 s) ends it; at most four such threads exist. The
+  process waits for such a thread when it exits, so shutdown can be delayed by that long.
   `INVIO_YOUTUBE_PROXY` (a secret; never logged) routes the requests through a proxy.
   `INVIO_YOUTUBE_COOKIES_FILE` points to a cookies file in Netscape format, which helps against
   "confirm you're not a bot" blocks on server IPs. The file is only read: yt-dlp gets a private

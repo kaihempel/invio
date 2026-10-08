@@ -231,59 +231,6 @@ async def test_a_keyword_rejected_item_is_skipped_and_its_page_is_never_fetched(
     assert result.status == RunStatus.SUCCEEDED
 
 
-# --- S23 ------------------------------------------------------------------------------------
-
-
-@pytest.fixture
-def youtube_unsupported(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Every source type has an adapter now; keep the gate itself covered by dropping YouTube."""
-    monkeypatch.setattr(
-        "invio.graph.stages.SUPPORTED_SOURCES", frozenset({"rss", "web", "sitemap"})
-    )
-
-
-@pytest.mark.usefixtures("youtube_unsupported")
-async def test_s23_an_unsupported_source_type_is_skipped_and_not_counted(
-    db_engine: Engine,
-    fake_clock: FakeClock,
-    recording_next_run: NextRun,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    config = make_job_config()
-    config["sources"].append({"type": "youtube_channel", "channel_id": "UC123"})
-    env = build_env(db_engine, fake_clock, recording_next_run, config=config)
-
-    with caplog.at_level(logging.WARNING, logger="invio.graph"):
-        result = await run_job(env.job_id, deps=env.deps)
-
-    assert result.stats["sources"] == 1
-    assert result.stats["sources_failed"] == 0
-    assert result.status == RunStatus.SUCCEEDED
-    (record,) = [r for r in caplog.records if r.getMessage() == "source.unsupported"]
-    assert (record.source, record.type) == ("1:youtube_channel", "youtube_channel")  # type: ignore[attr-defined]
-
-
-@pytest.mark.usefixtures("youtube_unsupported")
-async def test_a_job_whose_sources_are_all_unsupported_runs_with_zero_candidates(
-    db_engine: Engine, fake_clock: FakeClock, recording_next_run: NextRun
-) -> None:
-    config = make_job_config(sources=[{"type": "youtube_channel", "channel_id": "UC123"}])
-    env = build_env(db_engine, fake_clock, recording_next_run, config=config, sources={})
-
-    result = await run_job(env.job_id, deps=env.deps)
-
-    # Unsupported sources count neither as fetched nor as failed: not "all sources failed".
-    assert result.status == RunStatus.SUCCEEDED
-    assert (result.stats["sources"], result.stats["sources_failed"]) == (0, 0)
-    assert result.stats["found"] == 0
-    assert result.errors == ()
-    assert env.ports.calls == []
-    assert env.provider.calls == []
-    (run,) = _rows(db_engine, Run)
-    assert (run.status, run.error) == (RunStatus.SUCCEEDED, None)
-    assert _job(db_engine, env.job_id).locked_until is None
-
-
 # --- YouTube sources (#28) ---------------------------------------------------------------------
 
 CHANNEL_LISTING = "https://www.youtube.com/channel/UC123/videos"

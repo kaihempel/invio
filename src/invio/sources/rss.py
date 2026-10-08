@@ -13,7 +13,7 @@ import io
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Any, Final
 
 import feedparser
@@ -22,7 +22,7 @@ from feedparser.exceptions import CharacterEncodingOverride, NonXMLContentType
 from invio.config.job import RssSource
 from invio.domain import Candidate, url_hash
 from invio.sources.errors import FetchError
-from invio.sources.freshness import clamp_or_expire
+from invio.sources.freshness import age_cutoff, clamp_or_expire
 from invio.sources.http import NotModified, SafeHttpClient
 from invio.sources.text import TEASER_MAX_CHARS, collapse, html_to_text, teaser
 from invio.sources.urls import http_url_or_none
@@ -78,9 +78,7 @@ class RssFeedSource:
         if not feed.version or (feed.broken and not candidates):
             raise FetchError("malformed_feed", url=url)
         now = self._now()
-        cutoff = (
-            now - timedelta(days=config.max_age_days) if config.max_age_days is not None else None
-        )
+        cutoff = age_cutoff(now, config.max_age_days)
         seen: set[str] = set()
         kept: list[Candidate] = []
         for candidate in candidates:
