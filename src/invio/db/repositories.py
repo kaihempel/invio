@@ -7,12 +7,25 @@ errors surface immediately, and never commit or roll back (see ``session_scope``
 import builtins
 from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from enum import Enum
 from typing import Any, Final
 
-from sqlalchemy import ColumnElement, Select, and_, case, exists, func, insert, or_, select, update
+from sqlalchemy import (
+    ColumnElement,
+    Date,
+    Select,
+    SQLColumnExpression,
+    and_,
+    case,
+    exists,
+    func,
+    insert,
+    or_,
+    select,
+    update,
+)
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -823,72 +836,44 @@ class UsageRepository:
     ) -> builtins.list[UsageBucket]:
         """Sum usage per (job name, provider, model), and per UTC day if ``by_day``.
 
-        ``job_id`` keeps one job's rows, ``since`` the rows created at or after it. Without
-        ``by_day`` the database groups; with it, rows are bucketed by day here, because SQLite
-        and MariaDB have no common date-truncation function. Ordered by the grouping fields.
+        ``job_id`` keeps one job's rows, ``since`` the rows created at or after it. The database
+        groups in every case: ``created_at`` is stored as naive UTC, so ``DATE()`` (SQLite and
+        MariaDB alike) is the UTC day. Ordered by the grouping fields.
         """
         conditions: builtins.list[ColumnElement[bool]] = []
         if job_id is not None:
             conditions.append(LlmUsage.job_id == job_id)
         if since is not None:
             conditions.append(LlmUsage.created_at >= since)
+        keys: builtins.list[SQLColumnExpression[Any]] = [
+            Job.name,
+            LlmUsage.provider,
+            LlmUsage.model,
+        ]
         if by_day:
-            return self._by_day(conditions)
+            keys.append(func.date(LlmUsage.created_at, type_=Date))
         stmt = (
             select(
-                Job.name,
-                LlmUsage.provider,
-                LlmUsage.model,
+                *keys,
                 func.count(LlmUsage.id),
                 func.coalesce(func.sum(LlmUsage.input_tokens), 0),
                 func.coalesce(func.sum(LlmUsage.output_tokens), 0),
             )
             .join(Job, Job.id == LlmUsage.job_id)
             .where(*conditions)
-            .group_by(Job.name, LlmUsage.provider, LlmUsage.model)
-            .order_by(Job.name, LlmUsage.provider, LlmUsage.model)
+            .group_by(*keys)
+            .order_by(*keys)
         )
         # int(): MariaDB returns Decimal sums.
         return [
             UsageBucket(
-                job_name=name,
-                provider=provider,
-                model=model,
-                day=None,
-                calls=int(calls),
-                input_tokens=int(tokens_in),
-                output_tokens=int(tokens_out),
+                job_name=row[0],
+                provider=row[1],
+                model=row[2],
+                day=row[3] if by_day else None,
+                calls=int(row[-3]),
+                input_tokens=int(row[-2]),
+                output_tokens=int(row[-1]),
             )
-            for name, provider, model, calls, tokens_in, tokens_out in self._session.execute(stmt)
-        ]
-
-    def _by_day(self, conditions: Sequence[ColumnElement[bool]]) -> builtins.list[UsageBucket]:
-        stmt = (
-            select(
-                Job.name,
-                LlmUsage.provider,
-                LlmUsage.model,
-                LlmUsage.created_at,
-                LlmUsage.input_tokens,
-                LlmUsage.output_tokens,
-            )
-            .join(Job, Job.id == LlmUsage.job_id)
-            .where(*conditions)
-        )
-        sums: dict[tuple[str, str, str, date], tuple[int, int, int]] = {}
-        for name, provider, model, created_at, tokens_in, tokens_out in self._session.execute(stmt):
-            key = (name, provider, model, created_at.astimezone(UTC).date())
-            calls, given, produced = sums.get(key, (0, 0, 0))
-            sums[key] = (calls + 1, given + tokens_in, produced + tokens_out)
-        return [
-            UsageBucket(
-                job_name=name,
-                provider=provider,
-                model=model,
-                day=day,
-                calls=calls,
-                input_tokens=given,
-                output_tokens=produced,
-            )
-            for (name, provider, model, day), (calls, given, produced) in sorted(sums.items())
+            for row in self._session.execute(stmt)
         ]

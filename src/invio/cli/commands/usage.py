@@ -13,9 +13,8 @@ from typing import Annotated, Final
 import typer
 
 from invio.cli.console import stdout_console
-from invio.cli.errors import fail, mapped_errors
+from invio.cli.errors import mapped_errors
 from invio.cli.usage_output import unpriced_warning, usage_json, usage_table
-from invio.llm.base import ModelRegistryError
 from invio.llm.registry import ModelRegistry, default_registry
 from invio.services.usage import UsageGrouping, UsageService
 
@@ -60,12 +59,8 @@ def usage_command(
 ) -> None:
     """Show token usage and cost, priced with the current model registry."""
     start = _parse_since(since)
-    try:
-        registry = _make_registry()
-    except ModelRegistryError as exc:
-        raise fail(f"Configuration error: {exc}", 2) from exc
     with mapped_errors(config_exit=2):
-        report = _make_service().report(registry, by=by, job=job, since=start)
+        report = _make_service().report(_make_registry(), by=by, job=job, since=start)
     warning = unpriced_warning(report)
     if warning is not None:
         typer.echo(warning, err=True)

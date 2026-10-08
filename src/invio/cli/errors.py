@@ -8,6 +8,8 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from invio.config.job import JobConfigError
 from invio.config.settings import MissingSettingError
+from invio.llm.base import ModelRegistryError
+from invio.notify import DatabaseConfigError
 from invio.services.jobs import JobNotFoundError
 from invio.services.runs import RunNotFoundError
 
@@ -26,8 +28,9 @@ def mapped_errors(*, config_exit: int) -> Iterator[None]:
 
     Only the named types are caught (``typer.Exit`` is a ``RuntimeError``, so nothing broader
     is safe). Not found and database errors exit 1. A configuration problem (an invalid stored
-    job config, a missing setting) exits with ``config_exit``: 2 for the read-only commands, 1
-    for ``invio job run``, where "could not start" is one exit code (contract: cli-commands.md).
+    job config, a missing setting, an unusable database URL, an unreadable model registry) exits
+    with ``config_exit``: 2 for the read-only commands, 1 for ``invio job run``, where "could not
+    start" is one exit code (contract: cli-commands.md).
     """
     try:
         yield
@@ -35,7 +38,7 @@ def mapped_errors(*, config_exit: int) -> Iterator[None]:
         raise fail(f"Error: {exc}", 1) from exc
     except JobConfigError as exc:  # includes StoredJobConfigError
         raise fail(str(exc), config_exit) from exc
-    except MissingSettingError as exc:
+    except (MissingSettingError, DatabaseConfigError, ModelRegistryError) as exc:
         raise fail(f"Configuration error: {exc}", config_exit) from exc
     except SQLAlchemyError as exc:
         # Deliberately only the type name: the message may embed the database URL or SQL.

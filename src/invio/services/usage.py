@@ -8,21 +8,22 @@
 leave the service.
 """
 
+import contextlib
 from collections import defaultdict
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import UTC, date, datetime, time
 from decimal import Decimal
 from enum import StrEnum
-from typing import Self
+from typing import Self, assert_never
 
 from sqlalchemy.orm import Session, sessionmaker
 
 from invio.config.settings import Settings, get_settings
 from invio.db.repositories import JobRepository, UsageBucket, UsageRepository
-from invio.db.session import create_db_engine, session_factory, session_scope
+from invio.db.session import checked_session_factory, session_scope
 from invio.domain import COST_PRECISION
-from invio.llm.base import Usage
+from invio.llm.base import LLMConfigError, Usage
 from invio.llm.registry import ModelRegistry
 from invio.services.jobs import JobNotFoundError
 
@@ -73,17 +74,6 @@ class UsageReport:
         return self.total.unpriced_models
 
 
-@dataclass(frozen=True, slots=True)
-class _Part:
-    """The summed usage of one (group, provider, model) and its price, ``None`` if unpriced."""
-
-    model: str
-    calls: int
-    input_tokens: int
-    output_tokens: int
-    cost_usd: Decimal | None
-
-
 def _key(bucket: UsageBucket, by: UsageGrouping) -> str:
     match by:
         case UsageGrouping.PROVIDER:
@@ -92,17 +82,32 @@ def _key(bucket: UsageBucket, by: UsageGrouping) -> str:
             return f"{bucket.provider}/{bucket.model}"
         case UsageGrouping.JOB:
             return bucket.job_name
-        case _:  # UsageGrouping.DAY
-            assert bucket.day is not None  # by-day buckets always carry their day
+        case UsageGrouping.DAY:
+            if bucket.day is None:
+                raise ValueError("by-day report on a bucket without a day")
             return bucket.day.isoformat()
+        case _:
+            assert_never(by)
 
 
-def _price(registry: ModelRegistry, provider: str, model: str, usage: Usage) -> Decimal | None:
-    """The cost of ``usage``, or ``None`` if ``model`` is not registered for ``provider``."""
-    info = registry.get(model)
-    if info is None or info.provider != provider:
-        return None
-    return registry.cost(model, usage)
+def _part(registry: ModelRegistry, provider: str, model: str, sums: list[int]) -> UsageTotal:
+    """The summed usage of one (group, provider, model), priced if the registry knows the model.
+
+    A model registered under another provider counts as unpriced, like an unknown one.
+    """
+    calls, given, produced = sums
+    cost: Decimal | None = None
+    with contextlib.suppress(LLMConfigError):
+        registry.require(model, provider)
+        cost = registry.cost(model, Usage(given, produced))
+    return UsageTotal(
+        calls=calls,
+        input_tokens=given,
+        output_tokens=produced,
+        cost_usd=cost,
+        cost_complete=cost is not None,
+        unpriced_models=() if cost is not None else (f"{provider}/{model}",),
+    )
 
 
 def _sum(parts: Iterable[UsageTotal]) -> UsageTotal:
@@ -120,29 +125,6 @@ def _sum(parts: Iterable[UsageTotal]) -> UsageTotal:
     )
 
 
-def _group(key: str, parts: Iterable[_Part]) -> UsageGroup:
-    total = _sum(
-        UsageTotal(
-            calls=part.calls,
-            input_tokens=part.input_tokens,
-            output_tokens=part.output_tokens,
-            cost_usd=part.cost_usd,
-            cost_complete=part.cost_usd is not None,
-            unpriced_models=() if part.cost_usd is not None else (part.model,),
-        )
-        for part in parts
-    )
-    return UsageGroup(
-        key=key,
-        calls=total.calls,
-        input_tokens=total.input_tokens,
-        output_tokens=total.output_tokens,
-        cost_usd=total.cost_usd,
-        cost_complete=total.cost_complete,
-        unpriced_models=total.unpriced_models,
-    )
-
-
 class UsageService:
     """Report LLM usage and cost."""
 
@@ -151,9 +133,12 @@ class UsageService:
 
     @classmethod
     def from_settings(cls, settings: Settings | None = None) -> Self:
-        """Build a service on the database from ``INVIO_DATABASE_URL`` (``MissingSettingError``)."""
+        """Build a service on the database from ``INVIO_DATABASE_URL``.
+
+        Raises ``MissingSettingError`` when it is not set and ``DatabaseConfigError`` when unusable.
+        """
         url = (settings or get_settings()).require_secret("database_url")
-        return cls(session_factory(create_db_engine(url)))
+        return cls(checked_session_factory(url))
 
     def report(
         self,
@@ -184,9 +169,8 @@ class UsageService:
             sums[0] += bucket.calls
             sums[1] += bucket.input_tokens
             sums[2] += bucket.output_tokens
-        parts: defaultdict[str, list[_Part]] = defaultdict(list)
-        for (key, provider, model), (calls, given, produced) in tokens.items():
-            cost = _price(registry, provider, model, Usage(given, produced))
-            parts[key].append(_Part(f"{provider}/{model}", calls, given, produced, cost))
-        groups = tuple(_group(key, parts[key]) for key in sorted(parts))
+        parts: defaultdict[str, list[UsageTotal]] = defaultdict(list)
+        for (key, provider, model), sums in tokens.items():
+            parts[key].append(_part(registry, provider, model, sums))
+        groups = tuple(UsageGroup(key=key, **asdict(_sum(parts[key]))) for key in sorted(parts))
         return UsageReport(by=by, job=job, since=since, groups=groups, total=_sum(groups))

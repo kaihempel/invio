@@ -1,7 +1,7 @@
 """``UsageService.report`` over a fixture database (issue #35)."""
 
 from collections.abc import Iterator
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
@@ -9,10 +9,10 @@ from sqlalchemy import Engine, func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from invio.db.models import LlmUsage
-from invio.db.repositories import UsageRepository
+from invio.db.repositories import UsageBucket, UsageRepository
 from invio.db.session import session_factory, session_scope
 from invio.services.jobs import JobNotFoundError
-from invio.services.usage import UsageGroup, UsageGrouping, UsageReport, UsageService
+from invio.services.usage import UsageGroup, UsageGrouping, UsageReport, UsageService, _key
 from tests.cli_helpers import make_registry
 from tests.db_helpers import make_job, make_llm_usage
 
@@ -136,6 +136,34 @@ def test_by_day_buckets_by_utc_day(factory: sessionmaker[Session]) -> None:
     assert groups["2026-10-02"].input_tokens == 5_000
     assert groups["2026-10-02"].cost_usd == Decimal("0.007000")
     assert groups["2026-10-03"].unpriced_models == ("openai/unknown-x",)
+
+
+def test_by_day_uses_the_utc_day_of_an_offset_timestamp(factory: sessionmaker[Session]) -> None:
+    with session_scope(factory) as session:
+        job = make_job(session, "gamma")
+        # 2026-10-04 01:00 +02:00 is 2026-10-03 23:00 UTC.
+        created = datetime(2026, 10, 4, 1, 0, tzinfo=timezone(timedelta(hours=2)))
+        make_llm_usage(session, job, input_tokens=7, output_tokens=0, created_at=created)
+
+    groups = _by_key(_report(factory, by=UsageGrouping.DAY, job="gamma"))
+
+    assert list(groups) == ["2026-10-03"]
+    assert groups["2026-10-03"].input_tokens == 7
+
+
+def test_by_day_key_needs_a_day() -> None:
+    bucket = UsageBucket(
+        job_name="alpha",
+        provider="openai",
+        model="gpt-small",
+        day=None,
+        calls=1,
+        input_tokens=1,
+        output_tokens=1,
+    )
+
+    with pytest.raises(ValueError, match="without a day"):
+        _key(bucket, UsageGrouping.DAY)
 
 
 def test_since_keeps_rows_from_that_day_on(factory: sessionmaker[Session]) -> None:

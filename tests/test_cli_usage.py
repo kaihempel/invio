@@ -8,18 +8,18 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
-from sqlalchemy import Engine
+from sqlalchemy import URL, Engine
 from typer.testing import CliRunner, Result
 
 from invio.cli import main as cli_main
 from invio.cli.commands import usage as usage_module
 from invio.cli.usage_output import format_usage_cost
 from invio.config.settings import get_settings
+from invio.db import session as db_session_module
 from invio.db.models import Base
 from invio.db.session import create_db_engine, session_factory, session_scope
 from invio.llm.base import ModelRegistryError
 from invio.llm.registry import ModelRegistry, default_registry
-from invio.services import usage as usage_service_module
 from invio.services.usage import UsageService, UsageTotal
 from tests.cli_helpers import make_registry
 from tests.db_helpers import make_job, make_llm_usage
@@ -74,11 +74,11 @@ def service_engines(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[Engine]]:
     """The engines the real ``_make_service`` creates, disposed at teardown."""
     engines: list[Engine] = []
 
-    def tracked(url: str) -> Engine:
+    def tracked(url: URL) -> Engine:
         engines.append(create_db_engine(url))
         return engines[-1]
 
-    monkeypatch.setattr(usage_service_module, "create_db_engine", tracked)
+    monkeypatch.setattr(db_session_module, "create_db_engine", tracked)
     yield engines
     for engine in engines:
         engine.dispose()
@@ -231,6 +231,17 @@ def test_missing_database_url(monkeypatch: pytest.MonkeyPatch) -> None:
 
     assert result.exit_code == 2
     assert "Configuration error" in result.stderr
+
+
+def test_unusable_database_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(usage_module, "_make_registry", make_registry)
+    monkeypatch.setenv("INVIO_DATABASE_URL", "nosuchdialect://host/db")
+    get_settings.cache_clear()
+
+    result = CliRunner().invoke(cli_main.app, ["usage"])
+
+    assert result.exit_code == 2
+    assert "Configuration error: invalid database URL" in result.stderr
 
 
 def test_database_error(

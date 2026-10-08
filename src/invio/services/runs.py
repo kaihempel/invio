@@ -17,7 +17,7 @@ from invio.config.job import known_timezones
 from invio.config.settings import Settings, get_settings
 from invio.db.models import Run
 from invio.db.repositories import JobRepository, NotificationRepository, RunRepository
-from invio.db.session import create_db_engine, session_factory, session_scope
+from invio.db.session import checked_session_factory, session_scope
 from invio.domain import RunStatus
 from invio.services.jobs import JobNotFoundError
 
@@ -159,9 +159,12 @@ class RunService:
 
     @classmethod
     def from_settings(cls, settings: Settings | None = None) -> "RunService":
-        """Build a service on the database from ``INVIO_DATABASE_URL`` (``MissingSettingError``)."""
+        """Build a service on the database from ``INVIO_DATABASE_URL``.
+
+        Raises ``MissingSettingError`` when it is not set and ``DatabaseConfigError`` when unusable.
+        """
         url = (settings or get_settings()).require_secret("database_url")
-        return cls(session_factory(create_db_engine(url)))
+        return cls(checked_session_factory(url))
 
     def list(self, *, job: str | None = None, limit: int = 20) -> builtins.list[RunSummary]:
         """Return runs newest first (``started_at DESC, id DESC``), optionally of one job.

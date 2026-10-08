@@ -22,7 +22,7 @@ invio usage [--job NAME] [--since YYYY-MM-DD] [--by provider|model|job|day] [--j
 - `--json`: a single valid JSON document on stdout:
   `{"by", "job", "since", "groups": [{"key", "calls", "input_tokens", "output_tokens", "cost_usd", "cost_complete", "unpriced_models"}], "total": {...same fields minus key}, "unpriced_models": [...]}`.
   `cost_usd` is a decimal string (exact) or `null` when nothing in the group is priced.
-- Errors to stderr; missing `database_url` → exit 2; database error → exit 1; registry load failure → exit 2.
+- Errors to stderr; missing or unusable `database_url` → exit 2; database error → exit 1; registry load failure → exit 2.
 
 ## Cost rules
 
@@ -32,6 +32,8 @@ invio usage [--job NAME] [--since YYYY-MM-DD] [--by provider|model|job|day] [--j
   The group's cost shows as `≥ $X` (or `unknown` when no priced model contributes), `cost_complete=false`,
   the model is listed in `unpriced_models`, and a warning naming each unpriced model goes to stderr
   (also in `--json` mode, so stdout stays pure JSON).
+- Each (group, provider, model) cost is rounded to 6 decimals and the total is the sum of the group costs,
+  so totals under different `--by` options can differ by a few millionths of a dollar.
 
 ## Acceptance criteria (from the issue)
 
@@ -43,7 +45,8 @@ invio usage [--job NAME] [--since YYYY-MM-DD] [--by provider|model|job|day] [--j
 ## Design / layering
 
 - `src/invio/db/repositories.py`: `UsageRepository` grouped aggregation over (job name, provider, model, UTC day),
-  joined with `jobs`; day bucketing in Python for SQLite/MariaDB portability.
+  joined with `jobs`; the database groups in every case (`DATE(created_at)` is the UTC day on SQLite and
+  MariaDB, since `created_at` is stored as naive UTC).
 - `src/invio/services/usage.py` (new): `UsageService.from_settings()`, `report(...) -> UsageReport`
   (frozen dataclasses, no ORM objects cross the boundary). Unknown job → `JobNotFoundError`.
 - `src/invio/cli/commands/usage.py` (new, auto-discovered): option parsing, `_make_service()` / `_make_registry()`

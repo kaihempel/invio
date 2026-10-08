@@ -160,3 +160,11 @@ def check_database_url(raw: str) -> URL:
         message = scrub_database_url(str(exc), raw)
         raise DatabaseConfigError(f"database driver not installed: {message}") from None
     return url
+
+
+def checked_session_factory(raw: str) -> sessionmaker[Session]:
+    """Return a session factory on ``raw`` after :func:`check_database_url` accepted it.
+
+    Raises :class:`DatabaseConfigError` like :func:`check_database_url`; nothing connects yet.
+    """
+    return session_factory(create_db_engine(check_database_url(raw)))

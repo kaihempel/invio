@@ -428,7 +428,8 @@ the job name is never read from the file. Ctrl+C prints `aborted; nothing saved`
 
 Exit codes: `0` success (including a no-op enable/disable and an unchanged edit); `1` not found,
 already exists, invalid name, aborted, declined preview or delete, aborted edit; `2` invalid job
-file or stored config, missing setting, or an interactive command without a terminal.
+file or stored config, missing or unusable setting (database URL, model registry), or an
+interactive command without a terminal.
 
 ## LLM layer
 
@@ -683,13 +684,14 @@ Sums the `llm_usage` rows (one per LLM call) into one row per group (`--by`, def
 `Total` row; `No usage.` when nothing matches. `--job` keeps one job's rows (an unknown job
 exits 1), `--since` the rows from that day 00:00 UTC on. The cost is computed from the current
 model registry (`models.d/*.yaml`) on the summed tokens per group and model, not from the stored
-`cost_usd`. A model the registry does not price (for its provider) is never counted as zero: its
-tokens count, the cost shows as `≥ $X` (or `unknown` when nothing in the group is priced), and a
+`cost_usd`; each group's cost is rounded to 6 decimals, so totals under different `--by` can
+differ by a few millionths of a dollar. A model the registry does not price (for its provider)
+is never counted as zero: its tokens count, the cost shows as `≥ $X` (or `unknown` when nothing in the group is priced), and a
 warning naming each such model goes to stderr. `--json` prints one JSON document on stdout
 (`by`, `job`, `since`, `groups`, `total`, `unpriced_models`; costs are exact decimal strings or
 `null`, with `cost_complete` and `unpriced_models` per group). Exit codes: `0` success, `1`
-unknown job or database error, `2` invalid option, missing `INVIO_DATABASE_URL` or an unreadable
-model registry.
+unknown job or database error, `2` invalid option, a missing or unusable `INVIO_DATABASE_URL` or
+an unreadable model registry.
 
 Known limitations: the lock has no heartbeat, so a run longer than `INVIO_RUN_LOCK_SECONDS` can
 be overtaken by another one; a source type without an adapter would be

@@ -30,7 +30,7 @@ from invio.config.job import (
 from invio.config.settings import Settings, get_settings
 from invio.db.models import Job
 from invio.db.repositories import JobRepository, RunRepository
-from invio.db.session import create_db_engine, session_factory, session_scope
+from invio.db.session import checked_session_factory, session_scope
 from invio.db.types import utcnow
 from invio.domain import RunStatus
 from invio.scheduling.next_run import compute_next_run
@@ -193,10 +193,11 @@ class JobService:
     def from_settings(cls, settings: Settings | None = None) -> "JobService":
         """Build a service on the database from ``INVIO_DATABASE_URL``.
 
-        Raises ``MissingSettingError`` when no database URL is configured.
+        Raises ``MissingSettingError`` when no database URL is configured and
+        ``DatabaseConfigError`` when it is unusable.
         """
         url = (settings or get_settings()).require_secret("database_url")
-        return cls(session_factory(create_db_engine(url)))
+        return cls(checked_session_factory(url))
 
     # --- shared write steps ---------------------------------------------------------------
 
