@@ -157,3 +157,53 @@ def test_concurrent_claims_grant_exactly_one(db_engine: Engine) -> None:
         thread.join()
 
     assert sorted(results) == [False, True]
+
+
+DUE_BY = NOW
+
+
+def _claim_due(engine: Engine, job_id: int) -> bool:
+    with session_scope(session_factory(engine)) as session:
+        return JobRepository(session).claim(job_id, now=NOW, until=UNTIL, due_by=DUE_BY)
+
+
+def test_claim_with_due_by_takes_a_due_job(db_engine: Engine) -> None:
+    job_id = _make_job(db_engine, next_run_at=NOW - timedelta(hours=1))
+
+    assert _claim_due(db_engine, job_id) is True
+    assert _state(db_engine, job_id)[0] == UNTIL
+
+
+def test_claim_with_due_by_leaves_a_job_that_is_no_longer_due(db_engine: Engine) -> None:
+    job_id = _make_job(db_engine, next_run_at=NOW + timedelta(seconds=1))
+
+    assert _claim_due(db_engine, job_id) is False
+    assert _state(db_engine, job_id)[0] is None
+
+
+def test_claim_with_due_by_leaves_an_unscheduled_job(db_engine: Engine) -> None:
+    job_id = _make_job(db_engine, next_run_at=None)
+
+    assert _claim_due(db_engine, job_id) is False
+    assert _state(db_engine, job_id)[0] is None
+
+
+def test_claim_with_due_by_leaves_a_disabled_job(db_engine: Engine) -> None:
+    job_id = _make_job(db_engine, next_run_at=NOW - timedelta(hours=1), enabled=False)
+
+    assert _claim_due(db_engine, job_id) is False
+
+
+def test_claim_with_due_by_takes_a_due_job_with_an_expired_lock(db_engine: Engine) -> None:
+    job_id = _make_job(
+        db_engine, next_run_at=NOW - timedelta(hours=1), locked_until=NOW - timedelta(seconds=1)
+    )
+
+    assert _claim_due(db_engine, job_id) is True
+    assert _state(db_engine, job_id)[0] == UNTIL
+
+
+def test_claim_without_due_by_still_takes_a_job_with_a_future_next_run(db_engine: Engine) -> None:
+    job_id = _make_job(db_engine, next_run_at=NOW + timedelta(days=1))
+
+    assert _claim(db_engine, job_id) is True

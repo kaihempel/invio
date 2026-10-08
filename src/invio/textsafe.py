@@ -18,8 +18,12 @@ _CONTROL: Final = re.compile("[\x00-\x1f\x7f-\x9f\u2028\u2029]")
 
 _CONTROL_KEEPING_LAYOUT: Final = re.compile("[\x00-\x08\x0b-\x1f\x7f-\x9f\u2028\u2029]")
 # Invisible characters that can reorder or hide text: zero-width spaces and marks, bidi
-# embeddings, overrides and isolates, invisible operators and the byte order mark.
-_INVISIBLE: Final = re.compile("[\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]")
+# embeddings, overrides and isolates, invisible operators, the byte order mark and the Unicode
+# tag characters (which can smuggle hidden text). Lone surrogates (from a JSON ``\ud800``) cannot
+# be encoded on a UTF-8 stream, so they are removed too.
+_INVISIBLE: Final = re.compile(
+    "[\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff\ud800-\udfff\U000e0000-\U000e007f]"
+)
 
 
 def strip_control(text: str, *, limit: int | None = None, multiline: bool = False) -> str:
@@ -28,8 +32,8 @@ def strip_control(text: str, *, limit: int | None = None, multiline: bool = Fals
     Newlines and tabs become single spaces, so a title can never start a new output line.
     With ``multiline`` (a document body) the text keeps its newlines and tabs and is neither
     collapsed nor cut: ``\\r\\n`` and a lone ``\\r`` become ``\\n``; ANSI escapes and every other
-    C0, C1 and DEL character are removed. Bidi and zero-width characters are removed in both
-    modes.
+    C0, C1 and DEL character are removed. Bidi, zero-width and tag characters and lone
+    surrogates are removed in both modes.
     """
     text = _INVISIBLE.sub("", _ANSI.sub("", text))
     if multiline:

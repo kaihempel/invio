@@ -8,8 +8,9 @@ import pytest
 from sqlalchemy import Engine
 
 from invio.domain import RunStatus
+from invio.graph.ports import ProgressCounts
 from invio.llm.base import LLMUnavailableError
-from invio.pipeline import ProgressEvent
+from invio.pipeline import ProgressEvent, ProgressSnapshot
 from invio.pipeline.run import run_job
 from tests.conftest import FakeClock
 from tests.pipeline_helpers import (
@@ -193,3 +194,13 @@ async def test_a_relevant_item_that_fails_to_summarize_counts_as_relevant_and_fa
     last = recorder.events[-1].counts
     assert (last.relevant, last.failed) == (result.stats["relevant"], result.stats["failed"])
     assert last.relevant == 3
+
+
+def test_counts_and_snapshot_have_the_same_fields() -> None:
+    names = [field.name for field in dataclasses.fields(ProgressCounts)]
+    counts = ProgressCounts(**{name: index for index, name in enumerate(names, 1)})
+
+    snapshot = counts.snapshot()
+
+    assert [field.name for field in dataclasses.fields(ProgressSnapshot)] == names
+    assert dataclasses.astuple(snapshot) == tuple(range(1, len(names) + 1))

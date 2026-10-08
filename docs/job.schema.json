@@ -332,7 +332,7 @@
     },
     "SitemapSource": {
       "additionalProperties": false,
-      "description": "A sitemap.",
+      "description": "A sitemap (``urlset``, or a ``sitemapindex`` one level deep) whose URLs are candidates.\n\n``url_pattern`` (a regular expression searched in the absolute URL) keeps only matching\nURLs; entries whose ``lastmod`` is older than ``max_age_days`` (if set) are ignored.",
       "properties": {
         "type": {
           "const": "sitemap",
@@ -363,6 +363,32 @@
           "default": true,
           "title": "Enabled",
           "type": "boolean"
+        },
+        "url_pattern": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Url Pattern"
+        },
+        "max_age_days": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Age Days"
         }
       },
       "required": [

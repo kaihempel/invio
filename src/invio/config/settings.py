@@ -13,6 +13,7 @@ import os
 from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Literal, Self
+from urllib.parse import urlsplit
 
 from dotenv import dotenv_values
 from pydantic import AfterValidator, Field, SecretStr, field_validator, model_validator
@@ -30,6 +31,7 @@ SecretName = Literal[
     "anthropic_api_key",
     "google_api_key",
     "smtp_password",
+    "healthcheck_url",
     "youtube_proxy",
 ]
 
@@ -112,7 +114,7 @@ class Settings(BaseSettings):
 
     # Operations
     log_level: str = "INFO"
-    healthcheck_url: str | None = None
+    healthcheck_url: SecretStr | None = None  # a secret: the URL usually embeds a check id
     archive_dir: Path = Path("/var/lib/invio/archive")
 
     # YouTube source (the proxy URL may embed credentials, hence SecretStr)
@@ -136,6 +138,16 @@ class Settings(BaseSettings):
     @classmethod
     def _validate_log_level(cls, value: str) -> str:
         return parse_log_level(value)
+
+    @field_validator("healthcheck_url")
+    @classmethod
+    def _validate_healthcheck_url(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is None:
+            return None
+        parts = urlsplit(value.get_secret_value())
+        if parts.scheme not in ("http", "https") or not parts.hostname:
+            raise ValueError("must be an absolute http(s) URL")  # never echo the value
+        return value
 
     @model_validator(mode="after")
     def _validate_http_timeouts(self) -> Self:

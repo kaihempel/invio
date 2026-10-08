@@ -3,8 +3,9 @@
 :func:`stored_errors` is pure. It turns the run's :class:`~invio.graph.state.RunError` records
 (classes only) into entries a person can act on: the sanitized message of the failed outcome and
 the item's title and URL. Messages never carry provider, database or document text: they are the
-already sanitized outcome texts, ``sanitized_error`` for the fatal error, and
-``"<Class>: source failed"`` for a source (the source URL is never stored).
+already sanitized outcome texts, ``sanitized_error`` for the fatal error,
+``"<Class>: source failed"`` for a source (the source URL is never stored) and the delivery counts
+for a failed notification (never the SMTP server's text).
 """
 
 from collections.abc import Mapping, Sequence
@@ -15,20 +16,23 @@ from invio.domain import ItemStatus
 from invio.graph.nodes.persist import sanitized_error
 from invio.graph.nodes.relevance import RelevanceOutcome
 from invio.graph.nodes.summarize_item import SummaryOutcome
+from invio.graph.ports import DeliveryReport
 from invio.graph.scope import ItemRef
 from invio.graph.state import STAGE_ORDER, ItemResult, RunError, RunStage
 
 __all__ = [
+    "DELIVERY_ERROR",
     "MAX_MESSAGE_CHARS",
     "MAX_STORED_ERRORS",
-    "MAX_TITLE_CHARS",
     "StoredError",
+    "ordered_errors",
     "stored_errors",
 ]
 
 MAX_STORED_ERRORS: Final = 100
+# The ``error_class`` of the ``notify`` entry for a delivery that failed without raising.
+DELIVERY_ERROR: Final = "DeliveryError"
 MAX_MESSAGE_CHARS: Final = 500
-MAX_TITLE_CHARS: Final = 300
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -68,6 +72,14 @@ def _sort_key(error: RunError) -> tuple[int, int, str]:
     return STAGE_ORDER.index(error.stage), item, error.source or ""
 
 
+def ordered_errors(errors: Sequence[RunError]) -> list[RunError]:
+    """``errors`` de-duplicated and sorted by stage order, then item, then source.
+
+    The one order of a run's errors: ``RunResult.errors`` and ``runs.stats["errors"]`` agree.
+    """
+    return sorted(dict.fromkeys(errors), key=_sort_key)
+
+
 def _outcome_message(error: RunError, by_item: Mapping[int, ItemResult]) -> str | None:
     """The sanitized error text of the failed outcome ``error`` belongs to, if there is one."""
     result = by_item.get(error.item_id) if error.item_id is not None else None
@@ -85,26 +97,38 @@ def _outcome_message(error: RunError, by_item: Mapping[int, ItemResult]) -> str 
     return None
 
 
+def _delivery_message(delivery: DeliveryReport | None) -> str:
+    """What went wrong with the delivery, from its counts only."""
+    if delivery is None:
+        return f"{DELIVERY_ERROR}: delivery failed"
+    if delivery.failed > 0:
+        total = delivery.sent + delivery.failed
+        return f"{DELIVERY_ERROR}: {delivery.failed} of {total} notification(s) not sent"
+    return f"{DELIVERY_ERROR}: delivery did not start"
+
+
 def stored_errors(
     errors: Sequence[RunError],
     items: Sequence[ItemResult],
     refs: Mapping[int, ItemRef],
-    failure: BaseException | None,
+    *,
+    fatal: RunError | None = None,
+    failure: BaseException | None = None,
+    delivery: DeliveryReport | None = None,
 ) -> tuple[list[StoredError], int]:
     """Return ``(entries, omitted)``: sorted by stage order then item, de-duplicated, capped.
 
-    ``failure`` is the original exception of the first fatal error; the first error (in sorted
-    order) whose class equals its type takes its sanitized text.
+    ``fatal`` is the record of the run's first fatal error and ``failure`` its original
+    exception: the entry of exactly that record takes the sanitized text. ``delivery`` is the
+    report of a delivery that went wrong (the ``notify`` entry of :data:`DELIVERY_ERROR`).
     """
     by_item = {result.item_id: result for result in items}
-    ordered = sorted(errors, key=_sort_key)
-    fatal_class = type(failure).__name__ if failure is not None else None
-    fatal_used = False
     entries: list[StoredError] = []
-    for error in ordered:
-        if failure is not None and not fatal_used and error.error_class == fatal_class:
+    for error in ordered_errors(errors):
+        if failure is not None and error == fatal:
             message = sanitized_error(failure)
-            fatal_used = True
+        elif error.stage == "notify" and error.error_class == DELIVERY_ERROR:
+            message = _delivery_message(delivery)
         elif error.source is not None:
             message = f"{error.error_class}: source failed"
         else:
@@ -116,10 +140,9 @@ def stored_errors(
                 error_class=error.error_class,
                 message=message[:MAX_MESSAGE_CHARS],
                 item_id=error.item_id,
-                title=ref.title[:MAX_TITLE_CHARS] if ref is not None else None,
+                title=ref.title if ref is not None else None,
                 url=ref.url if ref is not None else None,
                 source=error.source,
             )
         )
-    unique = list(dict.fromkeys(entries))
-    return unique[:MAX_STORED_ERRORS], max(0, len(unique) - MAX_STORED_ERRORS)
+    return entries[:MAX_STORED_ERRORS], max(0, len(entries) - MAX_STORED_ERRORS)

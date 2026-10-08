@@ -30,6 +30,7 @@ from invio.domain import (
 __all__ = [
     "KEEP",
     "DigestRepository",
+    "DueJob",
     "ItemRepository",
     "JobRepository",
     "NotificationRepository",
@@ -43,8 +44,21 @@ class _Keep(Enum):
     KEEP = "keep"
 
 
+# Rows ``RunRepository.failure_streak`` looks at; far more than any streak cap needs.
+_STREAK_SCAN_LIMIT: Final = 50
+
 # Sentinel for ``JobRepository.release``: leave ``next_run_at`` as it is (``None`` clears it).
 KEEP: Final = _Keep.KEEP
+
+
+@dataclass(frozen=True, slots=True)
+class DueJob:
+    """A job selected by :meth:`JobRepository.list_due`; just what ``run-due`` needs."""
+
+    id: int
+    name: str
+    next_run_at: datetime
+    locked_until: datetime | None
 
 
 def _all[T](session: Session, stmt: Select[T]) -> builtins.list[T]:
@@ -65,19 +79,31 @@ class JobRepository:
         """Return the job with ``job_id`` or ``None``."""
         return self._session.get(Job, job_id)
 
-    def claim(self, job_id: int, *, now: datetime, until: datetime) -> bool:
+    def claim(
+        self, job_id: int, *, now: datetime, until: datetime, due_by: datetime | None = None
+    ) -> bool:
         """Take the run lock: set ``locked_until = until`` if it is free or expired (``<= now``).
 
         One conditional UPDATE (the SQL of #23 step 2), so of several concurrent callers exactly
-        one gets ``True``. Does not commit; the caller owns the transaction. The
-        ``until`` value doubles as the ownership token for :meth:`release`.
+        one gets ``True``. With ``due_by`` the same UPDATE also requires the job to be enabled
+        and ``next_run_at <= due_by``: a job finished by another run since it was selected is not
+        claimed. Does not commit; the caller owns the transaction. The ``until`` value doubles as
+        the ownership token for :meth:`release`.
         """
+        conditions = [Job.id == job_id, or_(Job.locked_until.is_(None), Job.locked_until <= now)]
+        if due_by is not None:
+            conditions += [
+                Job.enabled.is_(True),
+                Job.next_run_at.is_not(None),
+                Job.next_run_at <= due_by,
+            ]
         result = self._session.execute(
             update(Job)
-            .where(Job.id == job_id, or_(Job.locked_until.is_(None), Job.locked_until <= now))
+            .where(*conditions)
             .values(locked_until=until)
             .execution_options(synchronize_session=False)
         )
+        # Matched rows (not changed rows): MariaDB reports FOUND_ROWS for these drivers.
         return result.rowcount == 1  # type: ignore[attr-defined, no-any-return]
 
     def release(
@@ -106,6 +132,24 @@ class JobRepository:
         if enabled_only:
             stmt = stmt.where(Job.enabled.is_(True))
         return _all(self._session, stmt)
+
+    def list_due(self, now: datetime) -> builtins.list[DueJob]:
+        """Return the enabled jobs with ``next_run_at <= now``, oldest first (then by id).
+
+        Read-only, one SELECT over ``ix_jobs_enabled_next_run_at``. Locked jobs are included
+        (``locked_until`` tells the caller). There is no limit: ``run-due`` sets the busy jobs
+        aside first, so they never use up ``--limit``.
+        """
+        stmt = (
+            select(Job.id, Job.name, Job.next_run_at, Job.locked_until)
+            .where(Job.enabled.is_(True), Job.next_run_at.is_not(None), Job.next_run_at <= now)
+            .order_by(Job.next_run_at, Job.id)
+        )
+        due: builtins.list[DueJob] = []
+        for job_id, name, next_run_at, locked_until in self._session.execute(stmt):
+            if next_run_at is not None:  # always true: the WHERE clause excludes NULL
+                due.append(DueJob(job_id, name, next_run_at, locked_until))
+        return due
 
     def add(self, job: Job) -> Job:
         """Insert ``job`` and flush; a duplicate name raises ``IntegrityError``."""
@@ -162,6 +206,36 @@ class RunRepository:
             stmt = stmt.limit(limit)
         return _all(self._session, stmt)
 
+    def failure_streak(self, job_id: int, *, exclude_run_id: int, cap: int) -> int:
+        """Count the job's consecutive ``failed`` runs, newest first, up to ``cap``.
+
+        Skips ``exclude_run_id``, runs still ``running`` (in SQL, so they never use up the scan
+        limit) and dry runs (``stats["dry_run"]``, in Python: JSON). The count stops at the first
+        ``succeeded`` or ``partial`` run. Reads at most ``_STREAK_SCAN_LIMIT`` finished rows, so
+        a history of nothing but dry runs can under-count. Read-only.
+        """
+        rows = self._session.execute(
+            select(Run.status, Run.stats)
+            .where(
+                Run.job_id == job_id,
+                Run.id != exclude_run_id,
+                Run.status != RunStatus.RUNNING,
+            )
+            .order_by(Run.started_at.desc(), Run.id.desc())
+            .limit(_STREAK_SCAN_LIMIT)
+        )
+        streak = 0
+        for status, stats in rows:
+            if (stats or {}).get("dry_run") is True:
+                continue
+            if status == RunStatus.FAILED:
+                streak += 1
+                if streak >= cap:
+                    break
+            elif status in (RunStatus.SUCCEEDED, RunStatus.PARTIAL):
+                break
+        return streak
+
     def record_errors(
         self, run_id: int, entries: Sequence[Mapping[str, Any]], *, omitted: int = 0
     ) -> bool:
@@ -187,22 +261,23 @@ class RunRepository:
 
     def list_recent(
         self, *, job_id: int | None = None, limit: int = 20
-    ) -> builtins.list[tuple[Run, str, dict[str, Any]]]:
-        """Return ``(run, job name, job config)`` newest first (``started_at DESC, id DESC``).
+    ) -> builtins.list[tuple[Run, str, str | None]]:
+        """Return ``(run, job name, schedule timezone)`` newest first (``started_at DESC, id
+        DESC``).
 
-        One query; ``job_id`` restricts it to one job.
+        One query that reads only ``config.schedule.timezone`` of the job config (unvalidated,
+        ``None`` if absent); ``job_id`` restricts it to one job.
         """
+        zone = Job.config["schedule"]["timezone"].as_string()
         stmt = (
-            select(Run, Job.name, Job.config)
+            select(Run, Job.name, zone)
             .join(Job, Job.id == Run.job_id)
             .order_by(Run.started_at.desc(), Run.id.desc())
             .limit(limit)
         )
         if job_id is not None:
             stmt = stmt.where(Run.job_id == job_id)
-        return [
-            (run, name, dict(config or {})) for run, name, config in self._session.execute(stmt)
-        ]
+        return [(run, name, tz) for run, name, tz in self._session.execute(stmt)]
 
     def has_successful_run(self, job_id: int) -> bool:
         """Whether the job has any run with status ``succeeded`` or ``partial``."""
@@ -647,6 +722,16 @@ class NotificationRepository:
         """Return the run's notifications by id."""
         stmt = select(Notification).where(Notification.run_id == run_id).order_by(Notification.id)
         return _all(self._session, stmt)
+
+    def delivery_counts(self, run_id: int) -> tuple[int, int]:
+        """Return ``(sent, not sent)`` of the run's notifications.
+
+        Every row that is not ``sent`` counts as not sent (a ``pending`` row was never
+        delivered), like ``deliver_digest`` counts them.
+        """
+        rows = self.list_for_run(run_id)
+        sent = sum(1 for row in rows if row.status == NotificationStatus.SENT)
+        return sent, len(rows) - sent
 
 
 @dataclass(frozen=True, slots=True)

@@ -93,7 +93,7 @@ A new module, `src/invio/cli/commands/run.py`, which is auto-discovered as the `
 | Option | Default | Rule |
 |---|---|---|
 | `--job NAME` | all jobs | an unknown job gives `Error: job '<name>' not found`, exit 1 |
-| `--limit N` | 20 | `N >= 1`, else `Error: --limit must be at least 1`, exit 1 |
+| `--limit N` | 20 | `1 <= N <= 1000`, else `Error: --limit must be between 1 and 1000`, exit 1 |
 
 **Output (stdout)**: a table, newest first. Columns: `ID`, `Job`, `Started`, `Duration`,
 `Status` (with a ` (dry)` suffix for dry runs), `Found`, `New`, `Relevant`. A missing count is
@@ -113,21 +113,24 @@ Run 42 · job daily-ai · partial (dry run)
 Started   2026-10-07 06:00 CEST   Finished 2026-10-07 06:01 CEST   Duration 63.2 s
 Error     —
 
-<stats table: same rows as `job run`, without notification rows>
+<stats table: same rows as `job run`; notification rows only when the run has notification rows>
 
 Tokens: in 48,211 · out 5,120 · total 53,331 · cost ≥ $0.0103 (2 calls without price)
 
 Errors (3)
   score_relevance  LLMInvalidOutputError: the model returned an invalid answer
-                   "Some article title" — https://example.org/a
+                   #12 "Some article title" — https://example.org/a
   summarize_item   LLMUnavailableError: call failed (provider fakeco, model fakeco-priced)
-                   "Other title" — https://example.org/b
+                   #15 "Other title" — https://example.org/b
   fetch_sources    FetchError: source failed  (source #2, rss)
 ```
 
 Rules:
 - `Errors` lists every stored error, sorted by stage order and then item id.
-  - Item errors show the title and URL.
+  - Item errors show the item id, title and URL.
+  - A delivery that went wrong without raising is one `notify` entry,
+    `DeliveryError: <failed> of <total> notification(s) not sent` (or `delivery did not start`);
+    the SMTP server's text is never stored.
   - Source errors show `source #<index+1>, <type>`, parsed from the key.
   - When `errors_omitted > 0`, a final line `… and <n> more not stored`.
 - No stored list (legacy run): `Errors: item errors are not available for this run`. The run's

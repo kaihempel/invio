@@ -15,16 +15,18 @@ from invio.db.repositories import JobRepository, RunRepository
 from invio.db.session import session_factory, session_scope
 from invio.domain import ItemStatus, RunStatus
 from invio.graph.errors import (
+    DELIVERY_ERROR,
     MAX_MESSAGE_CHARS,
     MAX_STORED_ERRORS,
-    MAX_TITLE_CHARS,
     StoredError,
+    ordered_errors,
     stored_errors,
 )
 from invio.graph.nodes.persist import sanitized_error
 from invio.graph.nodes.relevance import RelevanceOutcome
 from invio.graph.nodes.summarize_item import SummaryOutcome
-from invio.graph.scope import ItemRef
+from invio.graph.ports import DeliveryReport
+from invio.graph.scope import MAX_TITLE_CHARS, MAX_URL_CHARS, ItemRef
 from invio.graph.state import ItemResult, RunError
 from invio.pipeline.run import run_job
 from invio.sources.errors import FetchError
@@ -73,7 +75,7 @@ def test_an_item_error_takes_the_outcome_text_title_and_url() -> None:
     items = [_failed_relevance(4, "LLMInvalidOutputError: bad answer")]
     refs = {4: ItemRef(title="A title", url="https://example.org/a")}
 
-    entries, omitted = stored_errors(errors, items, refs, None)
+    entries, omitted = stored_errors(errors, items, refs)
 
     assert omitted == 0
     assert entries == [
@@ -92,7 +94,7 @@ def test_a_summary_error_takes_the_summary_outcome_text() -> None:
     errors = [RunError(stage="summarize_item", error_class="LLMUnavailableError", item_id=2)]
     items = [_failed_summary(2, "LLMUnavailableError: call failed")]
 
-    (entry,), _ = stored_errors(errors, items, {}, None)
+    (entry,), _ = stored_errors(errors, items, {})
 
     assert entry.message == "LLMUnavailableError: call failed"
     assert entry.title is None and entry.url is None
@@ -101,7 +103,7 @@ def test_a_summary_error_takes_the_summary_outcome_text() -> None:
 def test_an_item_error_without_an_outcome_falls_back_to_the_class() -> None:
     errors = [RunError(stage="extract_text", error_class="KeyError", item_id=2)]
 
-    (entry,), _ = stored_errors(errors, [], {}, None)
+    (entry,), _ = stored_errors(errors, [], {})
 
     assert entry.message == "KeyError"
 
@@ -111,7 +113,7 @@ def test_an_item_error_at_another_stage_never_borrows_an_outcome_text() -> None:
     errors = [RunError(stage="persist", error_class="OperationalError", item_id=4)]
     items = [_failed_relevance(4, "LLMInvalidOutputError: bad answer")]
 
-    (entry,), _ = stored_errors(errors, items, {}, None)
+    (entry,), _ = stored_errors(errors, items, {})
 
     assert entry.message == "OperationalError"
 
@@ -127,7 +129,7 @@ def test_an_item_error_whose_outcome_did_not_fail_falls_back_to_the_class() -> N
     )
     errors = [RunError(stage="score_relevance", error_class="TimeoutError", item_id=5)]
 
-    (entry,), _ = stored_errors(errors, [ItemResult(item_id=5, relevance=rated)], {}, None)
+    (entry,), _ = stored_errors(errors, [ItemResult(item_id=5, relevance=rated)], {})
 
     assert entry.message == "TimeoutError"
 
@@ -135,7 +137,7 @@ def test_an_item_error_whose_outcome_did_not_fail_falls_back_to_the_class() -> N
 def test_a_source_error_names_the_key_but_no_url() -> None:
     errors = [RunError(stage="fetch_sources", error_class="FetchError", source="0:rss")]
 
-    (entry,), _ = stored_errors(errors, [], {}, None)
+    (entry,), _ = stored_errors(errors, [], {})
 
     assert entry.message == "FetchError: source failed"
     assert entry.source == "0:rss"
@@ -148,7 +150,7 @@ def test_a_fatal_error_uses_the_sanitized_failure() -> None:
     failure = caught.value
     errors = [RunError(stage="load_job", error_class="ValidationError")]
 
-    (entry,), _ = stored_errors(errors, [], {}, failure)
+    (entry,), _ = stored_errors(errors, [], {}, fatal=errors[0], failure=failure)
 
     assert entry.message == sanitized_error(failure)
     assert entry.stage == "load_job"
@@ -163,7 +165,7 @@ def test_entries_are_sorted_by_stage_then_item_and_deduplicated() -> None:
         RunError(stage="fetch_sources", error_class="FetchError", source="0:rss"),
     ]
 
-    entries, _ = stored_errors(errors, [], {}, None)
+    entries, _ = stored_errors(errors, [], {})
 
     assert [(e.stage, e.item_id) for e in entries] == [
         ("fetch_sources", None),
@@ -176,21 +178,72 @@ def test_entries_are_sorted_by_stage_then_item_and_deduplicated() -> None:
 def test_the_list_is_capped_and_the_rest_counted() -> None:
     errors = [RunError(stage="score_relevance", error_class="E", item_id=n) for n in range(150)]
 
-    entries, omitted = stored_errors(errors, [], {}, None)
+    entries, omitted = stored_errors(errors, [], {})
 
     assert len(entries) == MAX_STORED_ERRORS == 100
     assert omitted == 50
 
 
-def test_message_and_title_are_truncated() -> None:
+def test_the_message_is_truncated() -> None:
     errors = [RunError(stage="score_relevance", error_class="E", item_id=1)]
     items = [_failed_relevance(1, "E: " + "x" * 900)]
-    refs = {1: ItemRef(title="t" * 900, url="https://example.org/")}
 
-    (entry,), _ = stored_errors(errors, items, refs, None)
+    (entry,), _ = stored_errors(errors, items, {})
 
     assert len(entry.message) == MAX_MESSAGE_CHARS == 500
-    assert entry.title is not None and len(entry.title) == MAX_TITLE_CHARS == 300
+
+
+def test_an_item_ref_is_sanitized_and_bounded() -> None:
+    ref = ItemRef.of(
+        "\x1b[31mRed\x1b[0m\ntitle " + "t" * 900,
+        "https://user:pw@example.org/" + "p" * 900 + "?token=secret#frag",
+    )
+
+    assert ref.title.startswith("Red title ")
+    assert len(ref.title) == MAX_TITLE_CHARS == 300
+    assert len(ref.url) == MAX_URL_CHARS == 500
+    assert "secret" not in ref.url and "pw" not in ref.url and "#" not in ref.url
+
+
+def test_the_fatal_text_goes_to_the_fatal_record_only() -> None:
+    """A non-fatal error of the same class as the fatal one keeps its own message."""
+    with pytest.raises(ValidationError) as caught:
+        JobConfig.model_validate({})
+    failure = caught.value
+    earlier = RunError(stage="score_relevance", error_class="ValidationError", item_id=3)
+    fatal = RunError(stage="synthesize_digest", error_class="ValidationError")
+    items = [_failed_relevance(3, "ValidationError: item text")]
+
+    first, second = stored_errors([fatal, earlier], items, {}, fatal=fatal, failure=failure)[0]
+
+    assert (first.stage, first.message) == ("score_relevance", "ValidationError: item text")
+    assert (second.stage, second.message) == ("synthesize_digest", sanitized_error(failure))
+
+
+@pytest.mark.parametrize(
+    ("delivery", "message"),
+    [
+        (DeliveryReport(sent=2, failed=1), "1 of 3 notification(s) not sent"),
+        (DeliveryReport(sent=0, failed=0, error="smtp: secret"), "delivery did not start"),
+        (None, "delivery failed"),
+    ],
+)
+def test_a_delivery_error_is_described_by_its_counts(
+    delivery: DeliveryReport | None, message: str
+) -> None:
+    errors = [RunError(stage="notify", error_class=DELIVERY_ERROR)]
+
+    (entry,), _ = stored_errors(errors, [], {}, delivery=delivery)
+
+    assert entry.message == f"{DELIVERY_ERROR}: {message}"
+    assert "secret" not in entry.message
+
+
+def test_ordered_errors_deduplicates_and_sorts() -> None:
+    late = RunError(stage="persist", error_class="E")
+    early = RunError(stage="score_relevance", error_class="E", item_id=2)
+
+    assert ordered_errors([late, early, late, early]) == [early, late]
 
 
 def test_to_json_omits_none_fields() -> None:
@@ -331,6 +384,25 @@ async def test_a_stage_that_raises_is_stored(db_engine: Engine, fake_clock: Fake
     errors = _stats(db_engine)["errors"]
     assert errors[0]["stage"] == "fetch_sources"
     assert "secret detail" not in str(errors)
+
+
+@pytest.mark.usefixtures("clean_jobs")
+async def test_a_failed_delivery_is_stored_and_makes_the_run_partial(
+    db_engine: Engine, fake_clock: FakeClock
+) -> None:
+    env = build_env(db_engine, fake_clock)
+    env.ports.notifier.report = DeliveryReport(sent=1, failed=1, error="smtp said secret")
+
+    result = await run_job(env.job_id, deps=env.deps)
+
+    assert result.status == RunStatus.PARTIAL
+    assert result.errors == (RunError(stage="notify", error_class=DELIVERY_ERROR),)
+    (entry,) = _stats(db_engine)["errors"]
+    assert entry == {
+        "stage": "notify",
+        "error_class": DELIVERY_ERROR,
+        "message": f"{DELIVERY_ERROR}: 1 of 2 notification(s) not sent",
+    }
 
 
 @pytest.mark.usefixtures("clean_jobs")

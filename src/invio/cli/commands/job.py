@@ -407,7 +407,7 @@ def _run_errors() -> Iterator[None]:
     except ValidationError as exc:
         raise fail(f"Configuration error: {settings_error(exc)}", 1) from exc
     except KeyboardInterrupt as exc:
-        raise fail("interrupted; a started run is recorded as failed", 1) from exc
+        raise fail("interrupted; if a run had started, it is recorded as failed", 1) from exc
 
 
 async def _run_once(
@@ -428,7 +428,12 @@ def _print_result(result: RunResult, *, show_digest: bool) -> None:
     if show_digest:
         digest = result.digest
         if digest is None or not digest.item_ids:
-            typer.echo("No digest: nothing relevant was found.")
+            reason = (
+                "the run failed"
+                if result.status is RunStatus.FAILED
+                else "nothing relevant was found"
+            )
+            typer.echo(f"No digest: {reason}.")
         else:
             typer.echo(f"# {strip_control(digest.title)}\n")
             typer.echo(strip_control(digest.body, multiline=True))

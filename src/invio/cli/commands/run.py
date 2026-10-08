@@ -5,7 +5,7 @@ invalid ``--limit``, 2 missing settings or invalid stored configuration or usage
 module-level ``_make_service`` is a test seam.
 """
 
-from typing import Annotated
+from typing import Annotated, Final
 
 import typer
 
@@ -25,6 +25,8 @@ from invio.textsafe import strip_control
 
 app = typer.Typer(help="Inspect job runs.", no_args_is_help=True)
 
+MAX_LIMIT: Final = 1000
+
 
 def _make_service() -> RunService:
     return RunService.from_settings()
@@ -33,11 +35,13 @@ def _make_service() -> RunService:
 @app.command("list")
 def list_runs(
     job: Annotated[str | None, typer.Option("--job", help="Only the runs of this job.")] = None,
-    limit: Annotated[int, typer.Option("--limit", help="Show at most this many runs.")] = 20,
+    limit: Annotated[
+        int, typer.Option("--limit", help=f"Show at most this many runs (1-{MAX_LIMIT}).")
+    ] = 20,
 ) -> None:
     """List runs, newest first."""
-    if limit < 1:
-        raise fail("Error: --limit must be at least 1", 1)
+    if not 1 <= limit <= MAX_LIMIT:
+        raise fail(f"Error: --limit must be between 1 and {MAX_LIMIT}", 1)
     with mapped_errors(config_exit=2):
         summaries = _make_service().list(job=job, limit=limit)
     if not summaries:
@@ -71,7 +75,7 @@ def show(run_id: Annotated[int, typer.Argument(help="Run id.")]) -> None:
             stats=detail.stats,
             started_at=detail.started_at,
             finished_at=detail.finished_at,
-            notifications=None,
+            notifications=detail.notifications,
         )
     )
     typer.echo()

@@ -20,11 +20,11 @@ from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, HttpUrl
-from sqlalchemy import Engine, inspect
+from sqlalchemy import Engine, inspect, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from invio.config.job import JobConfig, LLMConfig, ScheduleConfig, SourceConfig
-from invio.db.models import Digest, Item, Job, LlmUsage, Notification
+from invio.db.models import Digest, Item, Job, LlmUsage, Notification, Run
 from invio.db.repositories import JobRepository, RunRepository
 from invio.db.session import session_factory, session_scope
 from invio.domain import Candidate, RunStatus
@@ -34,6 +34,7 @@ from invio.llm.base import LLMError, LLMProvider, Usage, structured_with_repair
 from invio.llm.fake import FakeReply, FakeScriptExhaustedError, FakeStep
 from invio.llm.registry import ModelRegistry, load_registry
 from invio.retry import RetrySettings, Sleep
+from invio.scheduling import backoff
 from tests.async_helpers import RecordingSleep
 from tests.db_helpers import make_candidate
 from tests.llm_helpers import FIXTURE_REGISTRY_DIR
@@ -151,6 +152,16 @@ class RoutedFakeProvider:
         self.in_flight = 0
         self.max_in_flight = 0
         self.closed = False
+
+    def route(self, purpose: str, route: Route) -> None:
+        """Replace the route of ``purpose`` (``relevance``, ``summarize`` or ``synthesize``)."""
+        if purpose not in self._routes:
+            raise KeyError(purpose)
+        self._routes[purpose] = route
+        if isinstance(route, Sequence):
+            self._queues[purpose] = deque(route)
+        else:
+            self._queues.pop(purpose, None)
 
     def requests_for(self, purpose: str) -> list[ProviderCall]:
         """The recorded requests of one purpose, in arrival order."""
@@ -471,6 +482,7 @@ def make_deps(
     next_run: Callable[[ScheduleConfig, datetime], datetime] = plus_one_hour,
     provider_for: Callable[[LLMConfig], ProviderBinding] | None = None,
     lock_ttl: timedelta = timedelta(hours=2),
+    retry_delay: Callable[[int], timedelta] = backoff.retry_delay,
 ) -> RunDeps:
     """``RunDeps`` over the fake ports and ``provider`` (fixture registry, no waiting)."""
     registry = fixture_registry()
@@ -492,6 +504,7 @@ def make_deps(
         notify=ports.notifier,
         next_run=next_run,
         clock=clock,
+        retry_delay=retry_delay,
         concurrency=concurrency,
         retry=retry or RetrySettings(jitter=False),
         lock_ttl=lock_ttl,
@@ -608,8 +621,20 @@ __all__ = [
     "relevance_reply",
     "snapshot",
     "store_job",
+    "stored_runs",
     "summary_reply",
 ]
+
+
+def stored_runs(factory: sessionmaker[Session], job_id: int | None = None) -> list[Run]:
+    """The stored runs (of ``job_id``, if given), newest first, detached from the session."""
+    stmt = select(Run).order_by(Run.started_at.desc(), Run.id.desc())
+    if job_id is not None:
+        stmt = stmt.where(Run.job_id == job_id)
+    with session_scope(factory) as session:
+        rows = list(session.scalars(stmt))
+        session.expunge_all()
+        return rows
 
 
 def add_run(

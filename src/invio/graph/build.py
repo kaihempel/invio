@@ -233,9 +233,9 @@ def _fatal(
     stage: RunStage, err: Exception, scope: RunScope, *, item_id: int | None = None
 ) -> RunState:
     logger.error("run.stage_failed", extra={"stage": stage, "error": type(err).__name__})
-    if scope.failure is None:
-        scope.failure = err
     recorded = error_of(stage, err, item_id=item_id)
+    if scope.failure is None:
+        scope.failure, scope.fatal = err, recorded
     return {"fatal": recorded, "errors": [recorded]}
 
 

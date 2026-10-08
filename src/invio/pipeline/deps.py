@@ -24,10 +24,12 @@ from invio.llm.base import LLMProvider
 from invio.llm.factory import resolve
 from invio.llm.registry import ModelRegistry, default_registry
 from invio.notify.email import deliver_digest
+from invio.scheduling.backoff import retry_delay
 from invio.scheduling.next_run import compute_next_run
 from invio.sources.http import HttpClientConfig, NotModified, SafeHttpClient
 from invio.sources.netguard import Resolver
 from invio.sources.rss import RssFeedSource
+from invio.sources.sitemap import SitemapUrlSource
 from invio.sources.web import WebPageSource
 
 __all__ = ["default_deps"]
@@ -62,6 +64,7 @@ async def default_deps(
         )
         web = WebPageSource(client)
         rss = RssFeedSource(client)
+        sitemap = SitemapUrlSource(client)
         web_source = web
 
         async def fetch_source(config: SourceConfig) -> list[Candidate]:
@@ -69,6 +72,8 @@ async def default_deps(
                 return await rss.fetch(config)
             if config.type == "web":
                 return await web_source.fetch(config)
+            if config.type == "sitemap":
+                return await sitemap.fetch(config)
             raise ValueError(f"no adapter for source type {config.type}")  # skipped before this
 
         async def fetch_page(url: str) -> str:
@@ -108,6 +113,7 @@ async def default_deps(
                 notify=notify,
                 next_run=compute_next_run,
                 clock=utcnow,
+                retry_delay=retry_delay,
                 concurrency=settings.max_parallel_items,
                 lock_ttl=timedelta(seconds=settings.run_lock_seconds),
             )

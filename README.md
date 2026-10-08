@@ -526,7 +526,8 @@ run that started, whatever its status. `run_job_by_name(name, ...)` resolves a j
 (`JobNotFoundError` for an unknown name). Both take `max_items` and an `observer`, see below.
 It raises, before any run row is created or lock is changed, `JobNotFoundError` (unknown id),
 `JobDisabledError` and `JobBusyError` (another run holds an unexpired lock; `locked_until` says
-until when), and `ValueError` for `concurrency < 1` or `max_items < 1`. `invio run-due` follows in #23.
+until when), `JobNotDueError` (only with `due_by`, see `run-due`) and `ValueError` for
+`concurrency < 1` or `max_items < 1`. `invio run-due` runs every due job, see below.
 
 ```python
 import asyncio
@@ -599,13 +600,70 @@ only), the statistics table and the `Tokens: in .. · out .. · total .. · cost
 `invio run list [--job NAME] [--limit N]` lists runs newest first (id, job, start, duration,
 status, found/new/relevant; dry runs are marked `(dry)`). `invio run show <id>` prints one run:
 the statistics, the token usage and **every stored error** with its stage, sanitized message and
-the item's title and URL (or the source position for a source error). The list is written by
+the item's id, title and URL (or the source position for a source error); a failed delivery
+appears as a `notify` entry with its counts. The list is written by
 `finalize` into `runs.stats["errors"]`, so it survives later retries and dry runs. A run from
 before this feature has no such list: `show` says "item errors are not available for this run".
 
 Known limitations: the lock has no heartbeat, so a run longer than `INVIO_RUN_LOCK_SECONDS` can
 be overtaken by another one; source types without an adapter yet (`sitemap`, `youtube_*`) are
 skipped with a `source.unsupported` log line; video items use the text of their page until #29.
+
+### Scheduled runs: `invio run-due`
+
+```text
+invio run-due [--limit N] [--parallel N]
+```
+
+Runs every enabled job whose `next_run_at` has passed, oldest first, and prints one line per due
+job plus a summary (`nothing due` when there is none). Meant for a systemd timer.
+
+- `--limit N` starts at most N runnable jobs. Jobs locked by another run are reported as `busy`
+  and do not count; jobs left over by the limit are counted in the summary (`deferred`) and run
+  on the next invocation.
+- `--parallel N` runs up to N jobs at the same time (default 1: strictly sequential). It
+  multiplies with `INVIO_MAX_PARALLEL_ITEMS` (items per run), so N jobs can use N times that many
+  database connections. On SQLite it is lowered to 1.
+- Exit codes: `0` no run failed (including nothing due, busy, skipped and partial runs), `1` a
+  run failed, a job raised an unexpected error or the invocation aborted (database error,
+  Ctrl-C), `2` invalid option or configuration. Invalid options run nothing.
+
+Overlapping invocations are safe: each job is claimed by one atomic UPDATE that also checks the
+job is still due, so of two invocations (or a manual `job run`) exactly one runs it; the other
+reports `busy` or `skipped  no longer due`. A lock past its expiry (`INVIO_RUN_LOCK_SECONDS`,
+default 7200) is taken over, so a crashed run never blocks a job. A job that missed several slots
+runs once and then waits for its next future slot.
+
+**Retry after a failure.** After a failed real run (also a failed `invio job run`) the next run
+is `min(regular slot, finish + delay)`, with a delay of 1 h that doubles with every consecutive
+failure up to 24 h; a succeeded or partial run resets it. The output marks it `(retry)`. Dry
+runs never change the schedule or the streak. A failed job whose schedule cannot be read gets
+`finish + delay` alone, so it is not rerun on every invocation.
+
+**Health check.** With `INVIO_HEALTHCHECK_URL` set (treated as a secret and never logged) every
+invocation sends exactly one `GET` after the runs: `<url>` on exit 0, `<url>/fail` on exit 1 and
+on exit 2 for a configuration error found after the settings were read (e.g. a missing
+`INVIO_DATABASE_URL`). Usage errors and settings that cannot be read at all (an invalid value,
+including an invalid `INVIO_HEALTHCHECK_URL`) exit 2 without a signal: there is no readable URL. Timeout 3 s, no redirects, no
+retry; a failing ping is logged (`healthcheck.failed`) and never changes the exit code.
+
+Example systemd units (not shipped):
+
+```ini
+# /etc/systemd/system/invio-run-due.service
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/invio/invio.env
+ExecStart=/usr/local/bin/invio run-due
+
+# /etc/systemd/system/invio-run-due.timer
+[Timer]
+OnCalendar=*:0/5
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
 
 ## Notifications
 

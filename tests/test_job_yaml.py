@@ -580,7 +580,7 @@ def test_dump_nested_key_order() -> None:
     assert [list(s) for s in dumped["sources"]] == [
         ["type", "url", "name", "enabled", "max_age_days"],
         ["type", "url", "name", "enabled", "selector", "mode", "url_pattern", "render", "wait_for"],
-        ["type", "url", "name", "enabled"],
+        ["type", "url", "name", "enabled", "url_pattern", "max_age_days"],
         ["type", "channel_id", "name", "enabled"],
         ["type", "playlist_id", "name", "enabled"],
     ]

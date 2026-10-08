@@ -7,7 +7,7 @@ computation, source and page fetching and provider binding arrive through :class
 
 import asyncio
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
 from typing import Literal, Protocol
 
@@ -83,6 +83,7 @@ class RunDeps:
     notify: Notifier
     next_run: Callable[[ScheduleConfig, datetime], datetime]
     clock: Callable[[], datetime]
+    retry_delay: Callable[[int], timedelta]  # delay after the n-th consecutive failed run
     concurrency: int = 4
     retry: RetrySettings = field(default_factory=RetrySettings)
     lock_ttl: timedelta = timedelta(hours=2)
@@ -121,24 +122,17 @@ class ProgressCounts:
     failed: int = 0
 
     def snapshot(self) -> ProgressSnapshot:
-        """A frozen copy; later updates do not change it."""
-        return ProgressSnapshot(
-            found=self.found,
-            new=self.new,
-            after_keyword_filter=self.after_keyword_filter,
-            selected=self.selected,
-            processed=self.processed,
-            relevant=self.relevant,
-            failed=self.failed,
-        )
+        """A frozen copy; later updates do not change it. Both classes have the same fields."""
+        return ProgressSnapshot(**asdict(self))
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ProgressEvent:
     """One progress report: a stage that completed, or an item that reached an outcome.
 
-    ``title`` is the (sanitized) item title and ``message`` the sanitized failure text; both
-    are set on ``item`` events only.
+    ``title`` is the item title (control characters stripped, see ``ItemRef.of``) and
+    ``message`` the failure text (error class and structured facts, never document text); both
+    are set on ``item`` events only. A display strips both again before printing them.
     """
 
     kind: Literal["stage", "item"]

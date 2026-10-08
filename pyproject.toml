@@ -7,6 +7,7 @@ requires-python = ">=3.12"
 dependencies = [
     "aiosmtplib>=4",
     "alembic>=1.20",
+    "defusedxml>=0.7.1",
     "feedparser>=6.0.14",
     "httpx2>=2.13",
     "jinja2>=3.1",
@@ -50,6 +51,7 @@ dev = [
     "pytest-cov>=7.1.0",
     "ruff>=0.16.10",
     "trustme>=1.2",
+    "types-defusedxml>=0.7.0.20260504",
     "types-pyyaml>=6.0.12.20260906",
 ]
 # Provisioning tools for deploy/ansible (lint and Molecule tests). Not a default group:
@@ -57,6 +59,7 @@ dev = [
 deploy = [
     "ansible-core>=2.17,<2.19",
     "ansible-lint>=25",
+    "yamllint>=1.38",
     "molecule>=25",
     "molecule-plugins[docker]>=25",
 ]
@@ -89,6 +92,7 @@ select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF", "TID251"]
 # Fixtures from ``tests/http_helpers.py`` are imported and used as parameters.
 "tests/test_http*.py" = ["F811"]
 "tests/test_source_rss.py" = ["F811"]
+"tests/test_source_sitemap.py" = ["F811"]
 "tests/test_source_web*.py" = ["F811"]
 "tests/test_http_admission.py" = ["F811"]
 # Fixtures from ``tests/smtp_helpers.py`` are imported and used as parameters.

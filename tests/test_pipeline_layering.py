@@ -59,7 +59,13 @@ def test_new_graph_modules_import_nothing_from_the_upper_layers() -> None:
 
 
 def test_the_cli_reaches_the_run_through_the_pipeline_and_services_only() -> None:
-    for module in ("run_output.py", "progress.py", "commands/run.py", "commands/job.py"):
+    for module in (
+        "run_output.py",
+        "progress.py",
+        "commands/run.py",
+        "commands/job.py",
+        "commands/run_due.py",
+    ):
         for name in _imports_of(ROOT / "cli" / module):
             assert not _is_within(name, ("invio.db", "invio.graph")), f"cli/{module} imports {name}"
 
