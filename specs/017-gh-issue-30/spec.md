@@ -69,7 +69,7 @@ error types and retry behaviour with the Mistral provider's for the equivalent c
    "rate limit" error carries the hint and the shared retry/backoff logic honours it up to its
    configured maximum.
 3. **Given** a server error, a network failure or a timeout, **When** a call is made, **Then**
-   the "provider unavailable" error is raised after the shared retry policy is exhausted.
+   the "provider unavailable" error is raised immediately for a timeout (not retried, as with Mistral), or after the shared retry policy is exhausted for connection and 5xx failures.
 4. **Given** a request the service rejects as invalid, **When** a call is made, **Then** the
    "invalid request" error is raised without retry.
 5. **Given** any failure, **When** the error message is produced, **Then** it names provider and
