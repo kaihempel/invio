@@ -638,13 +638,14 @@ marked, so recovering a stale `pending` row can send a duplicate mail.
 
 With `archive.enabled: true` in the job file, every non-empty digest is also written as a
 self-contained HTML page below `INVIO_ARCHIVE_DIR` (default `/var/lib/invio/archive`):
-For local runs set `INVIO_ARCHIVE_DIR` to a writable path; a failed archive write is only logged (`archive.failed`) and never fails the run or the mail.
 
 ```text
 <archive_dir>/index.html                       all jobs
 <archive_dir>/<job-slug>/index.html            pages of one job, newest first
 <archive_dir>/<job-slug>/<YYYY-MM-DD-HHMM>.html   one digest (UTC minute of the run start)
 ```
+
+For local runs set `INVIO_ARCHIVE_DIR` to a writable path; a failed archive write is only logged (`archive.failed`) and never fails the run or the mail.
 
 The job name is reduced to a safe slug (`Weekly AI News` becomes `weekly-ai-news`); two names
 with the same slug get `-<hash8>` for the second. Pages have no scripts, images or external
