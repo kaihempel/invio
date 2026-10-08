@@ -15,6 +15,7 @@ dependencies = [
     "markdown-it-py>=3",
     "mistralai>=3.0,<4",
     "nh3>=0.2.18",
+    "openai>=2,<3",
     "pydantic-settings>=2.15.0",
     "pydantic[email]>=2.13",
     "pymysql>=1.2",

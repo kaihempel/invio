@@ -457,3 +457,37 @@ async def test_provider_errors_reach_the_caller_of_structured_completion(
         await provider.complete_structured("s", "u", Score, model="m", temperature=0)
 
     assert info.value is error
+
+
+# --- OpenAI provider (issue #30, US4) ----------------------------------------------------
+
+
+def test_openai_resolves_from_its_module_and_registry_file_only(job_data: dict[str, Any]) -> None:
+    """SC-001 for OpenAI: ``openai.py`` + ``models.d/openai.yaml``, no edit of ``factory.py``."""
+    from invio.llm.openai import OpenAIProvider
+
+    package = Path(invio.llm.__file__).parent
+    assert (package / "openai.py").is_file()
+    assert (package / "models.d" / "openai.yaml").is_file()
+    assert "openai" not in Path(factory.__file__).read_text(encoding="utf-8").lower()
+    default_registry.cache_clear()
+    first, second = (info.model_id for info in default_registry().models_for("openai"))
+    job_data["llm"] = {"provider": "openai", "models": {"fast": first, "smart": second}}
+    llm = JobConfig.model_validate(job_data).llm
+    settings = make_settings(openai_api_key="sk-test-SECRET123")
+
+    provider = get_provider("openai", settings)
+    resolved, model = resolve(llm, "smart", settings)
+
+    assert factory._REGISTRY["openai"] is OpenAIProvider
+    assert provider is not None
+    assert resolved is not None
+    assert model == second
+
+
+def test_openai_without_key_names_the_setting() -> None:
+    with pytest.raises(LLMAuthError) as info:
+        get_provider("openai", make_settings())
+
+    assert "'openai'" in str(info.value)
+    assert "INVIO_OPENAI_API_KEY" in str(info.value)

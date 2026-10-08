@@ -14,14 +14,25 @@ whose ``retry_after`` is longer than the policy's ``max_interval``. The module o
 
 from pydantic import BaseModel
 
-from invio.llm.base import LLMProvider, LLMRateLimitError, LLMUnavailableError, Usage
+from invio.llm.base import (
+    LLMProvider,
+    LLMQuotaError,
+    LLMRateLimitError,
+    LLMUnavailableError,
+    Usage,
+)
 from invio.retry import RetrySettings, Sleep, retrying
 
 __all__ = ["RetryingProvider", "is_transient_llm", "llm_retry_after"]
 
 
 def is_transient_llm(err: BaseException) -> bool:
-    """Rate limits and provider outages are worth another try; everything else is not."""
+    """Rate limits and provider outages are worth another try; everything else is not.
+
+    An exhausted quota is a rate-limit error too, but waiting never resolves it.
+    """
+    if isinstance(err, LLMQuotaError):
+        return False
     return isinstance(err, LLMRateLimitError | LLMUnavailableError)
 
 
