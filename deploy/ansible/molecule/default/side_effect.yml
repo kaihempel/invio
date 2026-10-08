@@ -178,28 +178,40 @@
             argv: [systemctl, start, --no-block, invio-run-due.service]
           changed_when: true
 
+        - name: Remember the time before the update
+          ansible.builtin.command:
+            argv: [date, +%s]
+          register: invio_wait_marker
+          changed_when: false
+
         - name: Converge the parent commit while the service runs
           ansible.builtin.include_role:
             name: invio
           vars:
             invio_git_version: "{{ invio_parent.stdout }}"
 
-        - name: Read when the timer was stopped, when the service ended and the revision was written
-          ansible.builtin.command:
-            argv: "{{ item }}"
-          loop:
-            - [systemctl, show, -p, ActiveExitTimestamp, --value, invio-run-due.timer]
-            - [systemctl, show, -p, ExecMainExitTimestamp, --value, invio-run-due.service]
-          register: invio_wait_times
+        # The role starts the timer again after the update, so the unit's own timestamps no longer
+        # tell when it was stopped: read the stop from the journal.
+        - name: Read when the timer was stopped
+          ansible.builtin.shell: >-
+            set -o pipefail;
+            journalctl -u invio-run-due.timer --since "@{{ invio_wait_marker.stdout }}"
+            -o short-unix --no-pager | grep -m1 ' Stopped ' | cut -d. -f1
+          args:
+            executable: /bin/bash
+          register: invio_wait_timer_stop
           changed_when: false
 
-        - name: Convert them to epoch seconds
+        - name: Read when the service ended
           ansible.builtin.command:
-            argv: [date, -d, "{{ item.stdout }}", +%s]
-          loop: "{{ invio_wait_times.results }}"
-          loop_control:
-            label: "{{ item.item[3] }}"
-          register: invio_wait_epochs
+            argv: [systemctl, show, -p, ExecMainExitTimestamp, --value, invio-run-due.service]
+          register: invio_wait_service_exit
+          changed_when: false
+
+        - name: Convert the end of the service to epoch seconds
+          ansible.builtin.command:
+            argv: [date, -d, "{{ invio_wait_service_exit.stdout }}", +%s]
+          register: invio_wait_service_epoch
           changed_when: false
 
         - name: Read the modification time of the revision file
@@ -212,8 +224,9 @@
         - name: Check the order of events
           ansible.builtin.assert:
             that:
-              - invio_wait_epochs.results[0].stdout | int < invio_wait_epochs.results[1].stdout | int
-              - invio_wait_epochs.results[1].stdout | int <= invio_wait_revision.stat.mtime | int
+              - invio_wait_timer_stop.stdout | int > 0
+              - invio_wait_timer_stop.stdout | int < invio_wait_service_epoch.stdout | int
+              - invio_wait_service_epoch.stdout | int <= invio_wait_revision.stat.mtime | int
             quiet: true
       always:
         - name: Remove the sleep drop-in
