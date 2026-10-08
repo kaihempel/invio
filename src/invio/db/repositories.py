@@ -7,7 +7,7 @@ errors surface immediately, and never commit or roll back (see ``session_scope``
 import builtins
 from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from enum import Enum
 from typing import Any, Final
@@ -35,6 +35,7 @@ __all__ = [
     "JobRepository",
     "NotificationRepository",
     "RunRepository",
+    "UsageBucket",
     "UsageRepository",
     "UsageTotals",
 ]
@@ -743,6 +744,19 @@ class UsageTotals:
     cost_usd: Decimal
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class UsageBucket:
+    """Summed usage of one job, provider and model; per UTC ``day``, or ``None`` for all days."""
+
+    job_name: str
+    provider: str
+    model: str
+    day: date | None
+    calls: int
+    input_tokens: int
+    output_tokens: int
+
+
 class UsageRepository:
     """Access to the ``llm_usage`` table."""
 
@@ -799,3 +813,82 @@ class UsageRepository:
             output_tokens=int(tokens_out),
             cost_usd=Decimal(str(cost)).quantize(COST_PRECISION),
         )
+
+    def grouped(
+        self,
+        *,
+        job_id: int | None = None,
+        since: datetime | None = None,
+        by_day: bool = False,
+    ) -> builtins.list[UsageBucket]:
+        """Sum usage per (job name, provider, model), and per UTC day if ``by_day``.
+
+        ``job_id`` keeps one job's rows, ``since`` the rows created at or after it. Without
+        ``by_day`` the database groups; with it, rows are bucketed by day here, because SQLite
+        and MariaDB have no common date-truncation function. Ordered by the grouping fields.
+        """
+        conditions: builtins.list[ColumnElement[bool]] = []
+        if job_id is not None:
+            conditions.append(LlmUsage.job_id == job_id)
+        if since is not None:
+            conditions.append(LlmUsage.created_at >= since)
+        if by_day:
+            return self._by_day(conditions)
+        stmt = (
+            select(
+                Job.name,
+                LlmUsage.provider,
+                LlmUsage.model,
+                func.count(LlmUsage.id),
+                func.coalesce(func.sum(LlmUsage.input_tokens), 0),
+                func.coalesce(func.sum(LlmUsage.output_tokens), 0),
+            )
+            .join(Job, Job.id == LlmUsage.job_id)
+            .where(*conditions)
+            .group_by(Job.name, LlmUsage.provider, LlmUsage.model)
+            .order_by(Job.name, LlmUsage.provider, LlmUsage.model)
+        )
+        # int(): MariaDB returns Decimal sums.
+        return [
+            UsageBucket(
+                job_name=name,
+                provider=provider,
+                model=model,
+                day=None,
+                calls=int(calls),
+                input_tokens=int(tokens_in),
+                output_tokens=int(tokens_out),
+            )
+            for name, provider, model, calls, tokens_in, tokens_out in self._session.execute(stmt)
+        ]
+
+    def _by_day(self, conditions: Sequence[ColumnElement[bool]]) -> builtins.list[UsageBucket]:
+        stmt = (
+            select(
+                Job.name,
+                LlmUsage.provider,
+                LlmUsage.model,
+                LlmUsage.created_at,
+                LlmUsage.input_tokens,
+                LlmUsage.output_tokens,
+            )
+            .join(Job, Job.id == LlmUsage.job_id)
+            .where(*conditions)
+        )
+        sums: dict[tuple[str, str, str, date], tuple[int, int, int]] = {}
+        for name, provider, model, created_at, tokens_in, tokens_out in self._session.execute(stmt):
+            key = (name, provider, model, created_at.astimezone(UTC).date())
+            calls, given, produced = sums.get(key, (0, 0, 0))
+            sums[key] = (calls + 1, given + tokens_in, produced + tokens_out)
+        return [
+            UsageBucket(
+                job_name=name,
+                provider=provider,
+                model=model,
+                day=day,
+                calls=calls,
+                input_tokens=given,
+                output_tokens=produced,
+            )
+            for (name, provider, model, day), (calls, given, produced) in sorted(sums.items())
+        ]
