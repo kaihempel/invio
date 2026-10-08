@@ -39,9 +39,8 @@ def _payload(job_name: str = "ai-news") -> NotificationPayload:
 
 def _archive(archive_dir: Path, name: str = "ai-news", **kwargs: Any) -> archive.ArchivedPage:
     values: dict[str, Any] = {
-        "job_name": name,
         "run_started_at": STARTED,
-        "payload": _payload(),
+        "payload": _payload().model_copy(update={"job_name": name}),
         "digest_markdown": "# News\n\n- [item](https://example.com/a?x=1&y=2)",
     }
     values.update(kwargs)

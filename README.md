@@ -638,6 +638,7 @@ marked, so recovering a stale `pending` row can send a duplicate mail.
 
 With `archive.enabled: true` in the job file, every non-empty digest is also written as a
 self-contained HTML page below `INVIO_ARCHIVE_DIR` (default `/var/lib/invio/archive`):
+For local runs set `INVIO_ARCHIVE_DIR` to a writable path; a failed archive write is only logged (`archive.failed`) and never fails the run or the mail.
 
 ```text
 <archive_dir>/index.html                       all jobs

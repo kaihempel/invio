@@ -252,12 +252,20 @@ class ArchiveConfig(_StrictModel):
     def _http_url(cls, value: str | None) -> str | None:
         if value is None:
             return None
+        value = value.strip()
+        if any(char.isspace() or not char.isprintable() for char in value):
+            raise ValueError("base_url must not contain whitespace or control characters")
         try:
             parts = urlsplit(value)
+            port = parts.port
         except ValueError as exc:
             raise ValueError("base_url must be a valid http or https URL") from exc
-        if parts.scheme not in ("http", "https") or not parts.netloc:
+        if parts.scheme not in ("http", "https") or not parts.hostname:
             raise ValueError("base_url must be an http or https URL with a host")
+        if parts.username is not None or parts.password is not None or "@" in parts.netloc:
+            raise ValueError("base_url must not contain credentials")
+        if port == 0:
+            raise ValueError("base_url must be a valid http or https URL")
         if parts.query or parts.fragment or "?" in value or "#" in value:
             raise ValueError("base_url must not contain a query or a fragment")
         return value.rstrip("/")

@@ -367,7 +367,6 @@ async def _archive(
         page = await asyncio.to_thread(
             archive_digest,
             settings.archive_dir,
-            job_name=payload.job_name,
             run_started_at=started_at,
             payload=payload,
             digest_markdown=body,

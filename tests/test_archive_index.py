@@ -28,7 +28,6 @@ def _payload(name: str) -> NotificationPayload:
 def _archive(root: Path, name: str, started: datetime = STARTED) -> str:
     page = archive_digest(
         root,
-        job_name=name,
         run_started_at=started,
         payload=_payload(name),
         digest_markdown="body",

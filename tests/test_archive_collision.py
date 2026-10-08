@@ -31,9 +31,8 @@ class TestHashedDirectoryOwnership:
     def archive(self, name: str) -> str:
         page = archive_digest(
             self.root,
-            job_name=name,
             run_started_at=STARTED,
-            payload=self.payload,
+            payload=self.payload.model_copy(update={"job_name": name}),
             digest_markdown=f"digest of {name}",
         )
         return page.job_slug
@@ -43,3 +42,17 @@ class TestHashedDirectoryOwnership:
         slugs = [self.archive(name) for name in ("a-b", crafted, "A b")]
 
         assert len(set(slugs)) == 3
+
+    def test_unmarked_foreign_hashed_directory_is_not_adopted(self) -> None:
+        first = self.archive("A b")
+        (self.root / first).rename(self.root / "a-b")
+        (self.root / "a-b" / ".job-name").write_text("other")
+        foreign = self.root / ("a-b-" + hashlib.sha256(b"A b").hexdigest()[:8])
+        foreign.mkdir()
+        (foreign / "notes.txt").write_text("foreign")
+
+        slug = self.archive("A b")
+
+        assert slug != foreign.name
+        assert (foreign / "notes.txt").read_text() == "foreign"
+        assert not (foreign / ".job-name").exists()

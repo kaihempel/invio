@@ -130,7 +130,12 @@ def test_archive_base_url_is_normalised(job_data: dict[str, Any], given: str, st
 
 
 @pytest.mark.parametrize(
-    "value", ["ftp://h", "h/x", "https://", "https://h?a=1", "https://h#f", "", "   "]
+    "value",
+    [
+        *["ftp://h", "h/x", "https://", "https://h?a=1", "https://h#f", "", "   "],
+        *["https://u:p@h", "https://u@h", "https://h:99999", "https://h:0"],
+        *["https://h/a b", "https://h/\x00"],
+    ],
 )
 def test_archive_base_url_rejected(job_data: dict[str, Any], value: str) -> None:
     job_data["archive"] = {"enabled": True, "base_url": value}

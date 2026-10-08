@@ -113,7 +113,10 @@ def job_directory(archive_dir: Path, name: str) -> Path:
                 candidate = archive_dir / f"{slug}-{full[:length]}"
                 if candidate.is_symlink():
                     raise ArchiveError(f"archive job directory {candidate.name!r} is a symlink")
-                if not candidate.is_dir() or _marker_matches(candidate, name) is not False:
+                if not candidate.is_dir():
+                    break
+                owner = _marker_matches(candidate, name)
+                if owner is True or (owner is None and not any(candidate.iterdir())):
                     break
             else:
                 raise ArchiveError(f"no free archive directory for job {name!r}")
@@ -258,7 +261,6 @@ def _error(exc: BaseException) -> str:
 def archive_digest(
     archive_dir: Path,
     *,
-    job_name: str,
     run_started_at: datetime,
     payload: NotificationPayload,
     digest_markdown: str,
@@ -270,12 +272,12 @@ def archive_digest(
     page by its UTC minute; a second digest in the same minute gets a ``-2`` suffix.
     """
     _make_directory(archive_dir, parents=True)
-    job_dir = job_directory(archive_dir, job_name)
+    job_dir = job_directory(archive_dir, payload.job_name)
     _make_directory(job_dir)
     if not _inside(archive_dir, job_dir):
         raise ArchiveError(f"archive path {job_dir} is outside the archive directory")
-    if _marker_matches(job_dir, job_name) is None:
-        write_atomic(job_dir / _MARKER, job_name)
+    if _marker_matches(job_dir, payload.job_name) is None:
+        write_atomic(job_dir / _MARKER, payload.job_name)
     moment = run_started_at if run_started_at.tzinfo else run_started_at.replace(tzinfo=UTC)
     html = render_archive_page(payload, digest_markdown, run_started_at=moment, index_href=_INDEX)
     stem = moment.astimezone(UTC).strftime("%Y-%m-%d-%H%M")
