@@ -7,7 +7,9 @@ Modules:
 * ``registry``: model registry (prices, context windows) merged from ``models.d/*.yaml``.
 * ``factory``: ``@register_provider``, provider discovery, ``get_provider`` and ``resolve``.
 * ``fake``: scripted ``FakeProvider`` for tests.
+* ``http_retry``: retry policy, retry loop and helpers shared by the HTTP-based providers.
 * ``mistral``: the Mistral provider (official SDK, retries with backoff).
+* ``openai``: the OpenAI provider (official SDK, Responses API, shared retry loop).
 * ``models.d/``: one registry file per provider.
 
 This module deliberately imports nothing: provider discovery imports every module of the
