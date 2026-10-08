@@ -26,6 +26,8 @@ from invio.llm.base import (
 )
 from invio.llm.fake import FakeProvider, FakeReply
 from invio.llm.mistral import MistralProvider
+from invio.llm.openai import OpenAIProvider
+from tests import openai_helpers
 from tests.llm_helpers import write_registry
 from tests.mistral_helpers import API_KEY, Recorder, Reply, recording_options
 
@@ -415,3 +417,211 @@ def test_root_help_lists_the_llm_command() -> None:
 
     assert result.exit_code == 0
     assert "llm" in result.stdout
+
+
+# --- OpenAI (issue #30, US3) --------------------------------------------------------------
+
+GPT_CHEAP = "gpt-cheap"
+GPT_PRICEY = "gpt-pricey"
+
+
+@pytest.fixture
+def openai_registry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A registry with two mistral and two openai models at different prices."""
+    directory = tmp_path / "with-openai"
+    write_registry(directory, "mistral", {PRICEY: _entry(5), CHEAP: _entry(1)})
+    models_dir = write_registry(directory, "openai", {GPT_PRICEY: _entry(5), GPT_CHEAP: _entry(1)})
+    registry = llm_registry.load_registry([models_dir])
+    monkeypatch.setattr(llm_registry, "default_registry", lambda: registry)
+
+
+def _recorded_openai(
+    *replies: openai_helpers.Reply, built: list[OpenAIProvider] | None = None
+) -> tuple[openai_helpers.Recorder, list[float]]:
+    """Register a real ``OpenAIProvider`` on recorded HTTP replies as ``openai``.
+
+    Needs ``patched_providers`` (isolated registry). The key comes from the settings as in
+    production; only the HTTP transport, the base URL and the retry sleep are replaced. Each
+    provider built by the command is appended to ``built``.
+    """
+    recorder = openai_helpers.Recorder(replies)
+    options, waits = openai_helpers.recording_options(recorder)
+
+    class _Recorded(OpenAIProvider):
+        @classmethod
+        def from_settings(cls, settings: Settings) -> Self:
+            provider = cls(
+                require_api_key(settings, "openai"),
+                timeout_seconds=settings.llm_timeout_seconds,
+                **options,
+            )
+            if built is not None:
+                built.append(provider)
+            return provider
+
+    factory.register_provider("openai")(_Recorded)
+    return recorder, waits
+
+
+def test_recorded_openai_success(
+    patched_providers: Register, monkeypatch: pytest.MonkeyPatch, openai_registry: None
+) -> None:
+    monkeypatch.setenv("INVIO_OPENAI_API_KEY", openai_helpers.API_KEY)
+    recorder, _ = _recorded_openai("response_ok")
+
+    result = _invoke("openai")
+
+    assert result.exit_code == 0, result.stderr
+    assert re.fullmatch(
+        rf"ok provider=openai model={GPT_CHEAP} input_tokens=12 output_tokens=3 "
+        r"duration_ms=\d+(\.\d+)?\n",
+        result.stdout,
+    )
+    (request,) = recorder.requests
+    assert [client.is_closed for client in recorder.clients] == [True]
+    assert (request.method, request.path) == ("POST", "/v1/responses")
+    assert request.has_authorization
+    assert (request.body["model"], request.body["temperature"]) == (GPT_CHEAP, 0)
+    # The command asks for 5 tokens; the Responses API minimum is 16.
+    assert request.body["max_output_tokens"] == 16
+    assert request.body["store"] is False
+    assert "Hello" not in result.stdout + result.stderr
+    assert openai_helpers.API_KEY not in result.stdout + result.stderr
+
+
+def test_recorded_openai_model_option_selects_that_model(
+    patched_providers: Register, monkeypatch: pytest.MonkeyPatch, openai_registry: None
+) -> None:
+    monkeypatch.setenv("INVIO_OPENAI_API_KEY", openai_helpers.API_KEY)
+    recorder, _ = _recorded_openai("response_ok")
+
+    result = _invoke("openai", "--model", GPT_PRICEY)
+
+    assert result.exit_code == 0, result.stderr
+    assert f"model={GPT_PRICEY}" in result.stdout
+    assert recorder.requests[0].body["model"] == GPT_PRICEY
+
+
+@pytest.mark.parametrize("model", ["gpt-4o-latest", CHEAP], ids=["unregistered", "mistral"])
+def test_recorded_openai_model_must_be_registered_for_openai(
+    patched_providers: Register,
+    monkeypatch: pytest.MonkeyPatch,
+    openai_registry: None,
+    model: str,
+) -> None:
+    monkeypatch.setenv("INVIO_OPENAI_API_KEY", openai_helpers.API_KEY)
+    recorder, _ = _recorded_openai("response_ok")
+
+    result = _invoke("openai", "--model", model)
+
+    assert result.exit_code == 2
+    assert _last_message(result) == (
+        f"Configuration error: model '{model}' is not registered for LLM provider 'openai'"
+    )
+    assert recorder.requests == []
+
+
+@pytest.mark.parametrize("key", [None, "   "], ids=["missing", "blank"])
+def test_recorded_openai_without_key_makes_no_request(
+    patched_providers: Register,
+    monkeypatch: pytest.MonkeyPatch,
+    openai_registry: None,
+    key: str | None,
+) -> None:
+    if key is not None:
+        monkeypatch.setenv("INVIO_OPENAI_API_KEY", key)
+    recorder, _ = _recorded_openai("response_ok")
+
+    result = _invoke("openai")
+
+    assert result.exit_code == 2
+    assert _last_message(result) == (
+        "Configuration error: LLM provider 'openai' needs an API key: set INVIO_OPENAI_API_KEY"
+    )
+    assert recorder.requests == []
+    assert recorder.clients_created == 0
+
+
+@pytest.mark.parametrize(
+    ("replies", "error", "requests", "waits_expected"),
+    [
+        (("error_401",), "LLMAuthError", 1, []),
+        (("error_403",), "LLMAuthError", 1, []),
+        (("error_429",) * 4, "LLMRateLimitError", 4, [1.0, 2.0, 4.0]),
+        (("error_429_retry_after_long",), "LLMRateLimitError", 1, []),
+        (("error_429_insufficient_quota",), "LLMRateLimitError", 1, []),
+        (("error_503",) * 4, "LLMUnavailableError", 4, [1.0, 2.0, 4.0]),
+        (("error_404_model",), "LLMInvalidRequestError", 1, []),
+        (("malformed_200",), "LLMUnavailableError", 1, []),
+        (("response_refusal",), "LLMUnavailableError", 1, []),
+    ],
+    ids=["401", "403", "429", "429-long", "quota", "503", "404", "malformed", "refusal"],
+)
+def test_recorded_openai_failures_exit_1(
+    patched_providers: Register,
+    monkeypatch: pytest.MonkeyPatch,
+    openai_registry: None,
+    replies: tuple[openai_helpers.Reply, ...],
+    error: str,
+    requests: int,
+    waits_expected: list[float],
+) -> None:
+    monkeypatch.setenv("INVIO_OPENAI_API_KEY", openai_helpers.API_KEY)
+    recorder, waits = _recorded_openai(*replies)
+
+    result = _invoke("openai")
+
+    assert result.exit_code == 1
+    message = _last_message(result)
+    assert message.startswith(f"Error: {error}: OpenAI ")
+    assert f"model {GPT_CHEAP}" in message
+    assert result.stdout == ""
+    assert "Traceback" not in result.stderr
+    assert openai_helpers.API_KEY not in result.stderr
+    assert "Reply with OK." not in result.stderr
+    assert len(recorder.requests) == requests
+    assert waits == waits_expected
+    assert [client.is_closed for client in recorder.clients] == [True]
+
+
+def test_recorded_openai_auth_failure_names_the_setting(
+    patched_providers: Register, monkeypatch: pytest.MonkeyPatch, openai_registry: None
+) -> None:
+    monkeypatch.setenv("INVIO_OPENAI_API_KEY", openai_helpers.API_KEY)
+    _recorded_openai("error_401")
+
+    result = _invoke("openai")
+
+    assert _last_message(result).startswith("Error: LLMAuthError: ")
+    assert "INVIO_OPENAI_API_KEY" in _last_message(result)
+
+
+def test_recorded_openai_timeout_is_capped(
+    patched_providers: Register, monkeypatch: pytest.MonkeyPatch, openai_registry: None
+) -> None:
+    # SC-004: the command's cap applies to the OpenAI provider like to any other.
+    monkeypatch.setenv("INVIO_OPENAI_API_KEY", openai_helpers.API_KEY)
+    monkeypatch.setenv("INVIO_LLM_TIMEOUT_SECONDS", "600")
+    built: list[OpenAIProvider] = []
+    _recorded_openai("response_ok", built=built)
+
+    result = _invoke("openai")
+
+    assert result.exit_code == 0, result.stderr
+    assert [provider.timeout_seconds for provider in built] == [20.0]
+
+
+def test_recorded_openai_hanging_request_is_bounded_by_the_timeout(
+    patched_providers: Register, monkeypatch: pytest.MonkeyPatch, openai_registry: None
+) -> None:
+    monkeypatch.setenv("INVIO_OPENAI_API_KEY", openai_helpers.API_KEY)
+    monkeypatch.setenv("INVIO_LLM_TIMEOUT_SECONDS", "0.2")
+    recorder, waits = _recorded_openai(openai_helpers.HANG)
+
+    result = _invoke("openai")
+
+    assert result.exit_code == 1
+    assert _last_message(result).startswith("Error: LLMUnavailableError: ")
+    assert "0.2 s" in _last_message(result)
+    assert len(recorder.requests) == 1
+    assert waits == []
