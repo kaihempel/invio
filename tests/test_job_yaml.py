@@ -247,6 +247,7 @@ def test_dump_key_order(job_data: dict[str, Any]) -> None:
         "search",
         "llm",
         "limits",
+        "archive",
     ]
 
 

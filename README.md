@@ -299,6 +299,9 @@ write_yaml(job, "job.yaml")  # or dump_yaml(job) for a string
 - `language` is optional: a lower-case ISO 639-1 code (default `en`) that sets the language of
   item summaries, e.g. `language: de`. An unknown code is an error:
   `language: unknown ISO 639-1 language code 'xx'`.
+- `archive` is optional: `enabled` (default `false`) keeps a static HTML copy of each non-empty
+  digest, `base_url` (`http`/`https`, no query or fragment, trailing `/` removed) only feeds
+  the link in the mail. See [Digest archive](#digest-archive).
 - `write_yaml` replaces the file atomically, keeps an existing file's mode and follows
   symlinks (the link stays, its target is updated).
 - `weekday` accepts any capitalisation, but the JSON Schema lists the lowercase values only.
@@ -737,6 +740,30 @@ summary `retried N, sent S, failed F, given up G`, or `nothing to retry`. Exit c
 failed, `1` a notification failed or was given up, `2` configuration error (database URL, SMTP
 host or sender). A crashed first attempt may have reached the recipient before the row was
 marked, so recovering a stale `pending` row can send a duplicate mail.
+
+### Digest archive
+
+With `archive.enabled: true` in the job file, every non-empty digest is also written as a
+self-contained HTML page below `INVIO_ARCHIVE_DIR` (default `/var/lib/invio/archive`):
+
+```text
+<archive_dir>/index.html                       all jobs
+<archive_dir>/<job-slug>/index.html            pages of one job, newest first
+<archive_dir>/<job-slug>/<YYYY-MM-DD-HHMM>.html   one digest (UTC minute of the run start)
+```
+
+For local runs set `INVIO_ARCHIVE_DIR` to a writable path; a failed archive write is only logged (`archive.failed`) and never fails the run or the mail.
+
+The job name is reduced to a safe slug (`Weekly AI News` becomes `weekly-ai-news`); two names
+with the same slug get `-<hash8>` for the second. Pages have no scripts, images or external
+files and use the same sanitizer as the mail. Files are written atomically (mode `0644`,
+directories `0755`), a page is never overwritten (a second digest in the same minute becomes
+`...-2.html`), and no archive failure can fail the run or stop the mail: it is logged as
+`archive.failed` and the mail goes out without a link. Hard links must be supported by the
+file system. With `archive.base_url` set, the mail footer links to
+`<base_url>/<job-slug>/<page>.html`, also when `invio notify retry` re-sends it (as long as the
+page exists). Serving the directory is up to a web server, see
+[docs/deployment.md](docs/deployment.md#digest-archive).
 
 ## Deployment
 

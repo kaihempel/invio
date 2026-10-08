@@ -1,5 +1,30 @@
 {
   "$defs": {
+    "ArchiveConfig": {
+      "additionalProperties": false,
+      "description": "Static HTML archive of the job's digests (``base_url`` only feeds the link in the mail).",
+      "properties": {
+        "enabled": {
+          "default": false,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "base_url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Base Url"
+        }
+      },
+      "title": "ArchiveConfig",
+      "type": "object"
+    },
     "Frequency": {
       "description": "How often a job runs.",
       "enum": [
@@ -672,6 +697,9 @@
     },
     "limits": {
       "$ref": "#/$defs/LimitsConfig"
+    },
+    "archive": {
+      "$ref": "#/$defs/ArchiveConfig"
     }
   },
   "required": [

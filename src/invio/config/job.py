@@ -42,6 +42,7 @@ from invio.config.languages import ISO_639_1
 __all__ = [
     "SUPPORTED_SCHEMA_VERSION",
     "TIME_PATTERN",
+    "ArchiveConfig",
     "Frequency",
     "JobConfig",
     "JobConfigError",
@@ -240,6 +241,36 @@ class LimitsConfig(_StrictModel):
     baseline_items: StrictInt = Field(default=10, ge=1)
     max_items_in_notification: StrictInt = Field(default=20, ge=1)
     max_llm_tokens_per_run: StrictInt = Field(default=200000, ge=1)
+
+
+class ArchiveConfig(_StrictModel):
+    """Static HTML archive of the job's digests (``base_url`` only feeds the link in the mail)."""
+
+    enabled: StrictBool = False
+    base_url: str | None = None
+
+    @field_validator("base_url")
+    @classmethod
+    def _http_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if any(char.isspace() or not char.isprintable() for char in value):
+            raise ValueError("base_url must not contain whitespace or control characters")
+        try:
+            parts = urlsplit(value)
+            port = parts.port
+        except ValueError as exc:
+            raise ValueError("base_url must be a valid http or https URL") from exc
+        if parts.scheme not in ("http", "https") or not parts.hostname:
+            raise ValueError("base_url must be an http or https URL with a host")
+        if parts.username is not None or parts.password is not None or "@" in parts.netloc:
+            raise ValueError("base_url must not contain credentials")
+        if port == 0:
+            raise ValueError("base_url must be a valid http or https URL")
+        if parts.query or parts.fragment or "?" in value or "#" in value:
+            raise ValueError("base_url must not contain a query or a fragment")
+        return value.rstrip("/")
 
 
 # Source models repeat ``name``/``enabled`` instead of inheriting them: Pydantic puts inherited
@@ -503,6 +534,7 @@ class JobConfig(_StrictModel):
     search: SearchConfig
     llm: LLMConfig
     limits: LimitsConfig = Field(default_factory=LimitsConfig)
+    archive: ArchiveConfig = Field(default_factory=ArchiveConfig)
 
     @field_validator("schema_version")
     @classmethod

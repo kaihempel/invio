@@ -1,0 +1,13 @@
+{% extends "archive_base.html.j2" %}
+{% block title %}{{ job_name }} – {{ date_line }}{% endblock %}
+{% block body %}
+<nav><a href="{{ index_href }}">All digests of this job</a></nav>
+<main>
+<h1>{{ job_name }}</h1>
+<p class="date">{{ date_line }}</p>
+{{ body_html }}
+</main>
+<footer>
+Items found: {{ stats.items_found }} · Included: {{ stats.items_included }} · Run time: {{ stats.duration }}
+</footer>
+{% endblock %}
