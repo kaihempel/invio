@@ -33,3 +33,8 @@ class NotificationPayload(BaseModel):
     digest_date: date
     is_empty: bool
     stats: DigestStats
+    # ``<job-slug>/<YYYY-MM-DD-HHMM>[-n].html`` of the archived page; [0-9], not \d (Unicode).
+    archive_page: str | None = Field(
+        default=None,
+        pattern=r"^[a-z0-9]+(-[a-z0-9]+)*/[0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9]{4}(-[0-9]+)?\.html$",
+    )

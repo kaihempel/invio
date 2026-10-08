@@ -46,3 +46,7 @@ limits:
   baseline_items: 10
   max_items_in_notification: 20
   max_llm_tokens_per_run: 200000
+# Optional: keep a static HTML copy of every non-empty digest (see README, "Digest archive").
+# archive:
+#   enabled: true
+#   base_url: https://digests.example.org/invio   # only used for the link in the mail

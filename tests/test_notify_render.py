@@ -1,6 +1,6 @@
 """Tests for subject rendering, the Markdown to HTML pipeline and MIME message building."""
 
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta, timezone
 from typing import Any
 
 import pytest
@@ -8,9 +8,13 @@ from jinja2 import Environment, PackageLoader
 
 from invio.notify.payload import NotificationPayload
 from invio.notify.render import (
+    IndexEntry,
     RenderedMail,
     build_message,
     markdown_to_safe_html,
+    render_archive_page,
+    render_global_index,
+    render_job_index,
     render_mail,
     render_subject,
 )
@@ -264,3 +268,120 @@ def test_raw_html_in_digest_body_is_sanitized_in_the_mail() -> None:
 
     assert "<script" not in mail.html
     assert "<em>ok</em>" in mail.html
+
+
+# --- archive page --------------------------------------------------------------------------
+
+STARTED = datetime(2026, 10, 8, 9, 30, 12, tzinfo=UTC)
+
+
+def _page(markdown: str = "# News\n\n- item", **payload: Any) -> str:
+    return render_archive_page(
+        _payload(**payload), markdown, run_started_at=STARTED, index_href="index.html"
+    )
+
+
+def test_archive_page_has_job_name_date_body_and_footer_without_archive_link() -> None:
+    html = _page()
+
+    assert html.startswith("<!DOCTYPE html>")
+    assert "<title>ai-news" in html
+    assert "<h1>ai-news</h1>" in html
+    assert "2026-10-08 09:30 UTC" in html
+    assert "<li>item</li>" in html
+    assert "Items found: 7 · Included: 2 · Run time: 3m 12s" in html
+    assert "Archived version" not in html
+    assert 'href="index.html"' in html
+
+
+def test_archive_page_date_is_the_utc_run_start_not_the_job_local_digest_date() -> None:
+    local = datetime(2026, 10, 9, 0, 45, tzinfo=timezone(timedelta(hours=2)))  # 22:45 UTC on 8th
+
+    html = render_archive_page(_payload(), "x", run_started_at=local, index_href="index.html")
+
+    assert "2026-10-08 22:45 UTC" in html
+    assert "2026-10-05" not in html  # payload.digest_date is not used
+
+
+def test_archive_page_escapes_the_job_name() -> None:
+    html = _page(job_name="<b>x</b>")
+
+    assert "<b>x</b>" not in html
+    assert "&lt;b&gt;x&lt;/b&gt;" in html
+
+
+@pytest.mark.parametrize(("markdown", "absent", "_present"), SANITIZER_EXAMPLES)
+def test_archive_page_sanitizes_the_digest(
+    markdown: str, absent: list[str], _present: list[str]
+) -> None:
+    html = _page(markdown)
+    body = html.split("<main", 1)[1].split("</main>", 1)[0]
+
+    for needle in absent:
+        assert needle not in body
+    assert "onclick=" not in html
+    assert "javascript:" not in html
+
+
+def test_archive_page_drops_images() -> None:
+    assert "<img" not in _page("![a](https://e.x/a.png) <img src='https://e.x/t.png'>")
+
+
+def test_archive_page_missing_stats_render_as_dash() -> None:
+    stats = {"items_found": None, "items_included": 1, "duration_seconds": None}
+
+    assert "Items found: – · Included: 1 · Run time: –" in _page(stats=stats)
+
+
+def test_job_index_lists_entries_in_given_order_and_escapes() -> None:
+    entries = [
+        IndexEntry("b.html", "2026-10-09 07:00 UTC", ""),
+        IndexEntry("a.html", "2026-10-08 07:00 UTC #2", ""),
+    ]
+
+    html = render_job_index("<b>x</b>", entries)
+
+    assert html.index('href="b.html"') < html.index('href="a.html"')
+    assert "&lt;b&gt;x&lt;/b&gt;" in html
+    assert "<b>x</b>" not in html
+    assert 'href="../index.html"' in html
+
+
+def test_global_index_lists_jobs_with_detail() -> None:
+    entries = [IndexEntry("news/index.html", "News <1>", "3 pages · latest 2026-10-08 09:30 UTC")]
+
+    html = render_global_index(entries)
+
+    assert 'href="news/index.html"' in html
+    assert "News &lt;1&gt;" in html
+    assert "3 pages · latest 2026-10-08 09:30 UTC" in html
+
+
+# --- archive link in the mail --------------------------------------------------------------
+
+URL = "https://h/x/s/2026-10-08-0930.html"
+
+
+def test_mail_with_archive_url_links_it_in_both_footers() -> None:
+    mail = render_mail(_payload(), "body", archive_url=URL)
+
+    assert f'<a href="{URL}">' in mail.html
+    assert mail.text.rstrip("\n").endswith(f"\nArchived version: {URL}")
+
+
+def test_mail_without_archive_url_is_unchanged() -> None:
+    mail = render_mail(_payload(), "body")
+
+    assert mail == render_mail(_payload(), "body", archive_url=None)
+    assert "Archived" not in mail.text
+    assert "Archived" not in mail.html
+    assert mail.text.endswith("Run time: 3m 12s\n")
+    assert "Run time: 3m 12s\n</footer>" in mail.html
+
+
+def test_archive_url_is_escaped_in_html() -> None:
+    mail = render_mail(_payload(), "body", archive_url='https://h/a?x=1&y="2"')
+
+    assert "&amp;y=&#34;2&#34;" in mail.html
+    assert 'y="2"' not in mail.html
+    assert 'https://h/a?x=1&y="2"' in mail.text

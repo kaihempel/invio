@@ -63,7 +63,7 @@ def test_defaults_without_any_configuration() -> None:
     assert settings.smtp_security == "starttls"
     assert settings.smtp_timeout_seconds == 30.0
     assert settings.log_level == "INFO"
-    assert settings.archive_dir is None
+    assert settings.archive_dir == Path("/var/lib/invio/archive")
     assert settings.youtube_cookies_file is None
     assert settings.youtube_proxy is None
     assert settings.whisper_model_size == "small"
@@ -311,6 +311,12 @@ def test_invalid_run_orchestration_settings_are_rejected(
 
     with pytest.raises(ValidationError, match=name.removeprefix("INVIO_").lower()):
         Settings()
+
+
+def test_archive_dir_is_overridden_by_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("INVIO_ARCHIVE_DIR", "/x")
+
+    assert Settings(_env_file=None).archive_dir == Path("/x")
 
 
 def test_healthcheck_url_is_a_secret(monkeypatch: pytest.MonkeyPatch) -> None:

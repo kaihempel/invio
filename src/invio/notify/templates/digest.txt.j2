@@ -8,4 +8,5 @@ No new items were found for this run.
 {%- endif %}
 
 --
-Items found: {{ stats.items_found }} · Included: {{ stats.items_included }} · Run time: {{ stats.duration }}
+Items found: {{ stats.items_found }} · Included: {{ stats.items_included }} · Run time: {{ stats.duration }}{% if archive_url %}
+Archived version: {{ archive_url }}{% endif %}

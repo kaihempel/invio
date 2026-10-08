@@ -28,7 +28,7 @@ def test_round_trip_preserves_every_field() -> None:
 
     dumped = payload.model_dump(mode="json")
 
-    assert dumped == _data()
+    assert dumped == {**_data(), "archive_page": None}
     assert NotificationPayload.model_validate(dumped) == payload
     assert payload.digest_date == date(2026, 10, 5)
     assert payload.stats == DigestStats(items_found=7, items_included=2, duration_seconds=192.5)
@@ -73,3 +73,44 @@ def test_payload_is_frozen() -> None:
 
     with pytest.raises(ValidationError):
         payload.job_name = "other"  # type: ignore[misc]
+
+
+def test_archive_page_defaults_to_none() -> None:
+    payload = NotificationPayload.model_validate(_data())
+
+    assert payload.archive_page is None
+    assert payload.model_dump(mode="json")["archive_page"] is None
+
+
+def test_archive_page_accepts_a_relative_page_path() -> None:
+    payload = NotificationPayload.model_validate(_data(archive_page="slug/2026-10-08-0930.html"))
+
+    assert payload.archive_page == "slug/2026-10-08-0930.html"
+    assert NotificationPayload.model_validate(payload.model_dump(mode="json")) == payload
+
+
+def test_stored_v1_payload_without_archive_page_still_validates() -> None:
+    data = _data()
+    assert "archive_page" not in data
+
+    assert NotificationPayload.model_validate(data).archive_page is None
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "",
+        "../x/2026-10-08-0930.html",
+        "/abs/2026-10-08-0930.html",
+        "slug/../2026-10-08-0930.html",
+        "slug/notes.html",
+        "slug/2026-10-08-0930.html/",
+        "Slug/2026-10-08-0930.html",
+        "slug/\u0662026-10-08-0930.html",
+        "slug/2026-10-08-0930.htm",
+        "a/b/2026-10-08-0930.html",
+    ],
+)
+def test_archive_page_rejects_unsafe_values(value: str) -> None:
+    with pytest.raises(ValidationError):
+        NotificationPayload.model_validate(_data(archive_page=value))

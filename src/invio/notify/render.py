@@ -3,6 +3,7 @@
 import datetime as dt
 import email.policy
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from email.message import EmailMessage
@@ -16,9 +17,13 @@ from invio.markdown import MARKDOWN
 from invio.notify.payload import NotificationPayload
 
 __all__ = [
+    "IndexEntry",
     "RenderedMail",
     "build_message",
     "markdown_to_safe_html",
+    "render_archive_page",
+    "render_global_index",
+    "render_job_index",
     "render_mail",
     "render_subject",
 ]
@@ -104,25 +109,96 @@ def _format_duration(seconds: float | None) -> str:
     return f"{secs}s"
 
 
-def render_mail(payload: NotificationPayload, digest_markdown: str) -> RenderedMail:
-    """Render both mail bodies from the stored payload and the digest's Markdown."""
+def _stats_context(payload: NotificationPayload) -> dict[str, object]:
+    """The footer figures shared by the mail and the archive page."""
     stats = payload.stats
+    return {
+        "items_found": _MISSING if stats.items_found is None else stats.items_found,
+        "items_included": stats.items_included,
+        "duration": _format_duration(stats.duration_seconds),
+    }
+
+
+def render_mail(
+    payload: NotificationPayload, digest_markdown: str, *, archive_url: str | None = None
+) -> RenderedMail:
+    """Render both mail bodies from the stored payload and the digest's Markdown.
+
+    ``archive_url`` adds the link to the archived page to both footers; ``None`` leaves the
+    mail exactly as it was without an archive.
+    """
     context = {
         "job_name": payload.job_name,
         "subject": payload.subject,
         "date": payload.digest_date.isoformat(),
         "is_empty": payload.is_empty,
-        "stats": {
-            "items_found": _MISSING if stats.items_found is None else stats.items_found,
-            "items_included": stats.items_included,
-            "duration": _format_duration(stats.duration_seconds),
-        },
+        "stats": _stats_context(payload),
+        "archive_url": archive_url,
     }
     html = _ENV.get_template("digest.html.j2").render(
         **context, body_html=Markup(markdown_to_safe_html(digest_markdown))
     )
     text = _ENV.get_template("digest.txt.j2").render(**context, body_text=digest_markdown)
     return RenderedMail(subject=payload.subject, text=text, html=html)
+
+
+def format_utc_minute(moment: datetime) -> str:
+    """``YYYY-MM-DD HH:MM UTC`` for an aware ``moment`` (a naive one is taken as UTC)."""
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=dt.UTC)
+    return moment.astimezone(dt.UTC).strftime("%Y-%m-%d %H:%M UTC")
+
+
+def render_archive_page(
+    payload: NotificationPayload,
+    digest_markdown: str,
+    *,
+    run_started_at: datetime,
+    index_href: str,
+) -> str:
+    """Render the standalone HTML page of an archived digest.
+
+    The date is the run start in UTC (``payload.digest_date`` is in the job's time zone). The
+    body goes through the same sanitizer as the mail HTML; nothing external is referenced.
+    """
+    return _ENV.get_template("archive_page.html.j2").render(
+        job_name=payload.job_name,
+        date_line=format_utc_minute(run_started_at),
+        stats=_stats_context(payload),
+        body_html=Markup(markdown_to_safe_html(digest_markdown)),
+        index_href=index_href,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class IndexEntry:
+    """One line of an index page: relative link, visible label, extra text."""
+
+    href: str
+    label: str
+    detail: str
+
+
+def render_job_index(job_name: str, entries: Sequence[IndexEntry]) -> str:
+    """Render a job's index page; ``entries`` are listed in the given order."""
+    return _ENV.get_template("archive_index.html.j2").render(
+        title=job_name,
+        heading=job_name,
+        entries=entries,
+        back_href="../index.html",
+        back_label="All jobs",
+    )
+
+
+def render_global_index(entries: Sequence[IndexEntry]) -> str:
+    """Render the top-level index page listing every job."""
+    return _ENV.get_template("archive_index.html.j2").render(
+        title="Digest archive",
+        heading="Digest archive",
+        entries=entries,
+        back_href=None,
+        back_label=None,
+    )
 
 
 def build_message(

@@ -98,6 +98,7 @@ select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF", "TID251"]
 # Fixtures from ``tests/smtp_helpers.py`` are imported and used as parameters.
 "tests/test_notify*.py" = ["F811", "RUF001"]
 "tests/test_cli_notify.py" = ["F811", "RUF001"]
+"tests/test_archive*.py" = ["F811", "RUF001"]
 
 [tool.ruff.format]
 quote-style = "double"

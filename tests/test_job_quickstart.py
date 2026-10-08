@@ -65,6 +65,7 @@ def test_quickstart_end_to_end(tmp_path: Path, capsys: pytest.CaptureFixture[str
         "search",
         "llm",
         "limits",
+        "archive",
     ]
     assert "day_of_month: null" in text
 
