@@ -99,10 +99,6 @@ logger = logging.getLogger("invio.graph")
 # clamps a larger streak anyway.
 _STREAK_READ_CAP: Final = 6
 
-# Source types that have an adapter. The others are skipped, not failed (research R9).
-SUPPORTED_SOURCES: Final = frozenset({"rss", "web", "sitemap"})
-
-
 # --- Shared helpers -------------------------------------------------------------------------
 
 
@@ -250,11 +246,7 @@ async def fetch_sources(state: RunState, deps: RunDeps, scope: RunScope) -> RunS
     for index, source in enumerate(config.sources):
         if not source.enabled:
             continue
-        key = source_key(index, source)
-        if source.type in SUPPORTED_SOURCES:
-            wanted.append((key, source))
-        else:
-            logger.warning("source.unsupported", extra={"source": key, "type": source.type})
+        wanted.append((source_key(index, source), source))
     outcomes = await asyncio.gather(
         *(_fetch_one(source, deps, scope) for _, source in wanted), return_exceptions=True
     )

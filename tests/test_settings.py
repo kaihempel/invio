@@ -136,6 +136,60 @@ def test_invalid_llm_timeout_is_rejected(monkeypatch: pytest.MonkeyPatch, raw: s
         Settings()
 
 
+def test_youtube_cookies_and_proxy_are_read_from_environment(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    proxy = "http://user:proxy-secret@proxy.invalid:8080"
+    monkeypatch.setenv("INVIO_YOUTUBE_COOKIES_FILE", str(tmp_path / "cookies.txt"))
+    monkeypatch.setenv("INVIO_YOUTUBE_PROXY", proxy)
+
+    settings = Settings()
+
+    assert settings.youtube_cookies_file == tmp_path / "cookies.txt"
+    assert settings.youtube_proxy is not None
+    assert settings.youtube_proxy.get_secret_value() == proxy
+    assert "proxy-secret" not in repr(settings)
+    assert "proxy-secret" not in repr(settings.youtube_proxy)
+
+
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_blank_youtube_cookies_and_proxy_are_unset(
+    monkeypatch: pytest.MonkeyPatch, blank: str
+) -> None:
+    monkeypatch.setenv("INVIO_YOUTUBE_COOKIES_FILE", blank)
+    monkeypatch.setenv("INVIO_YOUTUBE_PROXY", blank)
+
+    settings = Settings()
+
+    assert settings.youtube_cookies_file is None
+    assert settings.youtube_proxy is None
+
+
+def test_blank_youtube_values_passed_directly_are_unset() -> None:
+    settings = Settings(youtube_cookies_file="", youtube_proxy=SecretStr(" "))  # type: ignore[arg-type]
+
+    assert settings.youtube_cookies_file is None
+    assert settings.youtube_proxy is None
+
+
+def test_youtube_timeout_defaults_to_sixty_seconds() -> None:
+    assert Settings().youtube_timeout_seconds == 60.0
+
+
+def test_youtube_timeout_is_read_from_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("INVIO_YOUTUBE_TIMEOUT_SECONDS", "12.5")
+
+    assert Settings().youtube_timeout_seconds == 12.5
+
+
+@pytest.mark.parametrize("raw", ["0", "-1", "abc", "inf", "nan"])
+def test_invalid_youtube_timeout_is_rejected(monkeypatch: pytest.MonkeyPatch, raw: str) -> None:
+    monkeypatch.setenv("INVIO_YOUTUBE_TIMEOUT_SECONDS", raw)
+
+    with pytest.raises(ValidationError, match="youtube_timeout_seconds"):
+        Settings()
+
+
 @pytest.mark.parametrize("value", ["starttls", "ssl", "none"])
 def test_smtp_security_accepts_known_modes(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
     monkeypatch.setenv("INVIO_SMTP_SECURITY", value)

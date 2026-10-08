@@ -12,7 +12,7 @@ import re
 import zlib
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Final
 from xml.etree.ElementTree import Element, ParseError
 
@@ -22,7 +22,7 @@ from defusedxml.ElementTree import fromstring
 from invio.config.job import SitemapSource
 from invio.domain import Candidate, url_hash
 from invio.sources.errors import FetchError
-from invio.sources.freshness import clamp_or_expire
+from invio.sources.freshness import age_cutoff, clamp_or_expire
 from invio.sources.http import NotModified, SafeHttpClient
 from invio.sources.urls import http_url_or_none
 
@@ -71,7 +71,7 @@ class SitemapUrlSource:
         """
         pattern = re.compile(config.url_pattern) if config.url_pattern is not None else None
         now = self._now()
-        cutoff = now - timedelta(days=config.max_age_days) if config.max_age_days else None
+        cutoff = age_cutoff(now, config.max_age_days)
         candidates: dict[str, Candidate] = {}
         visited: set[str] = set()
 

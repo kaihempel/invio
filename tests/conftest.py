@@ -2,7 +2,7 @@
 
 import logging
 import os
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -16,8 +16,10 @@ from invio.config.settings import get_settings
 from invio.db import migrate
 from invio.db.models import Base, Job
 from invio.db.session import create_db_engine, session_factory, session_scope
+from invio.sources import youtube as youtube_module
 from tests.db_helpers import TEST_DATABASE_URL, uses_sqlite
 from tests.deploy_helpers import is_unwanted_deploy_skip
+from tests.youtube_helpers import FakeYoutubeDL
 
 if TYPE_CHECKING:
     from invio.config.job import ScheduleConfig
@@ -273,3 +275,25 @@ def patched_providers(monkeypatch: pytest.MonkeyPatch) -> Callable[[str, Any], N
         factory.register_provider(name)(_Registered)
 
     return register
+
+
+@pytest.fixture
+def fake_ydl(monkeypatch: pytest.MonkeyPatch) -> FakeYoutubeDL:
+    """Replace ``yt_dlp.YoutubeDL`` so the real default extractor runs without the network."""
+    import yt_dlp
+
+    fake = FakeYoutubeDL()
+    monkeypatch.setattr(yt_dlp, "YoutubeDL", fake)
+    return fake
+
+
+@pytest.fixture(autouse=True)
+def _no_real_yt_dlp(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Network guard: the default extractor fails unless the test replaces ``YoutubeDL``."""
+    if "fake_ydl" in request.fixturenames:
+        return
+
+    def forbidden(url: str, options: Mapping[str, object]) -> Mapping[str, object]:
+        raise AssertionError("the real yt-dlp extractor must not run in tests")
+
+    monkeypatch.setattr(youtube_module, "_yt_dlp_extract", forbidden)

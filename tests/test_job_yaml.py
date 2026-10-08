@@ -394,7 +394,6 @@ TEXT_FIELDS: list[tuple[str, Any]] = [
     ("search.keywords.exclude", lambda j: j.search.keywords.exclude[0]),
     ("llm.models.fast", lambda j: j.llm.models.fast),
     ("sources.name", lambda j: j.sources[0].name),
-    ("sources.channel_id", lambda j: j.sources[0].channel_id),
 ]
 
 
@@ -403,8 +402,6 @@ def _with_text(job_data: dict[str, Any], field: str, value: str) -> JobConfig:
         job_data["search"]["keywords"] = {field.rsplit(".", 1)[1]: [value]}
     elif field == "sources.name":
         job_data["sources"][0]["name"] = value
-    elif field == "sources.channel_id":
-        job_data["sources"] = [{"type": "youtube_channel", "channel_id": value}]
     else:
         *parents, last = field.split(".")
         node = job_data
@@ -581,8 +578,8 @@ def test_dump_nested_key_order() -> None:
         ["type", "url", "name", "enabled", "max_age_days"],
         ["type", "url", "name", "enabled", "selector", "mode", "url_pattern", "render", "wait_for"],
         ["type", "url", "name", "enabled", "url_pattern", "max_age_days"],
-        ["type", "channel_id", "name", "enabled"],
-        ["type", "playlist_id", "name", "enabled"],
+        ["type", "channel_id", "name", "enabled", "max_age_days", "max_items"],
+        ["type", "playlist_id", "name", "enabled", "max_age_days", "max_items"],
     ]
     assert list(dumped["search"]) == ["keywords", "semantic_description", "min_relevance"]
     assert list(dumped["search"]["keywords"]) == ["any", "all", "exclude"]
@@ -751,8 +748,8 @@ def test_cross_field_schedule_line(tmp_path: Path, schedule: str, message: str) 
     ("old", "new", "line"),
     [
         (
-            "channel_id: UCxxxxxxxxxxxxxxxxxxxxxx",
-            "channel_id: UCx\n    url: https://youtube.com/c/x",
+            'channel_id: "@somechannel"',
+            'channel_id: "@somechannel"\n    url: https://youtube.com/c/x',
             "sources[3].url: Extra inputs are not permitted",
         ),
         (

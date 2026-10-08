@@ -1,8 +1,13 @@
 """Age filter shared by the source adapters that carry a publication date."""
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
-__all__ = ["clamp_or_expire"]
+__all__ = ["age_cutoff", "clamp_or_expire"]
+
+
+def age_cutoff(now: datetime, max_age_days: int | None) -> datetime | None:
+    """The oldest ``published`` date to keep, or ``None`` when there is no age limit."""
+    return now - timedelta(days=max_age_days) if max_age_days is not None else None
 
 
 def clamp_or_expire(

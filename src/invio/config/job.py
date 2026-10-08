@@ -13,11 +13,11 @@ import os
 import re
 import secrets
 import stat
-from collections.abc import Hashable, Mapping
+from collections.abc import Callable, Hashable, Mapping
 from enum import StrEnum
 from pathlib import Path
 from typing import Annotated, Any, Final, Literal, Self, get_args
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 from zoneinfo import available_timezones
 
 import yaml
@@ -67,6 +67,8 @@ __all__ = [
     "known_timezones",
     "load_yaml",
     "loads_yaml",
+    "parse_youtube_channel",
+    "parse_youtube_playlist",
     "validate_job",
     "write_yaml",
 ]
@@ -384,22 +386,131 @@ class SitemapSource(_StrictModel):
         return value
 
 
+_YOUTUBE_HOSTS: Final = frozenset(
+    {"youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com"}
+)
+_YOUTUBE_ID: Final = re.compile(r"[A-Za-z0-9_-]+")
+_YOUTUBE_HANDLE: Final = re.compile(r"[A-Za-z0-9._-]+")
+
+
+def _youtube_url_parts(value: str, field: str) -> tuple[str, str]:
+    """``(path, query)`` of an https URL on an allowed YouTube host, else ``ValueError``."""
+    try:
+        parts = urlsplit(value)
+        port = parts.port
+    except ValueError:
+        raise ValueError(f"{field}: not a valid URL") from None
+    host = (parts.hostname or "").lower()
+    if parts.scheme != "https" or host not in _YOUTUBE_HOSTS:
+        raise ValueError(f"{field}: a URL must be https on youtube.com")
+    if parts.username is not None or parts.password is not None or port is not None:
+        raise ValueError(f"{field}: a URL must not contain credentials or a port")
+    return parts.path, parts.query
+
+
+def parse_youtube_channel(value: str) -> tuple[Literal["channel_id", "handle"], str]:
+    """Parse a ``channel_id`` value into ``(kind, token)``; the handle has no leading ``@``.
+
+    Accepts a channel id, an ``@handle`` or an https YouTube channel URL (``/channel/<id>`` or
+    ``/@<handle>``, optionally followed by one tab segment such as ``/videos``). Raises
+    ``ValueError`` naming the field otherwise.
+    """
+    rule = "channel_id: expected a channel id, an @handle or a YouTube channel URL"
+    if "://" in value:
+        path, _ = _youtube_url_parts(value, "channel_id")
+        segments = [part for part in path.split("/") if part]
+        is_channel = bool(segments) and segments[0] == "channel"
+        # /channel/<id>[/<tab>] or /@<handle>[/<tab>]
+        if not segments or len(segments) > (3 if is_channel else 2):
+            raise ValueError(rule)
+        if (is_channel and len(segments) < 2) or (not is_channel and segments[0][0] != "@"):
+            raise ValueError(rule)
+        tab = segments[2:] if is_channel else segments[1:]
+        if any(not _YOUTUBE_ID.fullmatch(part) for part in tab):
+            raise ValueError(rule)
+        return _channel_token(segments[1] if is_channel else segments[0], rule)
+    return _channel_token(value, rule)
+
+
+def _channel_token(token: str, rule: str) -> tuple[Literal["channel_id", "handle"], str]:
+    if token.startswith("@"):
+        if _YOUTUBE_HANDLE.fullmatch(token[1:]):
+            return "handle", token[1:]
+    elif _YOUTUBE_ID.fullmatch(token):
+        return "channel_id", token
+    raise ValueError(rule)
+
+
+def parse_youtube_playlist(value: str) -> str:
+    """Parse a ``playlist_id`` value (a playlist id or a YouTube URL with ``list=``).
+
+    Returns the validated playlist id; raises ``ValueError`` naming the field otherwise.
+    """
+    rule = "playlist_id: expected a playlist id or a YouTube URL with list=<id>"
+    if "://" in value:
+        _, query = _youtube_url_parts(value, "playlist_id")
+        values = parse_qs(query).get("list", [])
+        if len(values) != 1:
+            raise ValueError(rule)
+        value = values[0]
+    if not _YOUTUBE_ID.fullmatch(value):
+        raise ValueError(rule)
+    return value
+
+
+def _locator_check(parse: Callable[[str], object]) -> Callable[[object], object]:
+    """A ``before`` validator that runs ``parse`` on a non-empty string and returns it unchanged.
+
+    ``before``: the base model strips whitespace first, which would hide " UC1".
+    """
+
+    def check(value: object) -> object:
+        if isinstance(value, str) and value:
+            parse(value)
+        return value
+
+    return check
+
+
 class YoutubeChannelSource(_StrictModel):
-    """A YouTube channel."""
+    """A YouTube channel (id, ``@handle`` or channel URL); its latest videos are collected.
+
+    ``max_items`` caps the listing (yt-dlp's ``playlistend``) before the result is sorted newest
+    first. ``max_age_days`` (if set) drops videos older than that, but only when yt-dlp supplies
+    a date; flat listings often lack it, and undated videos are kept.
+    """
 
     type: Literal["youtube_channel"]
     channel_id: str = Field(min_length=1)
     name: _SourceName = None
     enabled: StrictBool = True
+    max_age_days: StrictInt | None = Field(default=None, ge=1)
+    max_items: StrictInt = Field(default=20, ge=1, le=200)
+
+    valid_locator = field_validator("channel_id", mode="before")(
+        _locator_check(parse_youtube_channel)
+    )
 
 
 class YoutubePlaylistSource(_StrictModel):
-    """A YouTube playlist."""
+    """A YouTube playlist (id or URL with ``list=``); its first ``max_items`` entries are collected.
+
+    ``max_items`` caps the listing (yt-dlp's ``playlistend``) before the result is sorted newest
+    first, so a playlist listed oldest first yields its first (oldest) ``max_items`` entries,
+    not the latest ones. ``max_age_days`` (if set) drops videos older than that, but only when
+    yt-dlp supplies a date; flat listings often lack it, and undated videos are kept.
+    """
 
     type: Literal["youtube_playlist"]
     playlist_id: str = Field(min_length=1)
     name: _SourceName = None
     enabled: StrictBool = True
+    max_age_days: StrictInt | None = Field(default=None, ge=1)
+    max_items: StrictInt = Field(default=20, ge=1, le=200)
+
+    valid_locator = field_validator("playlist_id", mode="before")(
+        _locator_check(parse_youtube_playlist)
+    )
 
 
 _SourceUnion = RssSource | WebSource | SitemapSource | YoutubeChannelSource | YoutubePlaylistSource

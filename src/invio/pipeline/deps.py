@@ -10,11 +10,12 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from contextlib import asynccontextmanager
 from datetime import timedelta
 from ipaddress import IPv4Network, IPv6Network
+from typing import assert_never
 
 import httpx2
 from sqlalchemy import Engine
 
-from invio.config.job import LLMConfig, SourceConfig
+from invio.config.job import LLMConfig, SourceConfig, YoutubeChannelSource, YoutubePlaylistSource
 from invio.config.settings import Settings
 from invio.db.session import check_database_url, create_db_engine, session_factory
 from invio.db.types import utcnow
@@ -31,6 +32,7 @@ from invio.sources.netguard import Resolver
 from invio.sources.rss import RssFeedSource
 from invio.sources.sitemap import SitemapUrlSource
 from invio.sources.web import WebPageSource
+from invio.sources.youtube import YoutubeSource
 
 __all__ = ["default_deps"]
 
@@ -55,6 +57,7 @@ async def default_deps(
     engine = create_db_engine(check_database_url(settings.require_secret("database_url")))
     providers: list[LLMProvider] = []
     web: WebPageSource | None = None
+    youtube = _youtube_source(settings)
     try:
         client = SafeHttpClient(
             HttpClientConfig.from_settings(settings),
@@ -74,7 +77,9 @@ async def default_deps(
                 return await web_source.fetch(config)
             if config.type == "sitemap":
                 return await sitemap.fetch(config)
-            raise ValueError(f"no adapter for source type {config.type}")  # skipped before this
+            if isinstance(config, YoutubeChannelSource | YoutubePlaylistSource):
+                return await youtube.fetch(config)
+            assert_never(config)
 
         async def fetch_page(url: str) -> str:
             # Unconditional: a page-mode item has the URL of its source, and a conditional
@@ -118,7 +123,18 @@ async def default_deps(
                 lock_ttl=timedelta(seconds=settings.run_lock_seconds),
             )
     finally:
+        youtube.close()
         await _close_all(web, providers, engine)
+
+
+def _youtube_source(settings: Settings) -> YoutubeSource:
+    """The YouTube adapter (blank cookies/proxy values are already ``None`` in ``Settings``)."""
+    proxy = settings.youtube_proxy
+    return YoutubeSource(
+        cookies_file=settings.youtube_cookies_file,
+        proxy=proxy.get_secret_value() if proxy is not None else None,
+        timeout=settings.youtube_timeout_seconds,
+    )
 
 
 async def _close_all(

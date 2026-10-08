@@ -12,6 +12,8 @@ from invio.config.job import (
     WebSource,
     YoutubeChannelSource,
     YoutubePlaylistSource,
+    parse_youtube_channel,
+    parse_youtube_playlist,
     validate_job,
 )
 from tests.job_helpers import validation_errors
@@ -323,3 +325,187 @@ def test_selector_validation_does_not_import_the_sources_package() -> None:
         "assert 'invio.sources' not in sys.modules"
     )
     subprocess.run([sys.executable, "-c", code], check=True)
+
+
+CHANNEL_OK = [
+    ("UC123", ("channel_id", "UC123")),
+    ("UC-_x", ("channel_id", "UC-_x")),
+    ("@some.channel", ("handle", "some.channel")),
+    ("https://www.youtube.com/channel/UCabc_1-x", ("channel_id", "UCabc_1-x")),
+    ("https://youtube.com/@handle", ("handle", "handle")),
+    ("https://m.youtube.com/@handle", ("handle", "handle")),
+    ("https://music.youtube.com/channel/UC1", ("channel_id", "UC1")),
+    ("https://www.youtube.com/@handle/videos", ("handle", "handle")),
+    ("https://www.youtube.com/channel/UC1/videos", ("channel_id", "UC1")),
+]
+CHANNEL_BAD = [
+    "",
+    " UC1",
+    "UC1 ",
+    "U C1",
+    "@",
+    "@bad handle",
+    "file:///etc/passwd",
+    "http://youtube.com/@x",
+    "https://169.254.169.254/",
+    "https://evil.example/@x",
+    "https://www.youtube.com.evil.example/@x",
+    "https://user:pw@www.youtube.com/@x",
+    "https://www.youtube.com:8443/@x",
+    "https://www.youtube.com/",
+    "https://www.youtube.com/watch?v=abc",
+    "https://www.youtube.com/channel/",
+    "https://www.youtube.com/@x/videos/extra",
+    "UC1/../x",
+    "\u00dcC1",
+]
+PLAYLIST_OK = [
+    ("PL123", "PL123"),
+    ("UU-_x", "UU-_x"),
+    ("https://www.youtube.com/playlist?list=PLabc_1-x", "PLabc_1-x"),
+    ("https://youtube.com/watch?v=vid&list=PL9", "PL9"),
+    ("https://music.youtube.com/playlist?list=OLAK5", "OLAK5"),
+]
+PLAYLIST_BAD = [
+    "",
+    " PL1",
+    "PL 1",
+    "file:///etc/passwd",
+    "http://www.youtube.com/playlist?list=PL1",
+    "https://www.youtube.com/playlist",
+    "https://www.youtube.com/playlist?list=",
+    "https://www.youtube.com/playlist?list=a%20b",
+    "https://169.254.169.254/playlist?list=PL1",
+    "https://evil.example/playlist?list=PL1",
+    "https://www.youtube.com/watch?v=abc",
+]
+
+
+@pytest.mark.parametrize(("value", "expected"), CHANNEL_OK)
+def test_parse_youtube_channel_accepts(value: str, expected: tuple[str, str]) -> None:
+    assert parse_youtube_channel(value) == expected
+
+
+@pytest.mark.parametrize("value", CHANNEL_BAD)
+def test_parse_youtube_channel_rejects(value: str) -> None:
+    with pytest.raises(ValueError, match="channel_id"):
+        parse_youtube_channel(value)
+
+
+@pytest.mark.parametrize(("value", "expected"), PLAYLIST_OK)
+def test_parse_youtube_playlist_accepts(value: str, expected: str) -> None:
+    assert parse_youtube_playlist(value) == expected
+
+
+@pytest.mark.parametrize("value", PLAYLIST_BAD)
+def test_parse_youtube_playlist_rejects(value: str) -> None:
+    with pytest.raises(ValueError, match="playlist_id"):
+        parse_youtube_playlist(value)
+
+
+@pytest.mark.parametrize(("value", "_"), CHANNEL_OK)
+def test_channel_model_keeps_original_value(
+    job_data: dict[str, Any], value: str, _: object
+) -> None:
+    job_data["sources"] = [{"type": "youtube_channel", "channel_id": value}]
+
+    parsed = JobConfig.model_validate(job_data).sources[0]
+
+    assert isinstance(parsed, YoutubeChannelSource)
+    assert parsed.channel_id == value
+
+
+@pytest.mark.parametrize("value", CHANNEL_BAD)
+def test_channel_model_rejects_bad_locator(job_data: dict[str, Any], value: str) -> None:
+    errors = _errors(job_data, {"type": "youtube_channel", "channel_id": value})
+
+    assert [loc for loc, _ in errors] == [("sources", 0, "youtube_channel", "channel_id")]
+
+
+@pytest.mark.parametrize("value", PLAYLIST_BAD)
+def test_playlist_model_rejects_bad_locator(job_data: dict[str, Any], value: str) -> None:
+    errors = _errors(job_data, {"type": "youtube_playlist", "playlist_id": value})
+
+    assert [loc for loc, _ in errors] == [("sources", 0, "youtube_playlist", "playlist_id")]
+
+
+@pytest.mark.parametrize(("value", "_"), [(v, e) for v, e in PLAYLIST_OK])
+def test_playlist_model_keeps_original_value(
+    job_data: dict[str, Any], value: str, _: object
+) -> None:
+    job_data["sources"] = [{"type": "youtube_playlist", "playlist_id": value}]
+
+    parsed = JobConfig.model_validate(job_data).sources[0]
+
+    assert isinstance(parsed, YoutubePlaylistSource)
+    assert parsed.playlist_id == value
+
+
+@pytest.mark.parametrize("value", [None, 5, ["UC1"]])
+def test_non_string_locator_is_a_type_error(job_data: dict[str, Any], value: object) -> None:
+    errors = _errors(job_data, {"type": "youtube_channel", "channel_id": value})
+
+    assert [loc for loc, _ in errors] == [("sources", 0, "youtube_channel", "channel_id")]
+
+
+YT_KINDS = [
+    ("youtube_channel", "channel_id", "UC123"),
+    ("youtube_playlist", "playlist_id", "PL123"),
+]
+
+
+@pytest.mark.parametrize(("kind", "field", "value"), YT_KINDS)
+def test_youtube_limit_defaults(
+    job_data: dict[str, Any], kind: str, field: str, value: str
+) -> None:
+    job_data["sources"] = [{"type": kind, field: value}]
+
+    parsed = JobConfig.model_validate(job_data).sources[0]
+
+    assert isinstance(parsed, YoutubeChannelSource | YoutubePlaylistSource)
+    assert parsed.max_age_days is None
+    assert parsed.max_items == 20
+
+
+@pytest.mark.parametrize(("kind", "field", "value"), YT_KINDS)
+@pytest.mark.parametrize(("limit", "ok"), [(1, True), (200, True), (0, False), (201, False)])
+def test_youtube_max_items_bounds(
+    job_data: dict[str, Any], kind: str, field: str, value: str, limit: int, ok: bool
+) -> None:
+    job_data["sources"] = [{"type": kind, field: value, "max_items": limit}]
+
+    if ok:
+        JobConfig.model_validate(job_data)
+    else:
+        assert [loc for loc, _ in validation_errors(job_data)] == [
+            ("sources", 0, kind, "max_items")
+        ]
+
+
+@pytest.mark.parametrize(("kind", "field", "value"), YT_KINDS)
+@pytest.mark.parametrize("bad", [0, -1, True, "5", 1.5])
+def test_youtube_max_items_rejects(
+    job_data: dict[str, Any], kind: str, field: str, value: str, bad: object
+) -> None:
+    errors = _errors(job_data, {"type": kind, field: value, "max_items": bad})
+
+    assert [loc for loc, _ in errors] == [("sources", 0, kind, "max_items")]
+
+
+@pytest.mark.parametrize(("kind", "field", "value"), YT_KINDS)
+def test_youtube_max_age_days_accepts_one(
+    job_data: dict[str, Any], kind: str, field: str, value: str
+) -> None:
+    job_data["sources"] = [{"type": kind, field: value, "max_age_days": 1}]
+
+    JobConfig.model_validate(job_data)
+
+
+@pytest.mark.parametrize(("kind", "field", "value"), YT_KINDS)
+@pytest.mark.parametrize("bad", [0, -1, 1.5, "7", True])
+def test_youtube_max_age_days_rejects(
+    job_data: dict[str, Any], kind: str, field: str, value: str, bad: object
+) -> None:
+    errors = _errors(job_data, {"type": kind, field: value, "max_age_days": bad})
+
+    assert [loc for loc, _ in errors] == [("sources", 0, kind, "max_age_days")]

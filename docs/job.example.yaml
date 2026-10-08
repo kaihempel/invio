@@ -23,7 +23,9 @@ sources:
     url: https://example.net/sitemap.xml
     enabled: false
   - type: youtube_channel
-    channel_id: UCxxxxxxxxxxxxxxxxxxxxxx
+    channel_id: "@somechannel"   # or UCxxxxxxxxxxxxxxxxxxxxxx, or a youtube.com channel URL
+    max_age_days: 14
+    max_items: 10
   - type: youtube_playlist
     playlist_id: PLxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 search:

@@ -204,6 +204,55 @@ against a hostile server. CORS preflight requests (`OPTIONS`) are sent by the br
 passing the guard; they carry no body and the page never sees their answer. robots.txt is
 checked for the page URL only. Use it for sites you trust to some degree.
 
+### YouTube sources
+
+`youtube_channel` and `youtube_playlist` list the latest videos with
+[yt-dlp](https://github.com/yt-dlp/yt-dlp) used as a library, in metadata-only mode: the flat
+listing never downloads media and never fetches a transcript (that is #29). Each video becomes a
+`video` item with the canonical `https://www.youtube.com/watch?v=<id>` URL.
+
+```yaml
+sources:
+  - type: youtube_channel
+    channel_id: "@somechannel"   # a channel id (UC...), an @handle or a youtube.com channel URL
+    max_age_days: 14             # optional, >= 1; default: no age limit
+    max_items: 20                # optional, 1..200; default 20
+  - type: youtube_playlist
+    playlist_id: PLxxxxxxxxxxxx  # a playlist id or a youtube.com URL with ?list=
+```
+
+* Only `https` URLs on `youtube.com`, `www.`, `m.` and `music.youtube.com` are accepted. invio
+  builds the URL it gives to yt-dlp from the validated id or handle, and restricts yt-dlp to its
+  YouTube extractors. This source does not go through the safe HTTP client (yt-dlp has its own
+  network stack), so the SSRF guard, robots.txt and per-host rate limit do not apply to it.
+* Order: videos with a date newest first, then videos without one in listing order, cut to
+  `max_items`.
+* `max_age_days` only applies when yt-dlp supplies a date. Flat listings often carry no upload
+  date; such videos are kept (`max_age_days` cannot judge them) and no per-video request is made
+  to find out. A listing without any dates is therefore just its first `max_items` entries.
+* `max_items` also caps the listing itself (yt-dlp's `playlistend`), *before* the newest-first
+  sort. A channel's `/videos` tab is listed newest first, so that is the latest videos. A
+  playlist is listed in its own order: one kept oldest first returns its first (oldest)
+  `max_items` entries, not the latest ones. Raise `max_items` for such playlists.
+* A channel URL with a tab (`/shorts`, `/streams`, ...) is accepted, but the `/videos` tab is
+  listed.
+* Entries that are private, deleted, members-only, premium-only or need a login (by title
+  placeholder or yt-dlp's `availability`), or that lack an id or title, are skipped.
+* `INVIO_YOUTUBE_TIMEOUT_SECONDS` (default 60) is the limit for one listing. It is best effort:
+  a timed-out listing fails the source at once, but its worker thread runs on until yt-dlp's own
+  per-request socket timeout (at most 20 s) ends it; at most four such threads exist. The
+  process waits for such a thread when it exits, so shutdown can be delayed by that long.
+  `INVIO_YOUTUBE_PROXY` (a secret; never logged) routes the requests through a proxy.
+  `INVIO_YOUTUBE_COOKIES_FILE` points to a cookies file in Netscape format, which helps against
+  "confirm you're not a bot" blocks on server IPs. The file is only read: yt-dlp gets a private
+  copy for each listing (it writes cookies back on exit), so the file may be read-only and
+  refreshed cookies are not kept. A configured file that is not a readable file fails the source
+  with `cookies_unavailable`. An empty value for either variable counts as unset.
+* Failures (timeout, connection error, HTTP 429/403/404, block page) fail only that source and
+  carry a short reason code, never yt-dlp's message. 429 and network errors are retried like
+  other transient source errors.
+* You are responsible for complying with YouTube's terms of use for your usage.
+
 ### Article text extraction
 
 `invio.sources.extract.extract_text(html, url)` turns the HTML of an article page that was
@@ -606,8 +655,8 @@ appears as a `notify` entry with its counts. The list is written by
 before this feature has no such list: `show` says "item errors are not available for this run".
 
 Known limitations: the lock has no heartbeat, so a run longer than `INVIO_RUN_LOCK_SECONDS` can
-be overtaken by another one; source types without an adapter yet (`sitemap`, `youtube_*`) are
-skipped with a `source.unsupported` log line; video items use the text of their page until #29.
+be overtaken by another one; a source type without an adapter would be
+skipped with a `source.unsupported` log line (every type has one now); video items use the text of their page until #29.
 
 ### Scheduled runs: `invio run-due`
 
