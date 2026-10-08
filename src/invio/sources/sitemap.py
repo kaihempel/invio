@@ -22,6 +22,7 @@ from defusedxml.ElementTree import fromstring
 from invio.config.job import SitemapSource
 from invio.domain import Candidate, url_hash
 from invio.sources.errors import FetchError
+from invio.sources.freshness import clamp_or_expire
 from invio.sources.http import NotModified, SafeHttpClient
 from invio.sources.urls import http_url_or_none
 
@@ -86,12 +87,8 @@ class SitemapUrlSource:
                 for entry in _urlset_entries(root, result.url):
                     if pattern is not None and pattern.search(entry.loc) is None:
                         continue
-                    published = entry.lastmod
-                    if published is not None and published > now:
-                        published = now
-                    elif cutoff is not None and published is not None and published < cutoff:
-                        continue
-                    if entry.loc in candidates:
+                    keep, published = clamp_or_expire(entry.lastmod, now, cutoff)
+                    if not keep or entry.loc in candidates:
                         continue
                     if kept >= MAX_ENTRIES_PER_SITEMAP:
                         break

@@ -22,6 +22,7 @@ from feedparser.exceptions import CharacterEncodingOverride, NonXMLContentType
 from invio.config.job import RssSource
 from invio.domain import Candidate, url_hash
 from invio.sources.errors import FetchError
+from invio.sources.freshness import clamp_or_expire
 from invio.sources.http import NotModified, SafeHttpClient
 from invio.sources.text import TEASER_MAX_CHARS, collapse, html_to_text, teaser
 from invio.sources.urls import http_url_or_none
@@ -86,11 +87,11 @@ class RssFeedSource:
             if candidate.url in seen:
                 continue
             seen.add(candidate.url)
-            published = candidate.published_at
-            if published is not None and published > now:
-                candidate = replace(candidate, published_at=now)
-            elif cutoff is not None and published is not None and published < cutoff:
+            keep, published = clamp_or_expire(candidate.published_at, now, cutoff)
+            if not keep:
                 continue
+            if published != candidate.published_at:
+                candidate = replace(candidate, published_at=published)
             kept.append(candidate)
         return kept
 
