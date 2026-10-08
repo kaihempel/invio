@@ -1,5 +1,6 @@
 """SMTP delivery of digests and retry of failed notifications."""
 
+import asyncio
 import contextlib
 import logging
 import ssl
@@ -29,6 +30,7 @@ from invio.db.session import session_factory as build_session_factory
 from invio.db.types import utcnow
 from invio.domain import NotificationStatus, RunStatus
 from invio.log import run_context, run_id_var
+from invio.notify.archive import archive_digest, archive_url
 from invio.notify.payload import DigestStats, NotificationPayload
 from invio.notify.render import build_message, render_mail, render_subject
 
@@ -315,28 +317,65 @@ async def _deliver(
             ),
         )
         body, job_name, run_id = digest.body, job.name, digest.run_id
-        notifications = NotificationRepository(session)
+        job_id, digest_row_id = job.id, digest.id
+        has_items = len(digest.item_ids) > 0
         recipients = list(dict.fromkeys(str(to) for to in cfg.notification.to))
+    # No transaction is open while the archive is written (file I/O runs in a worker thread).
+    with run_context(job=job_name, run_id=str(run_id) if run_id is not None else run_id_var.get()):
+        if cfg.archive.enabled and has_items:
+            payload = await _archive(settings, payload, body, started_at)
+    with session_scope(session_factory) as session:
+        notifications = NotificationRepository(session)
         ids = tuple(
             notifications.add(
-                job.id,
+                job_id,
                 CHANNEL_EMAIL,
                 recipient,
                 run_id=run_id,
-                digest_id=digest.id,
+                digest_id=digest_row_id,
                 payload=payload.model_dump(mode="json"),
             ).id
             for recipient in recipients
         )
+    link = archive_url(
+        cfg.archive.base_url,
+        settings.archive_dir,
+        payload.archive_page,
+        enabled=cfg.archive.enabled,
+    )
     # From here on the rows exist: any failure is recorded on them instead of being raised.
     with run_context(job=job_name, run_id=str(run_id) if run_id is not None else run_id_var.get()):
         try:
-            await _send_all(session_factory, ids, payload, body, settings, mailer_factory, clock)
+            await _send_all(
+                session_factory, ids, payload, body, settings, mailer_factory, clock, link
+            )
         except Exception as exc:
             error = _error_text(exc, settings)
             logger.error("digest delivery failed", extra={"digest_id": digest_id, "error": error})
             _fail_pending(session_factory, ids, error)
     return _outcome_for(session_factory, ids)
+
+
+async def _archive(
+    settings: Settings, payload: NotificationPayload, body: str, started_at: datetime
+) -> NotificationPayload:
+    """Write the archive page; return the payload with ``archive_page`` set, or unchanged.
+
+    Never raises: the archive is a convenience, so a failure is logged and delivery goes on.
+    """
+    try:
+        page = await asyncio.to_thread(
+            archive_digest,
+            settings.archive_dir,
+            job_name=payload.job_name,
+            run_started_at=started_at,
+            payload=payload,
+            digest_markdown=body,
+        )
+    except Exception as exc:
+        logger.warning("archive.failed", extra={"error": _error_text(exc, settings)})
+        return payload
+    return payload.model_copy(update={"archive_page": page.relative_path})
 
 
 async def _send_all(
@@ -347,6 +386,7 @@ async def _send_all(
     settings: Settings,
     mailer_factory: Callable[[Settings], SmtpMailer],
     clock: Callable[[], datetime],
+    link: str | None,
 ) -> None:
     missing = missing_smtp_settings(settings)
     if missing:
@@ -360,7 +400,7 @@ async def _send_all(
                 notifications.mark(row, NotificationStatus.FAILED, error=error)
             logger.warning("notification failed", extra={**_log_extra(row), "error": error})
         return
-    mail = render_mail(payload, body)
+    mail = render_mail(payload, body, archive_url=link)
     sender = settings.smtp_from or ""
 
     def build(row: Notification) -> EmailMessage:
@@ -406,6 +446,16 @@ def _job_label(row: Notification) -> str:
     return name if isinstance(name, str) and name else str(row.job_id)
 
 
+def _current_config(job: Job | None) -> JobConfig | None:
+    """The job's stored config, or ``None`` when the job is gone or its config is invalid."""
+    if job is None:
+        return None
+    try:
+        return JobConfig.model_validate(job.config)
+    except ValidationError:
+        return None
+
+
 def _rebuilder(
     session_factory: sessionmaker[Session], settings: Settings, clock: Callable[[], datetime]
 ) -> Callable[[Notification], EmailMessage]:
@@ -419,11 +469,23 @@ def _rebuilder(
             if digest is None:
                 raise _NotSendable("digest no longer available")
             body = digest.body
+            job = session.get(Job, row.job_id)
+            cfg = _current_config(job)
         try:
             payload = NotificationPayload.model_validate(row.payload)
         except ValidationError as exc:
             raise _NotSendable(f"invalid notification payload: {exc.errors()[0]['msg']}") from exc
-        mail = render_mail(payload, body)
+        link = (
+            archive_url(
+                cfg.archive.base_url,
+                settings.archive_dir,
+                payload.archive_page,
+                enabled=cfg.archive.enabled,
+            )
+            if cfg is not None
+            else None
+        )
+        mail = render_mail(payload, body, archive_url=link)
         sender = settings.smtp_from or ""
         return build_message(mail, sender=sender, recipient=row.recipient, now=clock())
 

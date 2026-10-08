@@ -113,7 +113,7 @@ class Settings(BaseSettings):
     # Operations
     log_level: str = "INFO"
     healthcheck_url: str | None = None
-    archive_dir: Path | None = None
+    archive_dir: Path = Path("/var/lib/invio/archive")
 
     # YouTube source (the proxy URL may embed credentials, hence SecretStr)
     youtube_cookies_file: Path | None = None

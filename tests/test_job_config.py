@@ -6,8 +6,8 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
-from invio.config.job import JobConfig, LimitsConfig
-from tests.job_helpers import set_path
+from invio.config.job import ArchiveConfig, JobConfig, LimitsConfig
+from tests.job_helpers import set_path, validation_errors
 
 
 def test_valid_job_loads(job_data: dict[str, Any]) -> None:
@@ -92,3 +92,63 @@ def test_language_unknown_code_message(job_data: dict[str, Any]) -> None:
     job_data["language"] = "xx"
     with pytest.raises(ValidationError, match="unknown ISO 639-1 language code 'xx'"):
         JobConfig.model_validate(job_data)
+
+
+# --- archive -------------------------------------------------------------------------------
+
+
+def test_archive_omitted_means_disabled(job_data: dict[str, Any]) -> None:
+    job = JobConfig.model_validate(job_data)
+
+    assert job.archive == ArchiveConfig()
+    assert job.archive.enabled is False
+    assert job.archive.base_url is None
+
+
+def test_archive_enabled_without_base_url_is_valid(job_data: dict[str, Any]) -> None:
+    job_data["archive"] = {"enabled": True}
+
+    job = JobConfig.model_validate(job_data)
+
+    assert job.archive.enabled is True
+    assert job.archive.base_url is None
+
+
+@pytest.mark.parametrize(
+    ("given", "stored"),
+    [
+        ("https://h/x/", "https://h/x"),
+        ("https://h/x", "https://h/x"),
+        ("http://h/", "http://h"),
+        ("https://digests.example.org/invio//", "https://digests.example.org/invio"),
+    ],
+)
+def test_archive_base_url_is_normalised(job_data: dict[str, Any], given: str, stored: str) -> None:
+    job_data["archive"] = {"enabled": True, "base_url": given}
+
+    assert JobConfig.model_validate(job_data).archive.base_url == stored
+
+
+@pytest.mark.parametrize(
+    "value", ["ftp://h", "h/x", "https://", "https://h?a=1", "https://h#f", "", "   "]
+)
+def test_archive_base_url_rejected(job_data: dict[str, Any], value: str) -> None:
+    job_data["archive"] = {"enabled": True, "base_url": value}
+
+    errors = validation_errors(job_data)
+
+    assert [loc for loc, _ in errors] == [("archive", "base_url")]
+
+
+def test_archive_enabled_must_be_a_bool(job_data: dict[str, Any]) -> None:
+    job_data["archive"] = {"enabled": "yes"}
+
+    assert [loc for loc, _ in validation_errors(job_data)] == [("archive", "enabled")]
+
+
+def test_archive_unknown_key_rejected(job_data: dict[str, Any]) -> None:
+    job_data["archive"] = {"enabled": True, "dir": "/x"}
+
+    errors = validation_errors(job_data)
+
+    assert [loc for loc, _ in errors] == [("archive", "dir")]

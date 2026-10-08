@@ -17,6 +17,7 @@ from collections.abc import Hashable, Mapping
 from enum import StrEnum
 from pathlib import Path
 from typing import Annotated, Any, Final, Literal, Self, get_args
+from urllib.parse import urlsplit
 from zoneinfo import available_timezones
 
 import yaml
@@ -41,6 +42,7 @@ from invio.config.languages import ISO_639_1
 __all__ = [
     "SUPPORTED_SCHEMA_VERSION",
     "TIME_PATTERN",
+    "ArchiveConfig",
     "Frequency",
     "JobConfig",
     "JobConfigError",
@@ -239,6 +241,28 @@ class LimitsConfig(_StrictModel):
     max_llm_tokens_per_run: StrictInt = Field(default=200000, ge=1)
 
 
+class ArchiveConfig(_StrictModel):
+    """Static HTML archive of the job's digests (``base_url`` only feeds the link in the mail)."""
+
+    enabled: StrictBool = False
+    base_url: str | None = None
+
+    @field_validator("base_url")
+    @classmethod
+    def _http_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        try:
+            parts = urlsplit(value)
+        except ValueError as exc:
+            raise ValueError("base_url must be a valid http or https URL") from exc
+        if parts.scheme not in ("http", "https") or not parts.netloc:
+            raise ValueError("base_url must be an http or https URL with a host")
+        if parts.query or parts.fragment or "?" in value or "#" in value:
+            raise ValueError("base_url must not contain a query or a fragment")
+        return value.rstrip("/")
+
+
 # Source models repeat ``name``/``enabled`` instead of inheriting them: Pydantic puts inherited
 # fields first, but saved files list ``type`` and the locator first (contracts/job-file.md).
 _SourceName = Annotated[str | None, Field(min_length=1)]
@@ -372,6 +396,7 @@ class JobConfig(_StrictModel):
     search: SearchConfig
     llm: LLMConfig
     limits: LimitsConfig = Field(default_factory=LimitsConfig)
+    archive: ArchiveConfig = Field(default_factory=ArchiveConfig)
 
     @field_validator("schema_version")
     @classmethod

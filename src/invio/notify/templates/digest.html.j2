@@ -14,7 +14,7 @@
 {{ body_html }}
 {% endif %}
 <footer style="margin-top:32px;padding-top:12px;border-top:1px solid #ddd;color:#888;font-size:12px;">
-Items found: {{ stats.items_found }} · Included: {{ stats.items_included }} · Run time: {{ stats.duration }}
+Items found: {{ stats.items_found }} · Included: {{ stats.items_included }} · Run time: {{ stats.duration }}{% if archive_url %} · Archived version: <a href="{{ archive_url }}">{{ archive_url }}</a>{% endif %}
 </footer>
 </div>
 </body>

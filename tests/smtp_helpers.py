@@ -238,6 +238,8 @@ def seed_digest(
     timezone: str = "Europe/Berlin",
     run_stats: dict[str, Any] | None = None,
     started_at: datetime | None = None,
+    archive: dict[str, Any] | None = None,
+    run_status: RunStatus = RunStatus.SUCCEEDED,
 ) -> Digest:
     """Create a job (valid ``JobConfig``), a finished run and a digest, then commit."""
     config = JobConfig.model_validate(
@@ -249,6 +251,7 @@ def seed_digest(
                 "subject": subject,
                 "send_if_empty": send_if_empty,
             },
+            **({} if archive is None else {"archive": archive}),
         }
     )
     job = Job(name=job_name, config=config.model_dump(mode="json"))
@@ -257,7 +260,7 @@ def seed_digest(
     runs = RunRepository(session)
     run: Run = runs.start(job.id, started_at=started_at or datetime(2026, 10, 4, 12, 0, tzinfo=UTC))
     stats = {"found": 7} if run_stats is None else run_stats
-    runs.finish(run, RunStatus.SUCCEEDED, stats=stats, finished_at=run.started_at)
+    runs.finish(run, run_status, stats=stats, finished_at=run.started_at)
     digest = DigestRepository(session).add(
         job.id, "digest", body, [1, 2] if item_ids is None else item_ids, run_id=run.id
     )

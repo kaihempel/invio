@@ -309,6 +309,35 @@ nothing, `touch /var/lib/invio/probe` works (remove the file afterwards) and `su
 refused. The hardening does not allow Chromium's own sandbox: if the optional `render` extra is
 ever deployed, the units need a reviewed relaxation.
 
+## Digest archive
+
+Jobs with `archive.enabled: true` write static HTML pages below `INVIO_ARCHIVE_DIR`
+(`/var/lib/invio/archive`). The service creates the directory on first use (mode `0755`, files
+`0644`) and may write there because `ReadWritePaths=/var/lib/invio` covers it; the Ansible role
+needs no extra task. Serve it with any static web server and protect it, since digests can hold
+private research. `/var/lib/invio` is `0750` (`invio:invio`), so the web server user needs to
+be in the `invio` group (`usermod -aG invio www-data`, then restart the web server) or the
+directory must be exposed another way (for example a bind mount or a sync job).
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name digests.example.org;
+    # ssl_certificate ...;
+
+    location /invio/ {
+        alias /var/lib/invio/archive/;
+        auth_basic           "invio digests";
+        auth_basic_user_file /etc/nginx/invio.htpasswd;   # htpasswd -c /etc/nginx/invio.htpasswd me
+        autoindex off;
+    }
+}
+```
+
+Use `archive.base_url: https://digests.example.org/invio` in the job file so the mail links to
+the pages. Pages carry `noindex` and a no-referrer policy but are not access controlled by invio
+itself.
+
 ## Updating
 
 ### With Ansible
