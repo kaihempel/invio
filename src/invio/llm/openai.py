@@ -25,8 +25,9 @@ Known limitation: the graph-level :func:`invio.llm.retry.is_transient_llm` still
 Errors raised here carry ``provider="openai"`` and the model. Their messages are built from the
 status and the sanitized ``error.message`` of the response body only; ``str(exc)`` of an SDK
 exception (which embeds the raw body) is never used. The API key, the prompt, the answer, a
-refusal text and the raw body never appear in them, and the SDK exception is neither their
-``__cause__`` nor their ``__context__``.
+refusal text and the raw body never appear in them (the provider's own ``error.message`` is
+passed on, truncated, and may quote request fragments such as schema paths), and the SDK
+exception is neither their ``__cause__`` nor their ``__context__``.
 
 The SDK client (and so its HTTP connection pool) is bound to the event loop that uses it, so
 there is one client per running loop, created lazily from ``client_factory``.
@@ -43,7 +44,7 @@ import re
 import threading
 from collections.abc import Awaitable, Callable
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Self
+from typing import TYPE_CHECKING, Any, Self, cast
 
 import httpx
 import openai
@@ -392,8 +393,7 @@ class OpenAIProvider:
     async def complete_structured[T: BaseModel](
         self, system: str, user: str, schema: type[T], *, model: str, temperature: float
     ) -> tuple[T, Usage]:
-        schema_object = _closed_schema(schema.model_json_schema())
-        assert isinstance(schema_object, dict)
+        schema_object = cast("dict[str, object]", _closed_schema(schema.model_json_schema()))
         text_format: ResponseTextConfigParam = {
             "format": {
                 "type": "json_schema",
