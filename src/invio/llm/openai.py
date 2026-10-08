@@ -84,6 +84,9 @@ _RATE_LIMIT_STATUS = 429
 _CLIENT_ERRORS = range(400, 500)
 _SERVER_ERRORS = range(500, 600)
 _SCHEMA_NAME_LIMIT = 64
+# The Responses API rejects ``max_output_tokens`` below 16 with HTTP 400. Smaller limits (such
+# as the 5 tokens of ``invio llm test``) are raised to this minimum; it is only an upper bound.
+_MIN_OUTPUT_TOKENS = 16
 _INSUFFICIENT_QUOTA = "insufficient_quota"
 # Causes of a connection error raised before anything was sent: retrying cannot help.
 _UNSENDABLE = (httpx.InvalidURL, httpx.UnsupportedProtocol, httpx.LocalProtocolError)
@@ -321,7 +324,7 @@ class OpenAIProvider:
         """Send one HTTP request and return the answer text and usage."""
         options: dict[str, Any] = {}
         if max_tokens is not None:
-            options["max_output_tokens"] = max_tokens
+            options["max_output_tokens"] = max(max_tokens, _MIN_OUTPUT_TOKENS)
         if text_format is not None:
             options["text"] = text_format
         response = await with_timeout(

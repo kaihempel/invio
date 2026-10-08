@@ -133,6 +133,15 @@ async def test_temperature_zero_is_sent_explicitly() -> None:
     assert recorder.requests[0].body["temperature"] == 0
 
 
+@pytest.mark.parametrize(("requested", "sent"), [(1, 16), (5, 16), (16, 16), (17, 17)])
+async def test_output_limit_is_raised_to_the_api_minimum(requested: int, sent: int) -> None:
+    provider, recorder, _ = make_provider("response_ok")
+
+    await provider.complete(SYSTEM, USER, model=MODEL, temperature=0, max_tokens=requested)
+
+    assert recorder.requests[0].body["max_output_tokens"] == sent
+
+
 async def test_complete_without_usage_reports_zero_tokens() -> None:
     provider, _, _ = make_provider("response_no_usage")
 
