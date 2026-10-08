@@ -79,6 +79,18 @@ def isolated_settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterat
 
 
 @pytest.fixture(autouse=True)
+def plain_rich_output(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep Typer's Rich help and error panels free of ANSI codes, also on CI.
+
+    Typer forces a colour terminal when ``GITHUB_ACTIONS``, ``FORCE_COLOR`` or ``PY_COLORS``
+    is set, and the escape codes split option names such as ``--limit`` in the output.
+    """
+    import typer.rich_utils
+
+    monkeypatch.setattr(typer.rich_utils, "FORCE_TERMINAL", False)
+
+
+@pytest.fixture(autouse=True)
 def restore_root_logger() -> Iterator[logging.Logger]:
     """Snapshot the root logger's handlers and level and restore them after the test.
 

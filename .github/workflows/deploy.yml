@@ -1,3 +1,4 @@
+---
 name: Deploy (Molecule)
 
 # Provisioning tests for the Ansible role in deploy/ansible: a fresh Debian 12/13 container with

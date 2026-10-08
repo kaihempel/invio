@@ -32,7 +32,7 @@ describes the same steps by hand. Paths on the host:
 - Outbound network from the target: the Git remote, PyPI (`uv sync`) and GitHub releases (the uv
   binary and the managed Python).
 - Controller (for the role): the `deploy` dependency group (`uv sync --group deploy`) gives you
-  `ansible-core`, `ansible-lint` and Molecule. Install the collections the role needs:
+  `ansible-core`, `ansible-lint`, `yamllint` and Molecule. Install the collections the role needs:
 
   ```bash
   uv run --group deploy ansible-galaxy collection install \

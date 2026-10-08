@@ -1,3 +1,4 @@
+---
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.16.10
@@ -13,6 +14,11 @@ repos:
         language: system
         types: [python]
         pass_filenames: false
+      - id: yamllint
+        name: yamllint (all YAML files, config in .yamllint)
+        entry: uv run --locked --group deploy yamllint --strict
+        language: system
+        types: [yaml]
       - id: ansible-lint
         name: ansible-lint (deploy/ansible, install collections first)
         entry: bash -c 'cd deploy/ansible && uv run --locked --group deploy ansible-lint'

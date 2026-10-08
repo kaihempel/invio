@@ -1119,6 +1119,7 @@ deploy = [
     { name = "ansible-lint" },
     { name = "molecule" },
     { name = "molecule-plugins", extra = ["docker"] },
+    { name = "yamllint" },
 ]
 dev = [
     { name = "aiosmtpd" },
@@ -1167,6 +1168,7 @@ deploy = [
     { name = "ansible-lint", specifier = ">=25" },
     { name = "molecule", specifier = ">=25" },
     { name = "molecule-plugins", extras = ["docker"], specifier = ">=25" },
+    { name = "yamllint", specifier = ">=1.38" },
 ]
 dev = [
     { name = "aiosmtpd", specifier = ">=1.4" },

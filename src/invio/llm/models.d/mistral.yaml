@@ -3,6 +3,7 @@
 # Verified on 2026-10-04: ids from docs.mistral.ai/getting-started/models (both current),
 # prices from mistral.ai/pricing/api, context windows (256k) from the model pages.
 # mistral-small-2506 and mistral-medium-2508 were retired on 2026-07-31 and 2026-08-31.
+---
 schema_version: 1
 provider: mistral
 models:
