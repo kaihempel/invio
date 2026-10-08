@@ -22,8 +22,8 @@ description: "Task list for the OpenAI provider (issue #30)"
 
 ## Phase 1: Setup
 
-- [ ] T001 Add `openai>=2,<3` to `dependencies` in `pyproject.toml`, run `uv lock`, commit the updated `uv.lock`; confirm the exact SDK field names used in `research.md` R1 (`output_text`, `usage`, `status`, `incomplete_details`, refusal items) against the installed version and note any difference in `specs/017-gh-issue-30/research.md`
-- [ ] T002 [P] Create `src/invio/llm/models.d/openai.yaml` (`schema_version: 1`, `provider: openai`) with two pinned, non-reasoning models that support strict JSON-schema output (first = fast, second = smart), no `-latest` aliases; copy ids, `input_price_per_mtok`, `output_price_per_mtok` and `context_window` from OpenAI's official model and pricing pages and record the verification date and sources in a header comment, as in `models.d/mistral.yaml`
+- [x] T001 Add `openai>=2,<3` to `dependencies` in `pyproject.toml`, run `uv lock`, commit the updated `uv.lock`; confirm the exact SDK field names used in `research.md` R1 (`output_text`, `usage`, `status`, `incomplete_details`, refusal items) against the installed version and note any difference in `specs/017-gh-issue-30/research.md`
+- [x] T002 [P] Create `src/invio/llm/models.d/openai.yaml` (`schema_version: 1`, `provider: openai`) with two pinned, non-reasoning models that support strict JSON-schema output (first = fast, second = smart), no `-latest` aliases; copy ids, `input_price_per_mtok`, `output_price_per_mtok` and `context_window` from OpenAI's official model and pricing pages and record the verification date and sources in a header comment, as in `models.d/mistral.yaml`
 
 ---
 
@@ -31,9 +31,9 @@ description: "Task list for the OpenAI provider (issue #30)"
 
 **Purpose**: share the retry/backoff logic (spec FR-008) before a second provider uses it.
 
-- [ ] T003 Create `src/invio/llm/http_retry.py`: move `RetryPolicy` (same fields and validation: `max_retries >= 0`, `base_delay > 0`, `0 <= jitter < 1`, `max_retry_after > 0`), the failure record, `_retry_after` (seconds or HTTP date), `_wait_before_retry`, the safe-detail/describe helpers and `_strict_schema` out of `src/invio/llm/mistral.py`, making the helpers provider-neutral (they take `status`, response `headers` and body text; each provider adapts its own SDK exception to those); expose one async retry-loop function taking a provider-specific `classify(exc, model, now)`, plus `sleep`, `uniform`, `now`, and the `llm.retry` warning log line unchanged
-- [ ] T004 Refactor `src/invio/llm/mistral.py` to use `http_retry.py` (keep `RetryPolicy` importable from `invio.llm.mistral`; keep `_classify` and the SDK calls in place); no behaviour change
-- [ ] T005 Run `tests/test_llm_mistral.py`, `tests/test_llm_retry.py` and `tests/test_llm_layering.py` unchanged and confirm they pass (regression guard for T003/T004); fix the extraction, not the tests
+- [x] T003 Create `src/invio/llm/http_retry.py`: move `RetryPolicy` (same fields and validation: `max_retries >= 0`, `base_delay > 0`, `0 <= jitter < 1`, `max_retry_after > 0`), the failure record, `_retry_after` (seconds or HTTP date), `_wait_before_retry`, the safe-detail/describe helpers and `_strict_schema` out of `src/invio/llm/mistral.py`, making the helpers provider-neutral (they take `status`, response `headers` and body text; each provider adapts its own SDK exception to those); expose one async retry-loop function taking a provider-specific `classify(exc, model, now)`, plus `sleep`, `uniform`, `now`, and the `llm.retry` warning log line unchanged
+- [x] T004 Refactor `src/invio/llm/mistral.py` to use `http_retry.py` (keep `RetryPolicy` importable from `invio.llm.mistral`; keep `_classify` and the SDK calls in place); no behaviour change
+- [x] T005 Run `tests/test_llm_mistral.py`, `tests/test_llm_retry.py` and `tests/test_llm_layering.py` unchanged and confirm they pass (regression guard for T003/T004); fix the extraction, not the tests
 
 **Checkpoint**: Mistral behaves identically; the shared loop exists.
 
