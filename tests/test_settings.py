@@ -317,8 +317,8 @@ def test_archive_dir_is_overridden_by_the_environment(monkeypatch: pytest.Monkey
     monkeypatch.setenv("INVIO_ARCHIVE_DIR", "/x")
 
     assert Settings(_env_file=None).archive_dir == Path("/x")
-    
-    
+
+
 def test_healthcheck_url_is_a_secret(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("INVIO_HEALTHCHECK_URL", "https://hc-ping.com/uuid-123")
 
