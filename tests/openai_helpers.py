@@ -40,6 +40,7 @@ class RecordedRequest(NamedTuple):
     path: str
     body: dict[str, Any]
     has_authorization: bool
+    host: str = ""
 
 
 Reply = str | httpx.Response | Exception | object
@@ -61,6 +62,7 @@ class Recorder:
                 request.url.path,
                 json.loads(request.content) if request.content else {},
                 "authorization" in request.headers,
+                request.url.host,
             )
         )
         if not self._queue:

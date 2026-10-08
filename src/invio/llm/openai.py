@@ -112,13 +112,13 @@ def _is_insufficient_quota(exc: openai.APIStatusError) -> bool:
     return _INSUFFICIENT_QUOTA in (exc.code, kind)
 
 
-def _classify_connection(exc: openai.APIConnectionError, model: str) -> Failure:
-    """Classify a connection-level error by the transport exception that caused it."""
-    name = type(exc.__cause__).__name__ if exc.__cause__ is not None else type(exc).__name__
-    if isinstance(exc.__cause__, _UNSENDABLE):
+def _classify_transport(cause: BaseException, model: str) -> Failure:
+    """Classify a connection-level failure by the (``httpx``) exception that caused it."""
+    name = type(cause).__name__
+    if isinstance(cause, _UNSENDABLE):
         message = describe(f"OpenAI request could not be sent ({name})", model, None)
         return Failure("unsendable", False, _unavailable(message, model))
-    if isinstance(exc.__cause__, _BAD_RESPONSE):
+    if isinstance(cause, _BAD_RESPONSE):
         message = describe(f"OpenAI returned an unexpected response ({name})", model, None)
         return Failure("bad_response", False, _unavailable(message, model))
     message = describe(f"OpenAI connection failed ({name})", model, None)
@@ -164,7 +164,14 @@ def _classify(exc: Exception, model: str, now: Callable[[], datetime]) -> Failur
         message = describe("OpenAI request timed out", model, None)
         return Failure("timeout", False, _unavailable(message, model))
     if isinstance(exc, openai.APIConnectionError):
-        return _classify_connection(exc, model)
+        # The SDK raises these from the transport exception; inspect what caused them.
+        return _classify_transport(exc.__cause__ or exc, model)
+    # Raw httpx errors that the SDK did not wrap (for example an invalid base URL).
+    if isinstance(exc, httpx.TimeoutException):
+        message = describe("OpenAI request timed out", model, None)
+        return Failure("timeout", False, _unavailable(message, model))
+    if isinstance(exc, httpx.InvalidURL | httpx.HTTPError):
+        return _classify_transport(exc, model)
     if isinstance(exc, openai.APIResponseValidationError | json.JSONDecodeError):
         message = describe(f"OpenAI returned an unexpected response ({name})", model, None)
         return Failure("bad_response", False, _unavailable(message, model))
