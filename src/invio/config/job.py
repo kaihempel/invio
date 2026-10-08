@@ -325,12 +325,29 @@ class WebSource(_StrictModel):
 
 
 class SitemapSource(_StrictModel):
-    """A sitemap."""
+    """A sitemap (``urlset``, or a ``sitemapindex`` one level deep) whose URLs are candidates.
+
+    ``url_pattern`` (a regular expression searched in the absolute URL) keeps only matching
+    URLs; entries whose ``lastmod`` is older than ``max_age_days`` (if set) are ignored.
+    """
 
     type: Literal["sitemap"]
     url: HttpUrl
     name: _SourceName = None
     enabled: StrictBool = True
+    url_pattern: _OptionalText = None
+    max_age_days: StrictInt | None = Field(default=None, ge=1)
+
+    @field_validator("url_pattern")
+    @classmethod
+    def _valid_pattern(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        try:
+            re.compile(value)
+        except re.error as exc:
+            raise ValueError(f"invalid regular expression: {exc}") from None
+        return value
 
 
 class YoutubeChannelSource(_StrictModel):

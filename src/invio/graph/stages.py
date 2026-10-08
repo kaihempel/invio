@@ -100,7 +100,7 @@ logger = logging.getLogger("invio.graph")
 _STREAK_READ_CAP: Final = 6
 
 # Source types that have an adapter. The others are skipped, not failed (research R9).
-SUPPORTED_SOURCES: Final = frozenset({"rss", "web"})
+SUPPORTED_SOURCES: Final = frozenset({"rss", "web", "sitemap"})
 
 
 # --- Shared helpers -------------------------------------------------------------------------

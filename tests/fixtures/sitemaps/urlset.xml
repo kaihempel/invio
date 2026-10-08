@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url><loc>https://e.com/news/new-post</loc><lastmod>2026-03-01T10:00:00+01:00</lastmod></url>
+  <url><loc>https://e.com/news/old-post</loc><lastmod>2025-01-01</lastmod></url>
+  <url><loc>https://e.com/about</loc><lastmod>2026-02-28</lastmod></url>
+  <url><loc>https://e.com/news/undated</loc></url>
+  <url><loc>https://e.com/news/new-post?utm_source=x</loc></url>
+  <url><loc>mailto:a@e.com</loc></url>
+  <url><loc>/news/relative</loc><lastmod>2027-01-01</lastmod></url>
+</urlset>
