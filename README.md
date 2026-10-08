@@ -421,6 +421,21 @@ means the provider rejected the request itself. Each retry logs one `llm.retry` 
 Structured requests send the schema in strict mode (`additionalProperties: false` on every
 object).
 
+### OpenAI
+
+Set `INVIO_OPENAI_API_KEY` (see `.env.example`) and name `provider: openai` in a job's `llm`
+section. The shipped, dated model snapshots (no aliases, non-reasoning models only, so
+`temperature` is accepted) are listed in `src/invio/llm/models.d/openai.yaml`. The provider uses
+the official `openai` SDK on the Responses API; every call is one stateless request
+(`store: false`). Retries, typed errors, messages and the `llm.retry` log line are the same as
+for Mistral (shared code in `invio.llm.http_retry`), with one difference: a 429 with the code
+`insufficient_quota` (billing exhausted) raises `LLMRateLimitError` without retrying. Refused,
+empty or cut-off (incomplete) answers raise `LLMUnavailableError`. Structured requests send a
+strict JSON schema (closed objects, every property required). OpenAI rejects output limits
+below 16 tokens, so smaller `max_tokens` values are sent as 16.
+
+### Common provider notes
+
 The HTTP client is created per event loop. Call `await provider.aclose()` before the loop ends
 to close its connections (the CLI does this); the provider stays usable afterwards.
 
@@ -428,6 +443,7 @@ Check a provider setup with one tiny request:
 
 ```
 invio llm test mistral [--model MODEL]
+invio llm test openai [--model MODEL]
 ```
 
 It prints `ok provider=... model=... input_tokens=... output_tokens=... duration_ms=...` and
@@ -436,8 +452,10 @@ configuration problem (unknown provider, missing key, model not in the registry)
 model is the provider's cheapest registered one.
 
 The test suite never touches the network. Optional live tests (plain and structured call)
-use the real API when `INVIO_MISTRAL_API_KEY` is set: `uv run pytest -m live`. Without a `-m`
-expression that names `live`, they are skipped.
+use the real API of each provider whose key is set (`INVIO_MISTRAL_API_KEY`,
+`INVIO_OPENAI_API_KEY`): `uv run pytest -m live`. Without a `-m` expression that names `live`,
+they are skipped. Every provider must pass the shared contract suite
+`tests/test_llm_provider_contract.py`; a new provider adds one harness there.
 
 Models and prices live in `src/invio/llm/models.d/<provider>.yaml` (USD per 1M tokens):
 
