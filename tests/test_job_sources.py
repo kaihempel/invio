@@ -170,11 +170,10 @@ def test_rss_max_age_days_rejects_invalid(job_data: dict[str, Any], value: objec
     assert [location for location, _ in errors] == [("sources", 0, "rss", "max_age_days")]
 
 
-@pytest.mark.parametrize("kind", ["web", "sitemap"])
-def test_max_age_days_is_rss_only(job_data: dict[str, Any], kind: str) -> None:
-    errors = _errors(job_data, {"type": kind, "url": "https://example.com/f", "max_age_days": 7})
+def test_max_age_days_is_not_a_web_option(job_data: dict[str, Any]) -> None:
+    errors = _errors(job_data, {"type": "web", "url": "https://example.com/f", "max_age_days": 7})
 
-    assert [location for location, _ in errors] == [("sources", 0, kind, "max_age_days")]
+    assert [location for location, _ in errors] == [("sources", 0, "web", "max_age_days")]
 
 
 # --- web source options (specs/008-gh-issue-12/contracts/job-file.md) -----------------------

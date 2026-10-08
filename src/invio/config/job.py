@@ -275,6 +275,14 @@ def _check_css_selector(value: str | None) -> str | None:
     return value
 
 
+def _check_regex(value: str) -> None:
+    """Raise ``ValueError`` if ``value`` is not a valid regular expression."""
+    try:
+        re.compile(value)
+    except re.error as exc:
+        raise ValueError(f"invalid regular expression: {exc}") from None
+
+
 class WebSource(_StrictModel):
     """A web page tracked for changes, or an index page whose article links are collected.
 
@@ -306,10 +314,7 @@ class WebSource(_StrictModel):
     def _valid_pattern(cls, value: str | None, info: ValidationInfo) -> str | None:
         if value is None:
             return None
-        try:
-            re.compile(value)
-        except re.error as exc:
-            raise ValueError(f"invalid regular expression: {exc}") from None
+        _check_regex(value)
         # ``mode`` is missing from ``info.data`` when it failed validation: that error is
         # reported on its own.
         if info.data.get("mode", "links") != "links":
@@ -325,12 +330,26 @@ class WebSource(_StrictModel):
 
 
 class SitemapSource(_StrictModel):
-    """A sitemap."""
+    """A sitemap (``urlset``, or a ``sitemapindex`` one level deep) whose URLs are candidates.
+
+    ``url_pattern`` (a regular expression searched in the absolute URL) keeps only matching
+    URLs; entries whose ``lastmod`` is older than ``max_age_days`` (if set) are ignored.
+    """
 
     type: Literal["sitemap"]
     url: HttpUrl
     name: _SourceName = None
     enabled: StrictBool = True
+    url_pattern: _OptionalText = None
+    max_age_days: StrictInt | None = Field(default=None, ge=1)
+
+    @field_validator("url_pattern")
+    @classmethod
+    def _valid_pattern(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        _check_regex(value)
+        return value
 
 
 class YoutubeChannelSource(_StrictModel):
