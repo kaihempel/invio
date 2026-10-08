@@ -106,6 +106,10 @@ class LLMRateLimitError(LLMError):
         self.retry_after = retry_after
 
 
+class LLMQuotaError(LLMRateLimitError):
+    """The account's quota or billing is exhausted; waiting does not help, so it is not retried."""
+
+
 class LLMAuthError(LLMError):
     """The API key is missing or was rejected by the provider."""
 

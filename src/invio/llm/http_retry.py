@@ -118,11 +118,15 @@ def describe(what: str, model: str, status: int | None, detail: str = "") -> str
 def strict_schema(node: object) -> object:
     """Return a copy of a JSON Schema with ``additionalProperties: false`` on every object.
 
-    The strict structured-output modes of the providers expect closed objects.
+    The strict structured-output modes of the providers expect closed objects. Free-form maps
+    (an object with a schema-valued ``additionalProperties``, e.g. ``dict[str, int]``) are left
+    as they are; closing them would silently turn them into always-empty objects.
     """
     if isinstance(node, dict):
         closed = {key: strict_schema(value) for key, value in node.items()}
-        if closed.get("type") == "object":
+        if closed.get("type") == "object" and not isinstance(
+            closed.get("additionalProperties"), dict
+        ):
             closed["additionalProperties"] = False
         return closed
     if isinstance(node, list):

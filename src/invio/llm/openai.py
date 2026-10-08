@@ -18,9 +18,8 @@ are disabled with ``max_retries=0``); this module only maps SDK exceptions to
 errors (5xx) and connection failures are retried, timeouts, authentication failures, rejected
 requests, requests that cannot be sent and unusable answers (empty, refused, cut off) are not.
 A 429 whose code is ``insufficient_quota`` means exhausted billing, not a transient limit: it
-is raised as a non-retryable :class:`~invio.llm.base.LLMRateLimitError` without a wait hint.
-Known limitation: the graph-level :func:`invio.llm.retry.is_transient_llm` still treats any
-``LLMRateLimitError`` as transient, so it retries such an error at that outer layer.
+is raised as a non-retryable :class:`~invio.llm.base.LLMQuotaError` (a ``LLMRateLimitError``
+subclass without a wait hint), which the graph-level ``is_transient_llm`` does not retry either.
 
 Errors raised here carry ``provider="openai"`` and the model. Their messages are built from the
 status and the sanitized ``error.message`` of the response body only; ``str(exc)`` of an SDK
@@ -57,6 +56,7 @@ from invio.llm.base import (
     LLMAuthError,
     LLMInvalidRequestError,
     LLMProvider,
+    LLMQuotaError,
     LLMRateLimitError,
     LLMUnavailableError,
     Usage,
@@ -140,7 +140,7 @@ def _classify_status(
     if status == _RATE_LIMIT_STATUS:
         if _is_insufficient_quota(exc):
             message = describe("OpenAI quota exhausted; check plan and billing", model, status)
-            quota = LLMRateLimitError(message, provider=PROVIDER, model=model)
+            quota = LLMQuotaError(message, provider=PROVIDER, model=model)
             return Failure("quota", False, quota, status)
         wait = retry_after(exc.response.headers, now)
         message = describe("OpenAI rate limit exceeded", model, status, detail)
@@ -232,6 +232,10 @@ def _answer(response: Response, model: str) -> tuple[str, Usage]:
         reason = getattr(details, "reason", None)
         suffix = f": {reason}" if isinstance(reason, str) else ""
         raise _unavailable(describe(f"OpenAI answer is incomplete{suffix}", model, None), model)
+    if status == "failed":
+        code = getattr(getattr(response, "error", None), "code", None)
+        suffix = f": {sanitize_detail(code)}" if isinstance(code, str) and code else ""
+        raise _unavailable(describe(f"OpenAI response failed{suffix}", model, None), model)
     if status != "completed":
         message = describe(f"OpenAI response did not complete (status {status})", model, None)
         raise _unavailable(message, model)

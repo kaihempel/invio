@@ -549,7 +549,7 @@ def test_recorded_openai_without_key_makes_no_request(
         (("error_403",), "LLMAuthError", 1, []),
         (("error_429",) * 4, "LLMRateLimitError", 4, [1.0, 2.0, 4.0]),
         (("error_429_retry_after_long",), "LLMRateLimitError", 1, []),
-        (("error_429_insufficient_quota",), "LLMRateLimitError", 1, []),
+        (("error_429_insufficient_quota",), "LLMQuotaError", 1, []),
         (("error_503",) * 4, "LLMUnavailableError", 4, [1.0, 2.0, 4.0]),
         (("error_404_model",), "LLMInvalidRequestError", 1, []),
         (("malformed_200",), "LLMUnavailableError", 1, []),

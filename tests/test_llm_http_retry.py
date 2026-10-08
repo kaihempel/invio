@@ -1,15 +1,17 @@
 """Unit tests of the provider-neutral helpers in ``invio.llm.http_retry``."""
 
+import logging
 from datetime import UTC, datetime
 
 import pytest
 
-from invio.llm.base import LLMUnavailableError
+from invio.llm.base import LLMError, LLMUnavailableError
 from invio.llm.http_retry import (
     Failure,
     RetryPolicy,
     describe,
     retry_after,
+    run_with_retries,
     sanitize_detail,
     strict_schema,
     wait_before_retry,
@@ -69,3 +71,85 @@ def test_wait_before_retry_honours_retry_after_up_to_the_cap() -> None:
     policy = RetryPolicy(max_retry_after=10)
     assert wait_before_retry(_failure(after=10), 1, policy, lambda a, b: 0.0) == 10
     assert wait_before_retry(_failure(after=10.5), 1, policy, lambda a, b: 0.0) is None
+
+
+def test_strict_schema_leaves_free_form_maps_open() -> None:
+    schema = {"type": "object", "additionalProperties": {"type": "integer"}}
+
+    assert strict_schema(schema) == schema
+
+
+class _Boom(Exception):
+    pass
+
+
+def _classify(exc: Exception, model: str, now: object) -> Failure | None:
+    return _failure() if isinstance(exc, _Boom) else None
+
+
+async def _run(attempt: object, slept: list[float]) -> object:
+    async def sleep(seconds: float) -> None:
+        slept.append(seconds)
+
+    return await run_with_retries(
+        attempt,  # type: ignore[arg-type]
+        classify=_classify,  # type: ignore[arg-type]
+        policy=RetryPolicy(max_retries=2, jitter=0.0),
+        provider="p",
+        model="m",
+        sleep=sleep,
+        uniform=lambda low, high: 0.0,
+        now=lambda: NOW,
+    )
+
+
+async def test_run_with_retries_succeeds_after_transient_failures(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    calls = 0
+
+    async def attempt() -> str:
+        nonlocal calls
+        calls += 1
+        if calls < 3:
+            raise _Boom
+        return "ok"
+
+    slept: list[float] = []
+    with caplog.at_level(logging.WARNING):
+        assert await _run(attempt, slept) == "ok"
+
+    assert len(slept) == 2
+    assert [r.message for r in caplog.records].count("llm.retry") == 2
+
+
+async def test_run_with_retries_gives_up_without_exception_context() -> None:
+    async def attempt() -> str:
+        raise _Boom
+
+    with pytest.raises(LLMUnavailableError) as info:
+        await _run(attempt, [])
+
+    assert info.value.__context__ is None
+
+
+async def test_run_with_retries_does_not_retry_typed_errors() -> None:
+    calls = 0
+
+    async def attempt() -> str:
+        nonlocal calls
+        calls += 1
+        raise LLMError("typed")
+
+    with pytest.raises(LLMError):
+        await _run(attempt, [])
+
+    assert calls == 1
+
+
+async def test_run_with_retries_propagates_unrecognised_exceptions() -> None:
+    async def attempt() -> str:
+        raise KeyError("x")
+
+    with pytest.raises(KeyError):
+        await _run(attempt, [])

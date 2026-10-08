@@ -24,6 +24,7 @@ from invio.llm.base import (
     LLMError,
     LLMInvalidOutputError,
     LLMInvalidRequestError,
+    LLMQuotaError,
     LLMRateLimitError,
     LLMUnavailableError,
     Usage,
@@ -204,6 +205,18 @@ async def test_failed_status_is_unavailable() -> None:
 
     with pytest.raises(LLMUnavailableError, match="failed"):
         await _complete(provider)
+
+
+async def test_failed_status_reports_the_error_code() -> None:
+    body = load_fixture("response_ok").json()
+    body["status"] = "failed"
+    body["error"] = {"code": "server_error", "message": "boom"}
+    provider, _, _ = make_provider(httpx.Response(200, json=body))
+
+    with pytest.raises(LLMUnavailableError, match="failed: server_error") as info:
+        await _complete(provider)
+
+    assert "boom" not in str(info.value)
 
 
 @pytest.mark.parametrize(
@@ -1237,10 +1250,9 @@ def test_retry_after_is_read_from_lowercase_sdk_headers() -> None:
     assert failure.retry_after == 4.0
 
 
-def test_graph_layer_still_retries_quota_errors() -> None:
-    # Known limitation (see the module docstring): the outer, graph-level retry treats every
-    # LLMRateLimitError as transient, including insufficient_quota.
+def test_graph_layer_does_not_retry_quota_errors() -> None:
     failure = _classify(_status_error(429, {"type": "insufficient_quota"}), MODEL, lambda: NOW)
 
     assert failure is not None
-    assert is_transient_llm(failure.error)
+    assert isinstance(failure.error, LLMQuotaError)
+    assert not is_transient_llm(failure.error)
