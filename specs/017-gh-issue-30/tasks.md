@@ -90,8 +90,8 @@ description: "Task list for the OpenAI provider (issue #30)"
 
 *(US4 is deliberately ordered before US3: both are P2, the contract suite needs the provider's test harness, and US3 only adds tests for an already-generic command.)*
 
-- [ ] T017 [US4] Create `tests/test_llm_provider_contract.py` parametrized over `FakeProvider` (scripted), `MistralProvider` (recorded HTTP via `tests/mistral_helpers.py`) and `OpenAIProvider` (recorded HTTP via `tests/openai_helpers.py`); cases: text and usage; structured value and usage; one repair then `LLMInvalidOutputError` with summed usage; auth, rate-limit, unavailable and invalid-request errors carry `provider` and `model` and are `LLMError` subclasses
-- [ ] T018 [US4] In `tests/test_llm_factory.py` add a test that adding only `openai.py` and `models.d/openai.yaml` makes `get_provider("openai", settings)` resolvable without editing `factory.py`, and that a missing key raises `LLMAuthError` naming `INVIO_OPENAI_API_KEY`
+- [x] T017 [US4] Create `tests/test_llm_provider_contract.py` parametrized over `FakeProvider` (scripted), `MistralProvider` (recorded HTTP via `tests/mistral_helpers.py`) and `OpenAIProvider` (recorded HTTP via `tests/openai_helpers.py`); cases: text and usage; structured value and usage; one repair then `LLMInvalidOutputError` with summed usage; auth, rate-limit, unavailable and invalid-request errors carry `provider` and `model` and are `LLMError` subclasses
+- [x] T018 [US4] In `tests/test_llm_factory.py` add a test that adding only `openai.py` and `models.d/openai.yaml` makes `get_provider("openai", settings)` resolvable without editing `factory.py`, and that a missing key raises `LLMAuthError` naming `INVIO_OPENAI_API_KEY`
 
 ---
 
@@ -101,16 +101,17 @@ description: "Task list for the OpenAI provider (issue #30)"
 
 **Independent Test**: run the command against recorded success and failure responses.
 
-- [ ] T019 [US3] Add `openai` cases to `tests/test_cli_llm.py` following the existing Mistral cases (patched provider with recorded responses): success prints `ok provider=openai model=<cheapest> input_tokens=<n> output_tokens=<n> duration_ms=<ms>` on stdout and exits 0; `--model` must be registered for `openai`; missing key exits 2 naming `INVIO_OPENAI_API_KEY` with no request made; invalid key exits 1 with `Error: LLMAuthError: ...`; unavailable service exits 1; the command's existing timeout cap bounds the duration (SC-004)
-- [ ] T020 [P] [US3] Create `tests/test_llm_openai_live.py` modelled on `tests/test_llm_mistral_live.py`: skipped unless `INVIO_OPENAI_API_KEY` is set; one `complete` and one `complete_structured` call against the cheapest registered model
+- [x] T019 [US3] Add `openai` cases to `tests/test_cli_llm.py` following the existing Mistral cases (patched provider with recorded responses): success prints `ok provider=openai model=<cheapest> input_tokens=<n> output_tokens=<n> duration_ms=<ms>` on stdout and exits 0; `--model` must be registered for `openai`; missing key exits 2 naming `INVIO_OPENAI_API_KEY` with no request made; invalid key exits 1 with `Error: LLMAuthError: ...`; unavailable service exits 1; the command's existing timeout cap bounds the duration (SC-004)
+- [x] T020 [P] [US3] Create `tests/test_llm_openai_live.py` modelled on `tests/test_llm_mistral_live.py`: skipped unless `INVIO_OPENAI_API_KEY` is set; one `complete` and one `complete_structured` call against the cheapest registered model
 
 ---
 
 ## Phase 7: Polish & cross-cutting
 
-- [ ] T021 [P] Update docs (include a note in `src/invio/llm/models.d/README.md` only if provider-specific rules need mentioning): provider list and `INVIO_OPENAI_API_KEY` in `README.md` and `docs/deployment.md`; short note on the OpenAI provider and `llm test openai` (constitution: user-facing changes update docs in the same PR)
-- [ ] T022 Run the full gates from `quickstart.md`: `uv run ruff check .`, `uv run ruff format --check .`, `uv run mypy`, `uv run pytest`; fix findings (narrow, justified type-ignores only)
-- [ ] T023 Walk through `specs/017-gh-issue-30/quickstart.md`; if a real key is available run `uv run invio llm test openai` and the live test, and record the result in the PR description together with the justification for the new `openai` dependency
+- [x] T021 [P] Update docs (include a note in `src/invio/llm/models.d/README.md` only if provider-specific rules need mentioning): provider list and `INVIO_OPENAI_API_KEY` in `README.md` and `docs/deployment.md`; short note on the OpenAI provider and `llm test openai` (constitution: user-facing changes update docs in the same PR)
+- [x] T022 Run the full gates from `quickstart.md`: `uv run ruff check .`, `uv run ruff format --check .`, `uv run mypy`, `uv run pytest`; fix findings (narrow, justified type-ignores only)
+- [x] T023 Walk through `specs/017-gh-issue-30/quickstart.md`; if a real key is available run `uv run invio llm test openai` and the live test, and record the result in the PR description together with the justification for the new `openai` dependency
+  - Done offline on 2026-10-08 (no real key available): offline test set green, live tests skip naming `INVIO_OPENAI_API_KEY`, `invio llm test openai` exits 2 without a key and for an unregistered `--model`. The live run of `invio llm test openai` and `tests/test_llm_openai_live.py` is still open.
 
 ---
 
