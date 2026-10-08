@@ -237,10 +237,10 @@ def test_error_lines_with_title_url_source_and_omitted() -> None:
     assert lines == [
         "Errors (4)",
         "  score_relevance  LLMInvalidOutputError: bad answer",
-        f'{indent}"A title" — https://example.org/a',
+        f'{indent}#1 "A title" — https://example.org/a',
         "  extract_text     KeyError",
         "  summarize_item   E: lost",
-        f'{indent}"Only title"',
+        f'{indent}#3 "Only title"',
         "  fetch_sources    FetchError: source failed  (source #1, ?)",
         "  … and 2 more not stored",
     ]

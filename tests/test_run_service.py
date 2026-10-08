@@ -10,10 +10,10 @@ from pydantic import SecretStr
 from sqlalchemy import Engine
 
 from invio.config.settings import MissingSettingError, Settings
-from invio.db.models import Base, Job
+from invio.db.models import Base, Digest, Job, Notification
 from invio.db.repositories import JobRepository
 from invio.db.session import create_db_engine, session_factory, session_scope
-from invio.domain import RunStatus
+from invio.domain import NotificationStatus, RunStatus
 from invio.services.jobs import JobNotFoundError
 from invio.services.runs import RunNotFoundError, RunService
 from tests.pipeline_helpers import add_run, make_job_config
@@ -205,3 +205,38 @@ def test_from_settings_reads_the_configured_database(tmp_path: Path) -> None:
 def test_from_settings_without_a_database_url_raises() -> None:
     with pytest.raises(MissingSettingError):
         RunService.from_settings(Settings(database_url=None))
+
+
+def test_the_schedule_zone_is_used_even_if_the_rest_of_the_config_is_invalid(
+    db_engine: Engine,
+) -> None:
+    job = _add_job(db_engine, "half", {"schedule": {"timezone": "Asia/Tokyo"}, "broken": True})
+    run_id = _add_run(db_engine, job)
+
+    assert _service(db_engine).get(run_id).timezone == "Asia/Tokyo"
+    assert _service(db_engine).list()[0].timezone == "Asia/Tokyo"
+
+
+def test_notifications_are_counted_from_the_rows(db_engine: Engine) -> None:
+    job = _add_job(db_engine, "a")
+    quiet = _add_run(db_engine, job)
+    mailed = _add_run(db_engine, job, minutes=1, status=RunStatus.PARTIAL)
+    factory = session_factory(db_engine)
+    with session_scope(factory) as session:
+        digest = Digest(job_id=job, run_id=mailed, title="t", body="b", item_ids=[])
+        session.add(digest)
+        session.flush()
+        for status in (NotificationStatus.SENT, NotificationStatus.FAILED):
+            session.add(
+                Notification(
+                    job_id=job,
+                    run_id=mailed,
+                    digest_id=digest.id,
+                    channel="email",
+                    recipient="a@example.org",
+                    status=status,
+                )
+            )
+
+    assert _service(db_engine).get(quiet).notifications is None
+    assert _service(db_engine).get(mailed).notifications == (1, 1)

@@ -10,6 +10,7 @@ by ``invio.graph.build``) so ``invio.graph.stages`` can use it without importing
 import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime
+from typing import Final, Self
 
 from sqlalchemy.orm import Session
 
@@ -18,21 +19,36 @@ from invio.domain import ItemType
 from invio.graph.budget import BudgetTracker
 from invio.graph.nodes.synthesize import SynthesisResult
 from invio.graph.ports import DeliveryReport, ProgressCounts, ProviderBinding, RunObserver
-from invio.graph.state import RunStage
+from invio.graph.state import RunError, RunStage
+from invio.sources.urls import redact_url, without_query
+from invio.textsafe import strip_control
 
-__all__ = ["ItemRef", "RunScope"]
+__all__ = ["MAX_TITLE_CHARS", "MAX_URL_CHARS", "ItemRef", "RunScope"]
+
+# Caps of a stored item reference: up to 100 of them are kept in ``runs.stats["errors"]``.
+MAX_TITLE_CHARS: Final = 300
+MAX_URL_CHARS: Final = 500
 
 
 @dataclass(frozen=True, slots=True)
 class ItemRef:
     """Title and URL of a taken item, captured at deduplication (a dry run rolls the rows back).
 
-    Both are untrusted: the title has control characters stripped and is cut, the URL has no
-    credentials, query string or fragment (they can hold signed tokens).
+    Both are untrusted: build it with :meth:`of`, which strips control characters from both,
+    removes credentials, query string and fragment from the URL (they can hold signed tokens)
+    and cuts both. Consumers need not sanitize again.
     """
 
     title: str
     url: str
+
+    @classmethod
+    def of(cls, title: str, url: str) -> Self:
+        """The terminal-safe, bounded reference of an item with this raw title and URL."""
+        return cls(
+            title=strip_control(title, limit=MAX_TITLE_CHARS),
+            url=strip_control(redact_url(without_query(url)), limit=MAX_URL_CHARS),
+        )
 
 
 @dataclass(slots=True)
@@ -52,6 +68,7 @@ class RunScope:
     synthesis: SynthesisResult | None = None
     delivery: DeliveryReport | None = None
     failure: BaseException | None = None  # the original exception of the first fatal error
+    fatal: RunError | None = None  # the recorded first fatal error; set together with ``failure``
     finalized: bool = False
     next_run_at: datetime | None = None  # written by ``release_lock`` (only when it released)
     retry_scheduled: bool = False  # ``next_run_at`` is a failure retry, not the regular slot

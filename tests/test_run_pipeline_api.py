@@ -26,6 +26,7 @@ from tests.pipeline_helpers import (
     make_candidates,
     make_job_config,
     relevance_reply,
+    stored_runs,
 )
 
 pytestmark = pytest.mark.usefixtures("clean_jobs")
@@ -34,10 +35,7 @@ FEED = "https://example.com/feed.xml"
 
 
 def _runs(engine: Engine) -> list[Run]:
-    with session_scope(session_factory(engine)) as session:
-        rows = list(session.scalars(select(Run).order_by(Run.id)))
-        session.expunge_all()
-        return rows
+    return stored_runs(session_factory(engine))
 
 
 def _stored_config(engine: Engine) -> dict[str, Any]:

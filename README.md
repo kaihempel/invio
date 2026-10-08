@@ -597,7 +597,8 @@ only), the statistics table and the `Tokens: in .. · out .. · total .. · cost
 `invio run list [--job NAME] [--limit N]` lists runs newest first (id, job, start, duration,
 status, found/new/relevant; dry runs are marked `(dry)`). `invio run show <id>` prints one run:
 the statistics, the token usage and **every stored error** with its stage, sanitized message and
-the item's title and URL (or the source position for a source error). The list is written by
+the item's id, title and URL (or the source position for a source error); a failed delivery
+appears as a `notify` entry with its counts. The list is written by
 `finalize` into `runs.stats["errors"]`, so it survives later retries and dry runs. A run from
 before this feature has no such list: `show` says "item errors are not available for this run".
 

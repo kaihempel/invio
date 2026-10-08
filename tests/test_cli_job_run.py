@@ -22,6 +22,7 @@ from invio.config.settings import get_settings
 from invio.db.models import Item, Job
 from invio.db.session import create_db_engine, session_factory, session_scope
 from invio.domain import ItemStatus, RunStatus
+from invio.graph.ports import DeliveryReport
 from invio.graph.state import RunError
 from invio.llm.base import ModelRegistryError
 from invio.llm.fake import FakeReply
@@ -119,6 +120,19 @@ def test_a_failed_run_exits_1(run_cli: RunCli) -> None:
     (run,) = run_cli.runs()
     assert result.exit_code == 1
     assert f"run {run.id} failed: all sources failed" in result.stderr
+    assert "No digest: the run failed." in result.stdout
+    assert "nothing relevant" not in result.stdout
+
+
+def test_a_failed_delivery_exits_2_and_counts_one_error(run_cli: RunCli) -> None:
+    run_cli.env.ports.notifier.report = DeliveryReport(sent=1, failed=1)
+
+    result = run_cli.invoke(["job", "run", "research"])
+
+    (run,) = run_cli.runs()
+    assert result.exit_code == 2
+    assert f"run {run.id} finished partial: 1 error(s)" in result.stderr
+    assert "Notifications failed" in result.stdout
 
 
 def _refusal(result: Any, run_cli: RunCli, text: str) -> None:
@@ -197,7 +211,7 @@ def test_ctrl_c_exits_1_records_the_run_failed_and_releases_the_lock(run_cli: Ru
     result = run_cli.invoke(["job", "run", "research"])
 
     assert result.exit_code == 1
-    assert "interrupted; a started run is recorded as failed" in result.stderr
+    assert "interrupted; if a run had started, it is recorded as failed" in result.stderr
     assert "Traceback" not in result.stderr + result.stdout
     (run,) = run_cli.runs()
     assert run.status == RunStatus.FAILED
@@ -214,7 +228,7 @@ def test_a_hostile_digest_is_printed_without_escapes_but_keeps_its_layout(
     run_cli: RunCli,
 ) -> None:
     body = "Intro \x1b[31mred\x1b[0m\x1b]0;x\x07 text\n\n## Heading\r\n\n\tindented\tline\x00\nend"
-    run_cli.env.provider._routes["synthesize"] = FakeReply(body, DEFAULT_USAGE)
+    run_cli.env.provider.route("synthesize", FakeReply(body, DEFAULT_USAGE))
 
     result = run_cli.invoke(["job", "run", "research", "--dry-run"])
 
@@ -292,7 +306,7 @@ def _mixed(title: str) -> Any:
 
 
 def test_verbose_prints_one_stderr_line_per_item(run_cli: RunCli) -> None:
-    run_cli.env.provider._routes["relevance"] = _mixed
+    run_cli.env.provider.route("relevance", _mixed)
 
     result = run_cli.invoke(["job", "run", "research", "--dry-run", "-v"])
 
@@ -450,7 +464,7 @@ def test_hostile_titles_are_printed_as_plain_single_line_text(run_cli: RunCli) -
     def route(title: str) -> Any:
         return RuntimeError("secret document text") if "Boom" in title else relevance_reply()
 
-    run_cli.env.provider._routes["relevance"] = route
+    run_cli.env.provider.route("relevance", route)
 
     result = run_cli.invoke(["job", "run", "research", "--dry-run", "-v"])
     (run,) = run_cli.runs()
