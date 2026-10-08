@@ -738,7 +738,7 @@ async def finalize(state: RunState, deps: RunDeps, scope: RunScope) -> RunState:
         status = record_failure(deps, scope, error, lower_succeeded=fatal.stage == "notify")
     if status is None:
         raise RuntimeError("finalize reached before persist set a status")
-    record_errors(deps, scope, state.get("errors", []), state.get("items", []), scope.failure)
+    record_errors(deps, scope, state.get("errors", []), state.get("items", []))
     next_run_at = release_lock(deps, scope, status=status)
     logger.info(
         "run.finalized",
