@@ -70,6 +70,8 @@ class RunScope:
     failure: BaseException | None = None  # the original exception of the first fatal error
     fatal: RunError | None = None  # the recorded first fatal error; set together with ``failure``
     finalized: bool = False
+    next_run_at: datetime | None = None  # written by ``release_lock`` (only when it released)
+    retry_scheduled: bool = False  # ``next_run_at`` is a failure retry, not the regular slot
     stage: RunStage = "load_job"  # the run-level stage that runs now (items: ``extract_text``)
     errors_recorded: bool = False  # ``runs.stats["errors"]`` is written; the safety net keeps it
     item_types: dict[int, ItemType] = field(default_factory=dict)  # kind of every taken item

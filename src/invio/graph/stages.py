@@ -94,6 +94,11 @@ __all__ = [
 
 logger = logging.getLogger("invio.graph")
 
+# Failed runs read when counting the failure streak. It mirrors
+# ``invio.scheduling.backoff.RETRY_STREAK_CAP`` (graph cannot import scheduling); ``retry_delay``
+# clamps a larger streak anyway.
+_STREAK_READ_CAP: Final = 6
+
 # Source types that have an adapter. The others are skipped, not failed (research R9).
 SUPPORTED_SOURCES: Final = frozenset({"rss", "web"})
 
@@ -586,25 +591,54 @@ def _stored_schedule(deps: RunDeps, scope: RunScope) -> ScheduleConfig | None:
         return None
 
 
-def release_lock(deps: RunDeps, scope: RunScope) -> datetime | None:
+def _failure_streak(deps: RunDeps, scope: RunScope) -> int:
+    """Consecutive failed runs including this one; 1 when the history is unreadable."""
+    try:
+        with session_scope(deps.session_factory) as session:
+            before = RunRepository(session).failure_streak(
+                scope.job_id, exclude_run_id=scope.run_id, cap=_STREAK_READ_CAP
+            )
+    except Exception as err:  # the lock must still be released: assume a first failure
+        logger.warning(
+            "run.streak_unreadable", extra={"error": type(err).__name__, "job_id": scope.job_id}
+        )
+        return 1
+    return before + 1
+
+
+def release_lock(deps: RunDeps, scope: RunScope, *, status: RunStatus) -> datetime | None:
     """Release this run's job lock and, outside a dry run, set the next run time.
 
-    One atomic UPDATE that only succeeds while the lock still holds the run's token. A job whose
-    schedule cannot be read keeps its ``next_run_at``. Returns the new ``next_run_at`` (``None``
-    when it was kept); ``run.lock_lost`` is logged when the lock belonged to someone else.
+    One atomic UPDATE that only succeeds while the lock still holds the run's token. The next run
+    is the regular slot after the finish time; a ``failed`` run is retried earlier, after
+    ``deps.retry_delay(streak)``, when that is before the regular slot (never on a tie). When
+    there is no regular slot (the schedule cannot be read or ``next_run`` raises), a ``failed``
+    run gets the retry time alone, so it is not run again on every invocation; any other run keeps
+    its ``next_run_at``. Dry runs never change the schedule.
+    Returns the new ``next_run_at`` (``None`` when it was kept); ``run.lock_lost`` is logged when
+    the lock belonged to someone else.
     """
     schedule = None
     if not scope.dry_run:
         config = scope.config
         schedule = config.schedule if config is not None else _stored_schedule(deps, scope)
-    next_run_at = None
+    finished = deps.clock()
+    regular = None
     if schedule is not None:
         try:
-            next_run_at = deps.next_run(schedule, deps.clock())
-        except Exception as err:  # the lock must still be released; next_run_at stays as it is
+            regular = deps.next_run(schedule, finished)
+        except Exception as err:  # the lock must still be released; no regular slot
             logger.warning(
                 "run.next_run_failed", extra={"error": type(err).__name__, "job_id": scope.job_id}
             )
+    next_run_at = regular
+    retry_scheduled = False
+    streak = 0
+    if status is RunStatus.FAILED and not scope.dry_run:
+        streak = _failure_streak(deps, scope)
+        retry = finished + deps.retry_delay(streak)
+        if regular is None or retry < regular:
+            next_run_at, retry_scheduled = retry, True
     with session_scope(deps.session_factory) as session:
         jobs = JobRepository(session)
         if next_run_at is not None:
@@ -613,6 +647,18 @@ def release_lock(deps: RunDeps, scope: RunScope) -> datetime | None:
             released = jobs.release(scope.job_id, until=scope.token)
     if not released:
         logger.warning("run.lock_lost", extra={"job_id": scope.job_id, "db_run_id": scope.run_id})
+    else:
+        scope.next_run_at = next_run_at
+        scope.retry_scheduled = retry_scheduled
+        if retry_scheduled:
+            logger.info(
+                "run.retry_scheduled",
+                extra={
+                    "job_id": scope.job_id,
+                    "streak": streak,
+                    "next_run_at": next_run_at.isoformat() if next_run_at else None,
+                },
+            )
     return next_run_at
 
 
@@ -692,8 +738,8 @@ async def finalize(state: RunState, deps: RunDeps, scope: RunScope) -> RunState:
         status = record_failure(deps, scope, error, lower_succeeded=fatal.stage == "notify")
     if status is None:
         raise RuntimeError("finalize reached before persist set a status")
-    record_errors(deps, scope, state.get("errors", []), state.get("items", []))
-    next_run_at = release_lock(deps, scope)
+    record_errors(deps, scope, state.get("errors", []), state.get("items", []), scope.failure)
+    next_run_at = release_lock(deps, scope, status=status)
     logger.info(
         "run.finalized",
         extra={

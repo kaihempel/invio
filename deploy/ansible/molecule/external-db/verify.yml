@@ -36,9 +36,11 @@
       no_log: true
 
     - name: Check that the application connects to the external server over TCP
+      vars:
+        invio_url_pattern: '^INVIO_DATABASE_URL="mysql\+pymysql://[^"]*@dbserver:3306/invio\?charset=utf8mb4"$'
       ansible.builtin.assert:
         that:
-          - (invio_env_file.content | b64decode) is search('^INVIO_DATABASE_URL="mysql\+pymysql://[^"]*@dbserver:3306/invio\?charset=utf8mb4"$', multiline=true)
+          - (invio_env_file.content | b64decode) is search(invio_url_pattern, multiline=true)
           - "'unix_socket' not in (invio_env_file.content | b64decode)"
         quiet: true
       no_log: true

@@ -375,6 +375,8 @@ def _fake_result(**overrides: Any) -> RunResult:
         "error": None,
         "started_at": datetime(2026, 10, 7, tzinfo=UTC),
         "finished_at": None,
+        "next_run_at": None,
+        "retry_scheduled": False,
     }
     values.update(overrides)
     return RunResult(**values)
@@ -672,3 +674,13 @@ def test_tables_are_not_wrapped_on_a_narrow_pipe(run_cli: RunCli) -> None:
     assert result.exit_code == 0, result.stderr
     assert re.search(r"^\s*After keyword filter\s+3\s*$", result.stdout, re.MULTILINE)
     assert re.search(r"^\s*Status\s+succeeded \(dry run\)\s*$", result.stdout, re.MULTILINE)
+
+
+def test_a_failed_real_run_exits_1_and_schedules_the_retry(run_cli: RunCli) -> None:
+    run_cli.fail_every_source()
+
+    result = run_cli.invoke(["job", "run", "research"])
+
+    assert result.exit_code == 1
+    assert run_cli.job_row().next_run_at == run_cli.clock() + timedelta(hours=1)
+    assert run_cli.job_row().locked_until is None

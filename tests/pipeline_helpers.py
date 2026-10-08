@@ -34,6 +34,7 @@ from invio.llm.base import LLMError, LLMProvider, Usage, structured_with_repair
 from invio.llm.fake import FakeReply, FakeScriptExhaustedError, FakeStep
 from invio.llm.registry import ModelRegistry, load_registry
 from invio.retry import RetrySettings, Sleep
+from invio.scheduling import backoff
 from tests.async_helpers import RecordingSleep
 from tests.db_helpers import make_candidate
 from tests.llm_helpers import FIXTURE_REGISTRY_DIR
@@ -481,6 +482,7 @@ def make_deps(
     next_run: Callable[[ScheduleConfig, datetime], datetime] = plus_one_hour,
     provider_for: Callable[[LLMConfig], ProviderBinding] | None = None,
     lock_ttl: timedelta = timedelta(hours=2),
+    retry_delay: Callable[[int], timedelta] = backoff.retry_delay,
 ) -> RunDeps:
     """``RunDeps`` over the fake ports and ``provider`` (fixture registry, no waiting)."""
     registry = fixture_registry()
@@ -502,6 +504,7 @@ def make_deps(
         notify=ports.notifier,
         next_run=next_run,
         clock=clock,
+        retry_delay=retry_delay,
         concurrency=concurrency,
         retry=retry or RetrySettings(jitter=False),
         lock_ttl=lock_ttl,

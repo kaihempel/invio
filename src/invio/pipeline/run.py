@@ -39,7 +39,14 @@ from invio.log import run_context
 from invio.pipeline.deps import default_deps
 from invio.services.jobs import JobNotFoundError
 
-__all__ = ["JobBusyError", "JobDisabledError", "RunResult", "run_job", "run_job_by_name"]
+__all__ = [
+    "JobBusyError",
+    "JobDisabledError",
+    "JobNotDueError",
+    "RunResult",
+    "run_job",
+    "run_job_by_name",
+]
 
 logger = logging.getLogger("invio.pipeline")
 
@@ -51,6 +58,15 @@ class JobBusyError(LookupError):
         super().__init__(f"job {job_id} is locked by another run until {locked_until}")
         self.job_id = job_id
         self.locked_until = locked_until
+
+
+class JobNotDueError(LookupError):
+    """The job is no longer due: another run finished it between selection and claim."""
+
+    def __init__(self, job_id: int, next_run_at: datetime | None) -> None:
+        super().__init__(f"job {job_id} is no longer due (next run {next_run_at})")
+        self.job_id = job_id
+        self.next_run_at = next_run_at
 
 
 class JobDisabledError(ValueError):
@@ -82,6 +98,8 @@ class RunResult:
     error: str | None  # runs.error: the sanitized reason of a failed run
     started_at: datetime
     finished_at: datetime | None
+    next_run_at: datetime | None  # the value written by the release; ``None`` when it was kept
+    retry_scheduled: bool  # ``next_run_at`` is a failure retry, not the regular slot
 
 
 async def run_job(
@@ -92,6 +110,7 @@ async def run_job(
     concurrency: int | None = None,
     max_items: int | None = None,
     observer: RunObserver | None = None,
+    due_by: datetime | None = None,
 ) -> RunResult:
     """Run job ``job_id`` once and return the result.
 
@@ -102,6 +121,9 @@ async def run_job(
     ``max_items`` (>= 1) lowers this run's item cap to ``min(max_items, limits.max_items_per_run)``
     in memory; the stored config is never written. ``observer`` receives progress events; its
     failures never fail the run.
+
+    ``due_by`` (used by ``run-due``) makes the claim require ``next_run_at <= due_by``; a job
+    that is not due any more then raises :class:`JobNotDueError` instead of running twice.
     """
     if concurrency is not None and concurrency < 1:
         raise ValueError(f"concurrency must be >= 1, got {concurrency}")
@@ -111,7 +133,12 @@ async def run_job(
         if concurrency is not None:
             resolved = dataclasses.replace(resolved, concurrency=concurrency)
         return await _run(
-            job_id, dry_run=dry_run, deps=resolved, max_items=max_items, observer=observer
+            job_id,
+            dry_run=dry_run,
+            deps=resolved,
+            max_items=max_items,
+            observer=observer,
+            due_by=due_by,
         )
 
 
@@ -162,6 +189,7 @@ async def _run(
     deps: RunDeps,
     max_items: int | None,
     observer: RunObserver | None,
+    due_by: datetime | None,
 ) -> RunResult:
     now = deps.clock()
     token = now + deps.lock_ttl
@@ -173,25 +201,34 @@ async def _run(
         if not job.enabled:
             raise JobDisabledError(job_id)
         name = job.name
-        if not jobs.claim(job_id, now=now, until=token):
-            session.refresh(job)
-            raise JobBusyError(job_id, job.locked_until)
+        claimed = jobs.claim(job_id, now=now, until=token, due_by=due_by)
+    if not claimed:
+        # A fresh transaction: on MariaDB (REPEATABLE READ) the one above still shows the old row.
+        with session_scope(deps.session_factory) as session:
+            current = JobRepository(session).get(job_id)
+            if current is None:
+                raise JobNotFoundError(str(job_id))
+            locked_until, next_run_at = current.locked_until, current.next_run_at
+        if due_by is not None and not (locked_until is not None and locked_until > now):
+            raise JobNotDueError(job_id, next_run_at)
+        raise JobBusyError(job_id, locked_until)
+    # From here on the lock is ours: whatever fails before the graph owns the run releases it.
     try:
         with session_scope(deps.session_factory) as session:
             run_id = RunRepository(session).start(job_id, started_at=now).id
+        scope = new_scope(
+            deps,
+            job_id=job_id,
+            run_id=run_id,
+            token=token,
+            dry_run=dry_run,
+            max_items=max_items,
+            observer=observer,
+        )
+        scope.job_name = name
     except BaseException:
         _release_quietly(deps, job_id, token)
         raise
-    scope = new_scope(
-        deps,
-        job_id=job_id,
-        run_id=run_id,
-        token=token,
-        dry_run=dry_run,
-        max_items=max_items,
-        observer=observer,
-    )
-    scope.job_name = name
     with run_context(job=name, run_id=str(run_id)):
         logger.info("run.started", extra={"dry_run": dry_run, "job_id": job_id})
         try:
@@ -224,6 +261,8 @@ async def _run(
         error=error,
         started_at=started_at,
         finished_at=finished_at,
+        next_run_at=scope.next_run_at,
+        retry_scheduled=scope.retry_scheduled,
     )
 
 
@@ -235,8 +274,9 @@ def _safety_net(deps: RunDeps, scope: RunScope, error: BaseException) -> None:
     run's error list, the fatal error is stored as its only entry.
     """
     rollback_work_session(scope)  # first: a failing recovery must not leave a transaction open
+    status = RunStatus.FAILED  # when recording fails the run stays ``running``: retry as failed
     with contextlib.suppress(Exception):  # logged by record_failed_run (error class only)
-        record_failure(deps, scope, error)
+        status = record_failure(deps, scope, error)
     if not scope.errors_recorded:
         # The graph state is gone: store the fatal error at least, so ``run show`` names it.
         # ``error`` is what the run is recorded failed with, so it becomes the fatal record.
@@ -244,7 +284,7 @@ def _safety_net(deps: RunDeps, scope: RunScope, error: BaseException) -> None:
         scope.failure, scope.fatal = error, fatal
         record_errors(deps, scope, [fatal], [])
     try:
-        release_lock(deps, scope)
+        release_lock(deps, scope, status=status)
     except Exception as release_error:
         logger.error(
             "run.release_failed",

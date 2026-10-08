@@ -4,7 +4,7 @@ import asyncio
 import dataclasses
 import logging
 from collections.abc import Callable
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -708,19 +708,20 @@ async def test_a_fallback_digest_lowers_the_run_to_partial(
     assert env.ports.notifier.calls == [digest.id]
 
 
-async def test_an_unreadable_schedule_keeps_next_run_at_and_still_releases_the_lock(
+async def test_an_unreadable_schedule_is_retried_after_the_delay_and_still_releases_the_lock(
     db_engine: Engine, fake_clock: FakeClock, recording_next_run: NextRun
 ) -> None:
+    # #23 (spec Edge Cases, FR-010): no regular slot, so the retry delay alone sets the next run.
     config = make_job_config(schedule={"frequency": "sometimes"})
     env = build_env(db_engine, fake_clock, recording_next_run, config=config)
-    original = _job(db_engine, env.job_id).next_run_at
 
     result = await run_job(env.job_id, deps=env.deps)
 
     assert result.status == RunStatus.FAILED
+    assert result.retry_scheduled is True
     job = _job(db_engine, env.job_id)
     assert job.locked_until is None
-    assert job.next_run_at == original
+    assert job.next_run_at == fake_clock() + timedelta(hours=1)
 
 
 async def test_a_config_that_is_not_a_mapping_still_releases_the_lock(
@@ -966,3 +967,82 @@ async def test_one_failed_source_and_all_items_failed_is_failed_not_partial(
         result.errors
     )
     assert _job(db_engine, env.job_id).locked_until is None
+
+
+# --- run-due: the retry rule also covers manual runs (#23) ---------------------------------
+
+
+def _in_a_week(schedule: ScheduleConfig, after: datetime) -> datetime:
+    return after + timedelta(days=7)
+
+
+def _failing_env(db_engine: Engine, fake_clock: FakeClock, **kwargs: Any) -> Env:
+    sources = {FEED_1: FetchError("timeout", url=FEED_1)}
+    return build_env(db_engine, fake_clock, _in_a_week, sources=sources, **kwargs)
+
+
+async def test_a_failed_manual_run_is_retried_later_and_counts_toward_the_streak(
+    db_engine: Engine, fake_clock: FakeClock
+) -> None:
+    env = _failing_env(db_engine, fake_clock)
+
+    await run_job(env.job_id, deps=env.deps)
+    first = _job(db_engine, env.job_id).next_run_at
+    fake_clock.advance(timedelta(hours=1))
+    await run_job(env.job_id, deps=env.deps)
+
+    assert first == datetime(2026, 10, 4, 13, 0, tzinfo=UTC)
+    assert _job(db_engine, env.job_id).next_run_at == fake_clock() + timedelta(hours=2)
+
+
+async def test_a_failed_dry_run_changes_no_schedule_and_is_not_counted(
+    db_engine: Engine, fake_clock: FakeClock
+) -> None:
+    env = _failing_env(db_engine, fake_clock)
+    original = _job(db_engine, env.job_id).next_run_at
+
+    result = await run_job(env.job_id, deps=env.deps, dry_run=True)
+    assert result.status == RunStatus.FAILED
+    assert _job(db_engine, env.job_id).next_run_at == original
+    assert (result.next_run_at, result.retry_scheduled) == (None, False)
+    await run_job(env.job_id, deps=env.deps)
+
+    assert _job(db_engine, env.job_id).next_run_at == fake_clock() + timedelta(hours=1)
+
+
+async def test_the_safety_net_applies_the_retry_rule_too(
+    db_engine: Engine, fake_clock: FakeClock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from invio.graph import stages
+
+    def boom(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("release exploded")
+
+    monkeypatch.setattr(stages, "release_lock", boom)  # only the call inside finalize
+    env = _failing_env(db_engine, fake_clock)
+
+    with pytest.raises(RuntimeError, match="release exploded"):
+        await run_job(env.job_id, deps=env.deps)
+
+    job = _job(db_engine, env.job_id)
+    assert job.locked_until is None
+    assert job.next_run_at == fake_clock() + timedelta(hours=1)
+
+
+async def test_a_partial_run_uses_the_regular_slot(
+    db_engine: Engine, fake_clock: FakeClock
+) -> None:
+    from invio.graph.ports import DeliveryReport
+    from tests.pipeline_helpers import FakePorts, RecordingNotifier
+
+    ports = FakePorts(
+        {FEED_1: make_candidates(3)},
+        notifier=RecordingNotifier(DeliveryReport(sent=0, failed=1, error=None)),
+    )
+    env = build_env(db_engine, fake_clock, _in_a_week, ports=ports)
+
+    result = await run_job(env.job_id, deps=env.deps)
+
+    assert result.status == RunStatus.PARTIAL
+    assert _job(db_engine, env.job_id).next_run_at == fake_clock() + timedelta(days=7)
+    assert result.retry_scheduled is False

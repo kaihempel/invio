@@ -63,6 +63,14 @@ def test_version_prints_version() -> None:
     assert result.stdout.strip() == f"invio {__version__}"
 
 
+def test_run_due_is_discovered_with_its_options() -> None:
+    top = runner.invoke(app, ["--help"])
+    sub = runner.invoke(app, ["run-due", "--help"])
+
+    assert "run-due" in top.stdout
+    assert "--limit" in sub.stdout and "--parallel" in sub.stdout
+
+
 def test_version_is_not_placeholder() -> None:
     assert __version__ != "0.0.0+unknown"
 

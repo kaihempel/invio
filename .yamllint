@@ -1,0 +1,26 @@
+---
+# yamllint configuration for all YAML in the repository (Ansible, Molecule, workflows).
+# The overrides keep it compatible with ansible-lint, which reads this file as well.
+extends: default
+
+ignore: |
+  .venv/
+  .claude/
+  .specify/
+  deploy/ansible/.collections/
+  deploy/ansible/molecule/*/.cache/
+
+rules:
+  line-length:
+    max: 120
+  comments:
+    min-spaces-from-content: 1
+  comments-indentation: false
+  braces:
+    max-spaces-inside: 1
+  octal-values:
+    forbid-implicit-octal: true
+    forbid-explicit-octal: true
+  truthy:
+    allowed-values: ["true", "false"]
+    check-keys: false

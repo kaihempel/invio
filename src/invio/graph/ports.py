@@ -83,6 +83,7 @@ class RunDeps:
     notify: Notifier
     next_run: Callable[[ScheduleConfig, datetime], datetime]
     clock: Callable[[], datetime]
+    retry_delay: Callable[[int], timedelta]  # delay after the n-th consecutive failed run
     concurrency: int = 4
     retry: RetrySettings = field(default_factory=RetrySettings)
     lock_ttl: timedelta = timedelta(hours=2)
