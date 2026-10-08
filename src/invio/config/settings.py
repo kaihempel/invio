@@ -120,6 +120,7 @@ class Settings(BaseSettings):
     # YouTube source (the proxy URL may embed credentials, hence SecretStr)
     youtube_cookies_file: Path | None = None
     youtube_proxy: SecretStr | None = None
+    youtube_timeout_seconds: float = Field(default=60.0, gt=0, allow_inf_nan=False)
 
     # Transcription
     whisper_model_size: WhisperModelSize = "small"
@@ -138,6 +139,15 @@ class Settings(BaseSettings):
     @classmethod
     def _validate_log_level(cls, value: str) -> str:
         return parse_log_level(value)
+
+    @field_validator("youtube_cookies_file", "youtube_proxy", mode="before")
+    @classmethod
+    def _blank_is_unset(cls, value: object) -> object:
+        # ``INVIO_YOUTUBE_COOKIES_FILE=`` would otherwise become ``Path(".")`` (the CWD).
+        text = value.get_secret_value() if isinstance(value, SecretStr) else value
+        if isinstance(text, str) and not text.strip():
+            return None
+        return value
 
     @field_validator("healthcheck_url")
     @classmethod

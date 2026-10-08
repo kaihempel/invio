@@ -26,6 +26,7 @@ dependencies = [
     "sqlalchemy>=2.1",
     "trafilatura>=2.0",
     "typer>=0.27.2",
+    "yt-dlp>=2026.8.19",
 ]
 
 [project.scripts]
@@ -112,6 +113,12 @@ plugins = ["pydantic.mypy"]
 # feedparser ships no type information; its results are confined to invio.sources.rss._parse.
 [[tool.mypy.overrides]]
 module = ["feedparser", "feedparser.*"]
+ignore_missing_imports = true
+
+# yt-dlp has no complete type information; it is imported lazily and only inside
+# invio.sources.youtube (default extractor and error mapper).
+[[tool.mypy.overrides]]
+module = ["yt_dlp", "yt_dlp.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

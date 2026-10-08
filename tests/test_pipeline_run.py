@@ -4,11 +4,13 @@ import logging
 from collections import Counter
 from collections.abc import Callable
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import httpx2
 import pytest
 from sqlalchemy import Engine, select
+from yt_dlp.utils import DownloadError
 
 from invio.config.job import ScheduleConfig
 from invio.db.models import Digest, Item, Job, LlmUsage, Run
@@ -22,8 +24,10 @@ from tests.db_helpers import uses_sqlite
 from tests.http_helpers import FakeResolver, RecordingTransport
 from tests.pipeline_helpers import (
     Env,
+    FakePorts,
     RoutedFakeProvider,
     build_env,
+    make_candidates,
     make_job_config,
     relevance_reply,
 )
@@ -230,6 +234,15 @@ async def test_a_keyword_rejected_item_is_skipped_and_its_page_is_never_fetched(
 # --- S23 ------------------------------------------------------------------------------------
 
 
+@pytest.fixture
+def youtube_unsupported(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every source type has an adapter now; keep the gate itself covered by dropping YouTube."""
+    monkeypatch.setattr(
+        "invio.graph.stages.SUPPORTED_SOURCES", frozenset({"rss", "web", "sitemap"})
+    )
+
+
+@pytest.mark.usefixtures("youtube_unsupported")
 async def test_s23_an_unsupported_source_type_is_skipped_and_not_counted(
     db_engine: Engine,
     fake_clock: FakeClock,
@@ -250,6 +263,7 @@ async def test_s23_an_unsupported_source_type_is_skipped_and_not_counted(
     assert (record.source, record.type) == ("1:youtube_channel", "youtube_channel")  # type: ignore[attr-defined]
 
 
+@pytest.mark.usefixtures("youtube_unsupported")
 async def test_a_job_whose_sources_are_all_unsupported_runs_with_zero_candidates(
     db_engine: Engine, fake_clock: FakeClock, recording_next_run: NextRun
 ) -> None:
@@ -268,6 +282,103 @@ async def test_a_job_whose_sources_are_all_unsupported_runs_with_zero_candidates
     (run,) = _rows(db_engine, Run)
     assert (run.status, run.error) == (RunStatus.SUCCEEDED, None)
     assert _job(db_engine, env.job_id).locked_until is None
+
+
+# --- YouTube sources (#28) ---------------------------------------------------------------------
+
+CHANNEL_LISTING = "https://www.youtube.com/channel/UC123/videos"
+
+
+def _youtube_config(*extra: dict[str, Any]) -> dict[str, Any]:
+    config = make_job_config()
+    config["sources"].append({"type": "youtube_channel", "channel_id": "UC123"})
+    config["sources"].extend(extra)
+    return config
+
+
+async def test_youtube_videos_reach_the_pipeline_as_video_items(
+    db_engine: Engine, fake_clock: FakeClock, recording_next_run: NextRun
+) -> None:
+    listing = {"entries": [{"id": "vid1", "title": "Video 1"}, {"id": "vid2", "title": "Video 2"}]}
+    config = make_job_config(sources=[{"type": "youtube_channel", "channel_id": "UC123"}])
+    ports = FakePorts(youtube={CHANNEL_LISTING: listing})
+    env = build_env(db_engine, fake_clock, recording_next_run, config=config, ports=ports)
+
+    result = await run_job(env.job_id, deps=env.deps)
+
+    items = _rows(db_engine, Item)
+    assert {(i.title, i.type, i.url) for i in items} == {
+        ("Video 1", "video", "https://www.youtube.com/watch?v=vid1"),
+        ("Video 2", "video", "https://www.youtube.com/watch?v=vid2"),
+    }
+    assert (result.stats["sources"], result.stats["sources_failed"]) == (1, 0)
+    assert result.status == RunStatus.SUCCEEDED
+
+
+async def test_a_blocked_youtube_source_does_not_stop_the_other_sources(
+    db_engine: Engine, fake_clock: FakeClock, recording_next_run: NextRun
+) -> None:
+    blocked = DownloadError("ERROR: Sign in to confirm you're not a bot")
+    ports = FakePorts(
+        {"https://example.com/feed.xml": make_candidates(2)}, youtube={CHANNEL_LISTING: blocked}
+    )
+    env = build_env(
+        db_engine, fake_clock, recording_next_run, config=_youtube_config(), ports=ports
+    )
+
+    result = await run_job(env.job_id, deps=env.deps)
+
+    assert result.stats["sources_failed"] == 1
+    assert result.stats["found"] == 2
+    (entry,) = result.stats["errors"]
+    assert entry["source"] == "1:youtube_channel"
+    assert "not a bot" not in str(entry)
+    assert len(_rows(db_engine, Item)) == 2
+    # 429 is transient: retried by the existing retry path (3 attempts, 2 recorded fake sleeps)
+    assert [c for c in ports.calls if c == ("source", "UC123")] == [("source", "UC123")] * 3
+    assert len(env.sleep.calls) == 2
+
+
+async def test_a_missing_youtube_cookies_file_does_not_stop_the_other_sources(
+    db_engine: Engine, fake_clock: FakeClock, recording_next_run: NextRun, tmp_path: Path
+) -> None:
+    ports = FakePorts(
+        {"https://example.com/feed.xml": make_candidates(2)},
+        youtube={CHANNEL_LISTING: {"entries": [{"id": "vid1", "title": "Never listed"}]}},
+        youtube_cookies_file=tmp_path / "missing-cookies.txt",
+    )
+    env = build_env(
+        db_engine, fake_clock, recording_next_run, config=_youtube_config(), ports=ports
+    )
+
+    result = await run_job(env.job_id, deps=env.deps)
+
+    assert (result.stats["sources_failed"], result.stats["found"]) == (1, 2)
+    (entry,) = result.stats["errors"]
+    assert entry["source"] == "1:youtube_channel"
+    assert "missing-cookies" not in str(entry)
+    assert {i.title for i in _rows(db_engine, Item)} == {"Article 1", "Article 2"}
+    # a configuration problem is permanent: one attempt, no retry sleep
+    assert [c for c in ports.calls if c == ("source", "UC123")] == [("source", "UC123")]
+    assert env.sleep.calls == []
+
+
+async def test_a_missing_youtube_channel_is_attempted_once_without_sleeping(
+    db_engine: Engine, fake_clock: FakeClock, recording_next_run: NextRun
+) -> None:
+    gone = DownloadError("ERROR: HTTP Error 404: Not Found")
+    ports = FakePorts(
+        {"https://example.com/feed.xml": make_candidates(1)}, youtube={CHANNEL_LISTING: gone}
+    )
+    env = build_env(
+        db_engine, fake_clock, recording_next_run, config=_youtube_config(), ports=ports
+    )
+
+    result = await run_job(env.job_id, deps=env.deps)
+
+    assert result.stats["sources_failed"] == 1
+    assert [c for c in ports.calls if c == ("source", "UC123")] == [("source", "UC123")]
+    assert env.sleep.calls == []
 
 
 # --- S25 / S24 are in test_graph_extract and test_graph_build ---------------------------------

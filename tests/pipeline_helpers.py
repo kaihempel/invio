@@ -23,7 +23,14 @@ from pydantic import BaseModel, HttpUrl
 from sqlalchemy import Engine, inspect, select
 from sqlalchemy.orm import Session, sessionmaker
 
-from invio.config.job import JobConfig, LLMConfig, ScheduleConfig, SourceConfig
+from invio.config.job import (
+    JobConfig,
+    LLMConfig,
+    ScheduleConfig,
+    SourceConfig,
+    YoutubeChannelSource,
+    YoutubePlaylistSource,
+)
 from invio.db.models import Digest, Item, Job, LlmUsage, Notification, Run
 from invio.db.repositories import JobRepository, RunRepository
 from invio.db.session import session_factory, session_scope
@@ -35,6 +42,7 @@ from invio.llm.fake import FakeReply, FakeScriptExhaustedError, FakeStep
 from invio.llm.registry import ModelRegistry, load_registry
 from invio.retry import RetrySettings, Sleep
 from invio.scheduling import backoff
+from invio.sources.youtube import YoutubeSource
 from tests.async_helpers import RecordingSleep
 from tests.db_helpers import make_candidate
 from tests.llm_helpers import FIXTURE_REGISTRY_DIR
@@ -313,8 +321,17 @@ class FakePorts:
         gate: asyncio.Event | None = None,
         hold: int = 0,
         trace: list[str] | None = None,
+        youtube: Mapping[str, Any] | None = None,
+        youtube_cookies_file: Path | None = None,
     ) -> None:
         self.trace = trace if trace is not None else []
+        # YouTube sources run through a real ``YoutubeSource`` over a fake extractor; the map
+        # is keyed by canonical listing URL and holds a yt-dlp info mapping, an exception or
+        # ``Attempts`` of those.
+        self.youtube = dict(youtube or {})
+        self._youtube_source = YoutubeSource(
+            extract=self._extract_youtube, timeout=5.0, cookies_file=youtube_cookies_file
+        )
         self.sources = {source_key(url): outcome for url, outcome in (sources or {}).items()}
         self.pages = dict(pages or {})
         self.notifier = notifier or RecordingNotifier()
@@ -340,8 +357,22 @@ class FakePorts:
         self._in_flight_watchers.append((count, event))
         return event
 
+    def _extract_youtube(self, url: str, options: Mapping[str, object]) -> Mapping[str, Any]:
+        outcome = _resolve(self.youtube.get(url, {"entries": []}))
+        if isinstance(outcome, BaseException):
+            raise outcome
+        result: Mapping[str, Any] = outcome
+        return result
+
     async def fetch_source(self, config: SourceConfig) -> list[Candidate]:
-        url = str(getattr(config, "url"))  # noqa: B009 - not every source type has a url
+        if isinstance(config, YoutubeChannelSource | YoutubePlaylistSource):
+            url = (
+                config.channel_id
+                if isinstance(config, YoutubeChannelSource)
+                else config.playlist_id
+            )
+        else:
+            url = str(getattr(config, "url"))  # noqa: B009 - not every source type has a url
         self.calls.append(("source", url))
         self.trace.append("source")
         self.source_in_flight += 1
@@ -349,6 +380,8 @@ class FakePorts:
         try:
             for _ in range(self.hold):
                 await asyncio.sleep(0)
+            if isinstance(config, YoutubeChannelSource | YoutubePlaylistSource):
+                return await self._youtube_source.fetch(config)
             outcome = _resolve(self.sources.get(url, []))
         finally:
             self.source_in_flight -= 1

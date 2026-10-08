@@ -3,7 +3,7 @@
 import time
 from datetime import timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import httpx2
 import pytest
@@ -75,14 +75,93 @@ async def test_a_missing_database_url_is_a_missing_setting() -> None:
             pass  # pragma: no cover
 
 
-async def test_fetch_source_dispatches_rss_and_web_and_rejects_other_types() -> None:
+class _RecordingYoutube:
+    """Stands in for ``YoutubeSource``: records its construction and the configs it fetches."""
+
+    instances: ClassVar[list["_RecordingYoutube"]] = []
+
+    def __init__(self, **kwargs: Any) -> None:
+        self.kwargs = kwargs
+        self.fetched: list[Any] = []
+        self.closed = 0
+        _RecordingYoutube.instances.append(self)
+
+    async def fetch(self, config: Any) -> list[Any]:
+        self.fetched.append(config)
+        return []
+
+    def close(self) -> None:
+        self.closed += 1
+
+
+@pytest.fixture
+def recording_youtube(monkeypatch: pytest.MonkeyPatch) -> type[_RecordingYoutube]:
+    _RecordingYoutube.instances = []
+    monkeypatch.setattr(deps_module, "YoutubeSource", _RecordingYoutube)
+    return _RecordingYoutube
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        {"type": "youtube_channel", "channel_id": "UC1"},
+        {"type": "youtube_playlist", "playlist_id": "PL1"},
+    ],
+)
+async def test_fetch_source_routes_both_youtube_types_to_one_adapter(
+    recording_youtube: type[_RecordingYoutube], source: dict[str, str]
+) -> None:
+    config = JobConfig.model_validate(make_job_config(sources=[source])).sources[0]
+
+    async with default_deps(_settings(), transport=RecordingTransport(_handler)) as deps:
+        assert await deps.fetch_source(config) == []
+
+    (adapter,) = recording_youtube.instances
+    assert adapter.fetched == [config]
+    assert adapter.closed == 1  # its worker pool is shut down with the deps
+
+
+async def test_youtube_settings_reach_the_adapter(
+    recording_youtube: type[_RecordingYoutube], tmp_path: Path
+) -> None:
+    cookies = tmp_path / "cookies.txt"
+    settings = _settings(
+        youtube_cookies_file=cookies,
+        youtube_proxy="http://u:secret@proxy.invalid:8080",
+        youtube_timeout_seconds=12.5,
+    )
+
+    async with default_deps(settings, transport=RecordingTransport(_handler)):
+        pass
+
+    (adapter,) = recording_youtube.instances
+    assert adapter.kwargs == {
+        "cookies_file": cookies,
+        "proxy": "http://u:secret@proxy.invalid:8080",
+        "timeout": 12.5,
+    }
+
+
+@pytest.mark.parametrize("cookies", ["", "  "])
+async def test_blank_youtube_cookies_and_proxy_count_as_unset(
+    recording_youtube: type[_RecordingYoutube], monkeypatch: pytest.MonkeyPatch, cookies: str
+) -> None:
+    monkeypatch.setenv("INVIO_YOUTUBE_COOKIES_FILE", cookies)
+    monkeypatch.setenv("INVIO_YOUTUBE_PROXY", "")
+
+    async with default_deps(_settings(), transport=RecordingTransport(_handler)):
+        pass
+
+    (adapter,) = recording_youtube.instances
+    assert adapter.kwargs["cookies_file"] is None
+    assert adapter.kwargs["proxy"] is None
+
+
+async def test_fetch_source_dispatches_rss_and_web() -> None:
     config = _config()
     rss = config.sources[0]
     web = JobConfig.model_validate(
         make_job_config(sources=[{"type": "web", "url": "https://example.com/page"}])
-    ).sources[0]
-    other = JobConfig.model_validate(
-        make_job_config(sources=[{"type": "youtube_channel", "channel_id": "UC1"}])
     ).sources[0]
     rss_config = JobConfig.model_validate(
         make_job_config(sources=[{"type": "rss", "url": "https://example.com/feed.xml"}])
@@ -94,8 +173,6 @@ async def test_fetch_source_dispatches_rss_and_web_and_rejects_other_types() -> 
     ) as deps:
         feed = await deps.fetch_source(rss_config)
         page = await deps.fetch_source(web)
-        with pytest.raises(ValueError, match="no adapter"):
-            await deps.fetch_source(other)
 
     assert [c.url for c in feed] == ["https://example.com/post"]
     assert len(page) == 1

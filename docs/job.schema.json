@@ -488,7 +488,7 @@
     },
     "YoutubeChannelSource": {
       "additionalProperties": false,
-      "description": "A YouTube channel.",
+      "description": "A YouTube channel (id, ``@handle`` or channel URL); its latest videos are collected.\n\n``max_items`` caps the listing (yt-dlp's ``playlistend``) before the result is sorted newest\nfirst. ``max_age_days`` (if set) drops videos older than that, but only when yt-dlp supplies\na date; flat listings often lack it, and undated videos are kept.",
       "properties": {
         "type": {
           "const": "youtube_channel",
@@ -517,6 +517,26 @@
           "default": true,
           "title": "Enabled",
           "type": "boolean"
+        },
+        "max_age_days": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Age Days"
+        },
+        "max_items": {
+          "default": 20,
+          "maximum": 200,
+          "minimum": 1,
+          "title": "Max Items",
+          "type": "integer"
         }
       },
       "required": [
@@ -528,7 +548,7 @@
     },
     "YoutubePlaylistSource": {
       "additionalProperties": false,
-      "description": "A YouTube playlist.",
+      "description": "A YouTube playlist (id or URL with ``list=``); its first ``max_items`` entries are collected.\n\n``max_items`` caps the listing (yt-dlp's ``playlistend``) before the result is sorted newest\nfirst, so a playlist listed oldest first yields its first (oldest) ``max_items`` entries,\nnot the latest ones. ``max_age_days`` (if set) drops videos older than that, but only when\nyt-dlp supplies a date; flat listings often lack it, and undated videos are kept.",
       "properties": {
         "type": {
           "const": "youtube_playlist",
@@ -557,6 +577,26 @@
           "default": true,
           "title": "Enabled",
           "type": "boolean"
+        },
+        "max_age_days": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Age Days"
+        },
+        "max_items": {
+          "default": 20,
+          "maximum": 200,
+          "minimum": 1,
+          "title": "Max Items",
+          "type": "integer"
         }
       },
       "required": [
