@@ -5,11 +5,12 @@ import json
 import logging
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Literal
 
 import httpx
 import pytest
 from google.genai import errors as google_errors
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, ValidationError
 
 from invio.graph.nodes.relevance import RelevanceResult
 from invio.graph.nodes.summarize_item import ItemSummary
@@ -938,3 +939,102 @@ async def test_repaired_structured_call_logs_the_repair_flag_and_summed_tokens(
     (record,) = [r for r in caplog.records if r.getMessage() == "llm.call"]
     assert record.repaired is True  # type: ignore[attr-defined]
     assert (record.input_tokens, record.output_tokens) == (24, 6)  # type: ignore[attr-defined]
+
+
+# --- hardening: unions, malformed bodies, finish reasons, retry hints ------------------------
+
+
+class _Cat(BaseModel):
+    kind: Literal["cat"]
+    lives: int
+
+
+class _Dog(BaseModel):
+    kind: Literal["dog"]
+    good: bool
+
+
+class _Owner(BaseModel):
+    pet: _Cat | _Dog = Field(discriminator="kind")
+
+
+async def test_discriminated_union_round_trips_with_its_shape_sent() -> None:
+    body = {
+        "candidates": [
+            {
+                "content": {
+                    "role": "model",
+                    "parts": [{"text": '{"pet": {"kind": "dog", "good": true}}'}],
+                },
+                "finishReason": "STOP",
+            }
+        ],
+        "usageMetadata": {"promptTokenCount": 12, "candidatesTokenCount": 3},
+    }
+    provider, recorder, _ = make_provider(httpx.Response(200, json=body))
+
+    value, _ = await _structured(provider, _Owner)
+
+    assert value.pet == _Dog(kind="dog", good=True)
+    sent = json.dumps(recorder.requests[0].body["generationConfig"]["responseJsonSchema"])
+    assert '"enum": ["dog"]' in sent
+    assert '"enum": ["cat"]' in sent
+
+
+@pytest.mark.parametrize("operation", OPERATIONS)
+async def test_malformed_response_body_is_unavailable_without_leaking(operation: str) -> None:
+    provider, recorder, _ = make_provider("malformed_usage", "text_ok", retry=RETRIES)
+
+    with pytest.raises(LLMUnavailableError, match="unexpected response") as info:
+        await _call(provider, operation)
+
+    text = str(info.value) + repr(info.value)
+    assert "ANSWER-SENTINEL" not in text
+    assert "PROMPT-TEXT-SENTINEL" not in text
+    assert "promptTokenCount" not in text
+    assert len(recorder.requests) == 1
+    assert not isinstance(info.value.__cause__, ValidationError)
+    assert not isinstance(info.value.__context__, ValidationError)
+
+
+@pytest.mark.parametrize("operation", OPERATIONS)
+async def test_non_policy_finish_reason_is_unavailable_without_repair(operation: str) -> None:
+    provider, recorder, _ = make_provider("stopped_other", "json_ok")
+
+    with pytest.raises(LLMUnavailableError, match="incomplete: OTHER") as info:
+        await _call(provider, operation)
+
+    assert "ANSWER-SENTINEL" not in str(info.value)
+    assert len(recorder.requests) == 1
+
+
+async def test_retry_delay_without_the_seconds_suffix_is_ignored() -> None:
+    body = {
+        "error": {
+            "code": 429,
+            "message": "slow down",
+            "status": "RESOURCE_EXHAUSTED",
+            "details": [{"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "7"}],
+        }
+    }
+    provider, _, waits = make_provider(httpx.Response(429, json=body), "text_ok", retry=RETRIES)
+
+    await _complete(provider)
+
+    assert waits == [1.0]
+
+
+async def test_retry_delay_does_not_change_non_rate_limit_failures() -> None:
+    body = {
+        "error": {
+            "code": 503,
+            "message": "overloaded",
+            "status": "UNAVAILABLE",
+            "details": [{"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "7s"}],
+        }
+    }
+    provider, _, waits = make_provider(httpx.Response(503, json=body), "text_ok", retry=RETRIES)
+
+    await _complete(provider)
+
+    assert waits == [1.0]

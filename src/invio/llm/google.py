@@ -44,18 +44,19 @@ the ``x-goog-api-key`` header. There is one SDK client per running event loop
 
 import asyncio
 import copy
+import dataclasses
 import json
 import math
 import random
 import re
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Self
 
 import httpx
 from google import genai
 from google.genai import errors, types
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from invio.config.settings import Settings
 from invio.llm import registry as llm_registry
@@ -65,6 +66,7 @@ from invio.llm.base import (
     LLMInvalidOutputError,
     LLMProvider,
     LLMQuotaError,
+    LLMRateLimitError,
     LLMUnavailableError,
     Usage,
     require_api_key,
@@ -115,14 +117,23 @@ _SCHEMA_KEYWORDS = (
 _SCHEMA_LISTS = ("prefixItems", "anyOf")
 _BAD_REQUEST = 400
 _RATE_LIMITED = 429
-_NOT_A_STOP = frozenset(
+# Finish reasons that mean a complete answer (or none was reported).
+_COMPLETE = frozenset({"STOP", "FINISH_REASON_UNSPECIFIED"})
+# Finish reasons by which the service refused to answer for a policy reason.
+_POLICY_STOPS = frozenset(
     {
-        types.FinishReason.STOP,
-        types.FinishReason.MAX_TOKENS,
-        types.FinishReason.FINISH_REASON_UNSPECIFIED,
+        "SAFETY",
+        "RECITATION",
+        "LANGUAGE",
+        "BLOCKLIST",
+        "PROHIBITED_CONTENT",
+        "SPII",
+        "IMAGE_SAFETY",
+        "IMAGE_PROHIBITED_CONTENT",
+        "IMAGE_RECITATION",
     }
 )
-_RETRY_DELAY = re.compile(r"[0-9]+(?:\.[0-9]+)?")
+_RETRY_DELAY = re.compile(r"([0-9]+(?:\.[0-9]+)?)s")
 # Causes of a connection error raised before anything was sent: retrying cannot help.
 _UNSENDABLE = (httpx.InvalidURL, httpx.UnsupportedProtocol, httpx.LocalProtocolError)
 # Causes that mean the server answered with something the client cannot use.
@@ -159,6 +170,11 @@ def _inline(node: Any, defs: dict[str, Any], stack: tuple[str, ...]) -> Any:
             out[key] = _inline(value, defs, stack)
         else:
             out[key] = copy.deepcopy(value)
+    if "anyOf" not in node and isinstance(node.get("oneOf"), list):
+        # The service has no oneOf; any matching alternative is accepted (Pydantic unions).
+        out["anyOf"] = [_inline(sub, defs, stack) for sub in node["oneOf"]]
+    if "enum" not in node and "const" in node:
+        out["enum"] = [copy.deepcopy(node["const"])]
     return out
 
 
@@ -166,7 +182,8 @@ def gemini_schema(schema: dict[str, Any]) -> dict[str, Any]:
     """Return a service-compatible copy of a Pydantic JSON schema; ``schema`` is not changed.
 
     Local ``#/$defs/<Name>`` references are replaced by copies of their definitions (``$defs`` is
-    dropped) and only the keywords the service documents are kept. A recursive schema or a
+    dropped), ``oneOf`` becomes ``anyOf``, ``const`` a one-value ``enum``, and only the keywords
+    the service documents are kept. A recursive schema or a
     reference that is not local raises :class:`~invio.llm.base.LLMConfigError`.
     """
     defs = schema.get("$defs", {})
@@ -206,10 +223,11 @@ def _answer(
     """Return the answer text and usage of a ``generateContent`` response.
 
     The answer is the joined non-thought text parts of the first candidate. A blocked prompt or
-    an answer stopped for a policy reason raises ``LLMInvalidOutputError`` (reason and blocked
-    categories only; the usage of the call is attached). A cut-off answer and empty free text
-    raise ``LLMUnavailableError``; no answer text is ever put into a message. An empty
-    structured answer is returned as ``""``, which fails validation and is repaired once.
+    an answer stopped for a policy reason (``_POLICY_STOPS``) raises ``LLMInvalidOutputError``
+    (reason and blocked categories only; the usage of the call is attached). A cut-off answer,
+    any other unusual finish reason and empty free text raise ``LLMUnavailableError``; no
+    answer text is ever put into a message. An empty structured answer is returned as ``""``,
+    which fails validation and is repaired once.
     """
     metadata = response.usage_metadata
     usage = Usage(
@@ -225,15 +243,15 @@ def _answer(
         )
         raise _blocked(summary, sanitize_detail(feedback.block_reason_message or ""), model, usage)
     candidate = response.candidates[0] if response.candidates else None
-    reason = candidate.finish_reason if candidate is not None else None
-    if candidate is not None and reason and reason not in _NOT_A_STOP:
+    reason = _enum_name(candidate.finish_reason) if candidate and candidate.finish_reason else None
+    if candidate is not None and reason in _POLICY_STOPS:
         summary = (
-            f"Google stopped the answer: {_enum_name(reason)}"
-            f"{_blocked_categories(candidate.safety_ratings)}"
+            f"Google stopped the answer: {reason}{_blocked_categories(candidate.safety_ratings)}"
         )
         raise _blocked(summary, "", model, usage)
-    if reason == types.FinishReason.MAX_TOKENS:
-        raise _unavailable(describe("Google answer is incomplete: MAX_TOKENS", model, None), model)
+    if reason is not None and reason not in _COMPLETE:
+        # MAX_TOKENS and every reason that is not a policy stop (OTHER, future members, ...).
+        raise _unavailable(describe(f"Google answer is incomplete: {reason}", model, None), model)
     parts = candidate.content.parts if candidate and candidate.content else None
     text = "".join(part.text for part in parts or [] if part.text and not part.thought)
     if not text and not structured:
@@ -262,10 +280,9 @@ def _retry_delay(details: list[dict[str, Any]]) -> float | None:
     """Return the seconds of the first ``RetryInfo.retryDelay`` (``"7s"``, ``"0.500s"``)."""
     for info in _of_type(details, "RetryInfo"):
         raw = info.get("retryDelay")
-        if isinstance(raw, str) and _RETRY_DELAY.fullmatch(raw.removesuffix("s")):
-            delay = float(raw.removesuffix("s"))
-            return delay if math.isfinite(delay) else None
-        return None
+        match = _RETRY_DELAY.fullmatch(raw) if isinstance(raw, str) else None
+        delay = float(match.group(1)) if match else None
+        return delay if delay is not None and math.isfinite(delay) else None
     return None
 
 
@@ -298,16 +315,6 @@ def _safe_detail(exc: errors.APIError) -> str:
     return sanitize_detail(message) if isinstance(message, str) else ""
 
 
-def _headers(exc: errors.APIError, delay: float | None) -> Mapping[str, str]:
-    """Return the response headers; a ``RetryInfo`` delay replaces any ``Retry-After``."""
-    response = exc.response
-    headers = dict(response.headers) if isinstance(response, httpx.Response) else {}
-    if delay is None:
-        return headers
-    kept = {name: value for name, value in headers.items() if name.lower() != "retry-after"}
-    return {**kept, "retry-after": f"{delay:f}"}
-
-
 def _classify_status(exc: errors.APIError, model: str, now: Callable[[], datetime]) -> Failure:
     status = exc.code
     if not isinstance(status, int):
@@ -323,16 +330,25 @@ def _classify_status(exc: errors.APIError, model: str, now: Callable[[], datetim
         )
         quota = LLMQuotaError(message, provider=PROVIDER, model=model)
         return Failure("quota", False, quota, status)
-    return classify_status(
+    response = exc.response
+    failure = classify_status(
         status,
         label=_LABEL,
         env_var=_ENV_VAR,
         provider=PROVIDER,
         model=model,
         detail=_safe_detail(exc),
-        headers=_headers(exc, _retry_delay(details)),
+        headers=response.headers if isinstance(response, httpx.Response) else {},
         now=now,
     )
+    delay = _retry_delay(details)
+    if failure.kind != "rate_limit" or delay is None:
+        return failure
+    # RetryInfo is more precise than Retry-After: it wins.
+    limited = LLMRateLimitError(
+        str(failure.error), provider=PROVIDER, model=model, retry_after=delay
+    )
+    return dataclasses.replace(failure, error=limited, retry_after=delay)
 
 
 def _classify(exc: Exception, model: str, now: Callable[[], datetime]) -> Failure | None:
@@ -341,7 +357,7 @@ def _classify(exc: Exception, model: str, now: Callable[[], datetime]) -> Failur
         return timeout_failure(_LABEL, provider=PROVIDER, model=model)
     if isinstance(exc, errors.APIError):
         return _classify_status(exc, model, now)
-    if isinstance(exc, errors.UnknownApiResponseError | json.JSONDecodeError | httpx.DecodingError):
+    if isinstance(exc, errors.UnknownApiResponseError | json.JSONDecodeError | ValidationError):
         cause = f" ({type(exc).__name__})"
         return bad_response_failure(_LABEL, provider=PROVIDER, model=model, cause=cause)
     if isinstance(exc, httpx.HTTPError | httpx.InvalidURL):
@@ -441,7 +457,8 @@ class GoogleProvider:
         max_output_tokens: int | None,
         schema_json: dict[str, Any] | None,
     ) -> types.GenerateContentConfig:
-        assert info.thinking_level is not None  # checked when the provider is built
+        if info.thinking_level is None:
+            raise LLMConfigError(f"model '{info.model_id}' does not define thinking_level")
         config = types.GenerateContentConfig(
             thinking_config=types.ThinkingConfig(
                 thinking_level=types.ThinkingLevel(info.thinking_level.upper())
@@ -493,7 +510,8 @@ class GoogleProvider:
         self, system: str, user: str, *, model: str, temperature: float, max_tokens: int
     ) -> tuple[str, Usage]:
         info = self._model_info(model)
-        assert info.thinking_allowance_tokens is not None  # checked when the provider is built
+        if info.thinking_allowance_tokens is None:
+            raise LLMConfigError(f"model '{model}' does not define thinking_allowance_tokens")
         config = self._config(
             info, system, temperature, max_tokens + info.thinking_allowance_tokens, None
         )

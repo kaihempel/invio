@@ -83,7 +83,6 @@ def test_unsupported_keywords_are_dropped() -> None:
                 "a": {
                     "type": "string",
                     "pattern": "^x$",
-                    "const": "x",
                     "default": "x",
                     "minLength": 1,
                     "maxLength": 2,
@@ -215,3 +214,46 @@ class _Loop(BaseModel):
 def test_recursion_through_any_of_and_items_is_a_config_error() -> None:
     with pytest.raises(LLMConfigError, match="recursive"):
         _convert(_Loop)
+
+
+def test_one_of_becomes_any_of_and_is_converted_recursively() -> None:
+    schema = gemini_schema(
+        {
+            "type": "object",
+            "properties": {
+                "pet": {
+                    "oneOf": [
+                        {"type": "string", "minLength": 1},
+                        {"type": "object", "properties": {"n": {"type": "integer"}}},
+                    ]
+                }
+            },
+        }
+    )
+
+    assert schema["properties"]["pet"] == {
+        "anyOf": [
+            {"type": "string"},
+            {"type": "object", "properties": {"n": {"type": "integer"}}},
+        ]
+    }
+
+
+def test_const_becomes_a_single_value_enum() -> None:
+    schema = gemini_schema(
+        {"type": "object", "properties": {"k": {"const": "a", "type": "string"}}}
+    )
+
+    assert schema["properties"]["k"] == {"type": "string", "enum": ["a"]}
+
+
+def test_const_does_not_override_an_existing_enum() -> None:
+    schema = gemini_schema({"const": "a", "enum": ["a", "b"]})
+
+    assert schema == {"enum": ["a", "b"]}
+
+
+def test_one_of_next_to_any_of_keeps_both_alternatives() -> None:
+    schema = gemini_schema({"anyOf": [{"type": "string"}], "oneOf": [{"type": "integer"}]})
+
+    assert schema == {"anyOf": [{"type": "string"}]}
