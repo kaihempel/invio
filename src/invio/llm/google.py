@@ -44,21 +44,27 @@ the ``x-goog-api-key`` header. There is one SDK client per running event loop
 
 import asyncio
 import copy
+import json
+import math
 import random
-from collections.abc import Awaitable, Callable
+import re
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Self
 
 import httpx
 from google import genai
-from google.genai import types
+from google.genai import errors, types
 from pydantic import BaseModel
 
 from invio.config.settings import Settings
 from invio.llm import registry as llm_registry
 from invio.llm.base import (
+    LLMAuthError,
     LLMConfigError,
+    LLMInvalidOutputError,
     LLMProvider,
+    LLMQuotaError,
     LLMUnavailableError,
     Usage,
     require_api_key,
@@ -67,9 +73,15 @@ from invio.llm.base import (
 )
 from invio.llm.factory import register_provider
 from invio.llm.http_retry import (
+    Failure,
     RetryPolicy,
+    bad_response_failure,
+    classify_status,
+    classify_transport,
     describe,
     run_with_retries,
+    sanitize_detail,
+    timeout_failure,
     utc_now,
 )
 from invio.llm.loop_clients import LoopClients
@@ -101,6 +113,20 @@ _SCHEMA_KEYWORDS = (
     "anyOf",
 )
 _SCHEMA_LISTS = ("prefixItems", "anyOf")
+_BAD_REQUEST = 400
+_RATE_LIMITED = 429
+_NOT_A_STOP = frozenset(
+    {
+        types.FinishReason.STOP,
+        types.FinishReason.MAX_TOKENS,
+        types.FinishReason.FINISH_REASON_UNSPECIFIED,
+    }
+)
+_RETRY_DELAY = re.compile(r"[0-9]+(?:\.[0-9]+)?")
+# Causes of a connection error raised before anything was sent: retrying cannot help.
+_UNSENDABLE = (httpx.InvalidURL, httpx.UnsupportedProtocol, httpx.LocalProtocolError)
+# Causes that mean the server answered with something the client cannot use.
+_BAD_RESPONSE = (httpx.DecodingError, httpx.TooManyRedirects, httpx.StreamError)
 
 
 def _inline(node: Any, defs: dict[str, Any], stack: tuple[str, ...]) -> Any:
@@ -152,14 +178,38 @@ def _unavailable(message: str, model: str) -> LLMUnavailableError:
     return LLMUnavailableError(message, provider=PROVIDER, model=model)
 
 
+def _enum_name(value: object) -> str:
+    """Return the REST spelling of an SDK enum member (or of a plain string)."""
+    name = getattr(value, "name", None)
+    return name if isinstance(name, str) else str(value)
+
+
+def _blocked_categories(ratings: list[types.SafetyRating] | None) -> str:
+    """Return ``" (HARM_CATEGORY_X, ...)"`` for the ratings that blocked, else ``""``."""
+    names = [_enum_name(r.category) for r in ratings or [] if r.blocked and r.category]
+    return f" ({', '.join(names)})" if names else ""
+
+
+def _blocked(summary: str, detail: str, model: str, usage: Usage) -> LLMInvalidOutputError:
+    return LLMInvalidOutputError(
+        describe(summary, model, None, detail),
+        errors=summary,
+        usage=usage,
+        provider=PROVIDER,
+        model=model,
+    )
+
+
 def _answer(
     response: types.GenerateContentResponse, model: str, *, structured: bool
 ) -> tuple[str, Usage]:
     """Return the answer text and usage of a ``generateContent`` response.
 
-    The answer is the joined non-thought text parts of the first candidate. A cut-off answer and
-    empty free text raise ``LLMUnavailableError`` (no answer text is put into the message); an
-    empty structured answer is returned as ``""``, which fails validation and is repaired once.
+    The answer is the joined non-thought text parts of the first candidate. A blocked prompt or
+    an answer stopped for a policy reason raises ``LLMInvalidOutputError`` (reason and blocked
+    categories only; the usage of the call is attached). A cut-off answer and empty free text
+    raise ``LLMUnavailableError``; no answer text is ever put into a message. An empty
+    structured answer is returned as ``""``, which fails validation and is repaired once.
     """
     metadata = response.usage_metadata
     usage = Usage(
@@ -167,14 +217,143 @@ def _answer(
         ((metadata.candidates_token_count if metadata else None) or 0)
         + ((metadata.thoughts_token_count if metadata else None) or 0),
     )
+    feedback = response.prompt_feedback
+    if feedback is not None and feedback.block_reason:
+        summary = (
+            f"Google blocked the prompt: {_enum_name(feedback.block_reason)}"
+            f"{_blocked_categories(feedback.safety_ratings)}"
+        )
+        raise _blocked(summary, sanitize_detail(feedback.block_reason_message or ""), model, usage)
     candidate = response.candidates[0] if response.candidates else None
-    if candidate is not None and candidate.finish_reason == types.FinishReason.MAX_TOKENS:
+    reason = candidate.finish_reason if candidate is not None else None
+    if candidate is not None and reason and reason not in _NOT_A_STOP:
+        summary = (
+            f"Google stopped the answer: {_enum_name(reason)}"
+            f"{_blocked_categories(candidate.safety_ratings)}"
+        )
+        raise _blocked(summary, "", model, usage)
+    if reason == types.FinishReason.MAX_TOKENS:
         raise _unavailable(describe("Google answer is incomplete: MAX_TOKENS", model, None), model)
     parts = candidate.content.parts if candidate and candidate.content else None
     text = "".join(part.text for part in parts or [] if part.text and not part.thought)
     if not text and not structured:
         raise _unavailable(describe("Google returned no answer text", model, None), model)
     return text, usage
+
+
+def _error_details(exc: errors.APIError) -> list[dict[str, Any]]:
+    """Return the ``error.details`` entries of the response body; ``[]`` if malformed.
+
+    ``exc.details`` is the whole parsed body (``{"error": {"details": [...]}}``).
+    """
+    body = exc.details
+    error = body.get("error") if isinstance(body, dict) else None
+    entries = error.get("details") if isinstance(error, dict) else None
+    if not isinstance(entries, list):
+        return []
+    return [entry for entry in entries if isinstance(entry, dict)]
+
+
+def _of_type(details: list[dict[str, Any]], suffix: str) -> list[dict[str, Any]]:
+    return [d for d in details if str(d.get("@type", "")).endswith(suffix)]
+
+
+def _retry_delay(details: list[dict[str, Any]]) -> float | None:
+    """Return the seconds of the first ``RetryInfo.retryDelay`` (``"7s"``, ``"0.500s"``)."""
+    for info in _of_type(details, "RetryInfo"):
+        raw = info.get("retryDelay")
+        if isinstance(raw, str) and _RETRY_DELAY.fullmatch(raw.removesuffix("s")):
+            delay = float(raw.removesuffix("s"))
+            return delay if math.isfinite(delay) else None
+        return None
+    return None
+
+
+def _is_quota_exhausted(details: list[dict[str, Any]]) -> bool:
+    """Return whether a ``QuotaFailure`` names a per-day quota or a quota of zero."""
+    for failure in _of_type(details, "QuotaFailure"):
+        violations = failure.get("violations")
+        for violation in violations if isinstance(violations, list) else []:
+            if not isinstance(violation, dict):
+                continue
+            quota_id = violation.get("quotaId")
+            if (isinstance(quota_id, str) and "PerDay" in quota_id) or (
+                str(violation.get("quotaValue")) == "0"
+            ):
+                return True
+    return False
+
+
+def _is_api_key_invalid(details: list[dict[str, Any]]) -> bool:
+    """Return whether an ``ErrorInfo`` reports a bad key (``API_KEY_INVALID``, ...)."""
+    return any(
+        isinstance(info.get("reason"), str) and info["reason"].startswith("API_KEY_")
+        for info in _of_type(details, "ErrorInfo")
+    )
+
+
+def _safe_detail(exc: errors.APIError) -> str:
+    """Return the provider's own ``error.message``, never ``str(exc)`` (it embeds the body)."""
+    message = exc.message
+    return sanitize_detail(message) if isinstance(message, str) else ""
+
+
+def _headers(exc: errors.APIError, delay: float | None) -> Mapping[str, str]:
+    """Return the response headers; a ``RetryInfo`` delay replaces any ``Retry-After``."""
+    response = exc.response
+    headers = dict(response.headers) if isinstance(response, httpx.Response) else {}
+    if delay is None:
+        return headers
+    kept = {name: value for name, value in headers.items() if name.lower() != "retry-after"}
+    return {**kept, "retry-after": f"{delay:f}"}
+
+
+def _classify_status(exc: errors.APIError, model: str, now: Callable[[], datetime]) -> Failure:
+    status = exc.code
+    if not isinstance(status, int):
+        return bad_response_failure(_LABEL, provider=PROVIDER, model=model, cause="")
+    details = _error_details(exc)
+    if status == _BAD_REQUEST and _is_api_key_invalid(details):
+        message = describe(f"{_LABEL} rejected the API key; check {_ENV_VAR}", model, status)
+        auth = LLMAuthError(message, provider=PROVIDER, model=model)
+        return Failure("auth", False, auth, status)
+    if status == _RATE_LIMITED and _is_quota_exhausted(details):
+        message = describe(
+            f"{_LABEL} quota exhausted; check plan, billing and daily limits", model, status
+        )
+        quota = LLMQuotaError(message, provider=PROVIDER, model=model)
+        return Failure("quota", False, quota, status)
+    return classify_status(
+        status,
+        label=_LABEL,
+        env_var=_ENV_VAR,
+        provider=PROVIDER,
+        model=model,
+        detail=_safe_detail(exc),
+        headers=_headers(exc, _retry_delay(details)),
+        now=now,
+    )
+
+
+def _classify(exc: Exception, model: str, now: Callable[[], datetime]) -> Failure | None:
+    """Map an SDK or transport exception to a ``Failure``; ``None`` if not recognized."""
+    if isinstance(exc, httpx.TimeoutException):
+        return timeout_failure(_LABEL, provider=PROVIDER, model=model)
+    if isinstance(exc, errors.APIError):
+        return _classify_status(exc, model, now)
+    if isinstance(exc, errors.UnknownApiResponseError | json.JSONDecodeError | httpx.DecodingError):
+        cause = f" ({type(exc).__name__})"
+        return bad_response_failure(_LABEL, provider=PROVIDER, model=model, cause=cause)
+    if isinstance(exc, httpx.HTTPError | httpx.InvalidURL):
+        return classify_transport(
+            exc,
+            label=_LABEL,
+            provider=PROVIDER,
+            model=model,
+            unsendable=_UNSENDABLE,
+            bad_response=_BAD_RESPONSE,
+        )
+    return None
 
 
 @register_provider(PROVIDER)
@@ -301,7 +480,7 @@ class GoogleProvider:
 
         return await run_with_retries(
             attempt,
-            classify=lambda exc, model, now: None,
+            classify=_classify,
             policy=self.retry,
             provider=PROVIDER,
             model=model,

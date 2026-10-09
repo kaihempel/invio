@@ -206,14 +206,14 @@ description: "Task list for the Google (Gemini) provider (issue #32)"
 
 ### Tests for User Story 2
 
-- [ ] T013 [P] [US2] Create the block fixtures in `tests/fixtures/google/` (status 200):
+- [X] T013 [P] [US2] Create the block fixtures in `tests/fixtures/google/` (status 200):
   - `blocked_prompt.json`: no `candidates`, `promptFeedback: {"blockReason": "SAFETY", "blockReasonMessage": "...", "safetyRatings": [{"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "probability": "HIGH", "blocked": true}]}`, usage `promptTokenCount: 12`.
   - `blocked_prompt_other.json`: `blockReason: "PROHIBITED_CONTENT"`, no ratings.
   - `stopped_safety.json`: a candidate with a partial text part `"PARTIAL-ANSWER-TEXT"`, `finishReason: "SAFETY"`, `safetyRatings` with one `blocked: true` category, usage 12/3.
   - `stopped_recitation.json`: `finishReason: "RECITATION"`.
   - `stopped_spii.json`: `finishReason: "SPII"`.
   - `text_max_tokens.json`: partial text, `finishReason: "MAX_TOKENS"`, usage 12/5 plus thoughts 30.
-- [ ] T014 [P] [US2] Create the error fixtures in `tests/fixtures/google/`, using Google's error body `{"error": {"code", "message", "status", "details": [...]}}`:
+- [X] T014 [P] [US2] Create the error fixtures in `tests/fixtures/google/`, using Google's error body `{"error": {"code", "message", "status", "details": [...]}}`:
   - `error_400.json`: `INVALID_ARGUMENT`, message `"Invalid JSON payload received."`.
   - `error_400_api_key_invalid.json`: `INVALID_ARGUMENT`, `"API key not valid. Please pass a valid API key."`, details `[{"@type": "type.googleapis.com/google.rpc.ErrorInfo", "reason": "API_KEY_INVALID", "domain": "googleapis.com"}]`.
   - `error_401.json`: `UNAUTHENTICATED`.
@@ -231,7 +231,7 @@ description: "Task list for the Google (Gemini) provider (issue #32)"
   - `malformed_200.json`: body `"<html>not json</html>"` with `content-type: text/html`.
 
   Error messages must not contain the test key, so the hygiene checks are meaningful. Add one fixture whose `message` echoes a fake prompt `"PROMPT-ECHO"`, to show that only the sanitized `error.message` is used and that it is truncated.
-- [ ] T015 [P] [US2] Add the block tests to `tests/test_llm_google.py`:
+- [X] T015 [P] [US2] Add the block tests to `tests/test_llm_google.py`:
   - **Blocked prompt.** For `complete` and `complete_structured`, `blocked_prompt` raises `LLMInvalidOutputError`:
     - the message contains `SAFETY` and `HARM_CATEGORY_DANGEROUS_CONTENT`, names `provider="google"` and the model, and does not contain the prompt or the user text;
     - `errors` contains the reason;
@@ -242,7 +242,7 @@ description: "Task list for the Google (Gemini) provider (issue #32)"
   - **Cut-off answer.** `text_max_tokens` raises `LLMUnavailableError` (not retried, no repair) for both operations.
   - **Empty free text.** `text_empty` and `no_candidates` raise `LLMUnavailableError` for `complete`.
   - **Log line.** The `llm.error` record, via `get_provider` with a test registry or the `_LoggedProvider` path, carries `input_tokens=12` for a blocked prompt.
-- [ ] T016 [US2] Add the error-mapping and retry tests to `tests/test_llm_google.py`, using `RetryPolicy(max_retries=2)` and the recorded `waits`:
+- [X] T016 [US2] Add the error-mapping and retry tests to `tests/test_llm_google.py`, using `RetryPolicy(max_retries=2)` and the recorded `waits`:
   - **Auth.**
     - `error_401`, `error_403` and `error_400_api_key_invalid` raise `LLMAuthError` naming `INVIO_GOOGLE_API_KEY`, after 1 request.
     - Plain `error_400` raises `LLMInvalidRequestError` with `status == 400`, after 1 request.
@@ -268,7 +268,7 @@ description: "Task list for the Google (Gemini) provider (issue #32)"
 
 ### Implementation for User Story 2
 
-- [ ] T017 [US2] In `src/invio/llm/google.py`, add the block handling to `_answer` (before the empty-text and `MAX_TOKENS` checks):
+- [X] T017 [US2] In `src/invio/llm/google.py`, add the block handling to `_answer` (before the empty-text and `MAX_TOKENS` checks):
   - **Blocked prompt.** If `response.prompt_feedback` has a `block_reason`, raise `LLMInvalidOutputError` with:
     - message `describe(f"Google blocked the prompt: {reason}{categories}", model, None, sanitize_detail(block_reason_message or ""))`;
     - `errors=<same reason text>`;
@@ -277,13 +277,13 @@ description: "Task list for the Google (Gemini) provider (issue #32)"
   - `<categories>` is `" (HARM_CATEGORY_X, ...)"`, built from the `safety_ratings` with `blocked` true, or empty.
   - Enum values are rendered by their `.name` (or the string value, per T002g).
   - Usage is computed first, so blocked calls report it.
-- [ ] T018 [US2] In `src/invio/llm/google.py`, add `_retry_delay(details) -> float | None`, which reads the first `RetryInfo.retryDelay` (`"<seconds>s"`, decimal allowed) from `error.details`. Add `_is_quota_exhausted(details) -> bool`, true if any `QuotaFailure` violation has `"PerDay"` in its `quotaId` or a `quotaValue` of `"0"`. Add `_is_api_key_invalid(details) -> bool` (`ErrorInfo.reason` starting with `"API_KEY_"`). Malformed or missing `details` give `None` / `False`, never an exception.
-- [ ] T019 [US2] In `src/invio/llm/google.py`, add `_safe_detail(exc: errors.APIError) -> str`. It returns `sanitize_detail(exc.message)` if `exc.message` is a `str`, else `""`. It never uses `str(exc)` or `exc.details` text.
-- [ ] T020 [US2] In `src/invio/llm/google.py`, add `_classify_status(exc: errors.APIError, model, now) -> Failure`:
+- [X] T018 [US2] In `src/invio/llm/google.py`, add `_retry_delay(details) -> float | None`, which reads the first `RetryInfo.retryDelay` (`"<seconds>s"`, decimal allowed) from `error.details`. Add `_is_quota_exhausted(details) -> bool`, true if any `QuotaFailure` violation has `"PerDay"` in its `quotaId` or a `quotaValue` of `"0"`. Add `_is_api_key_invalid(details) -> bool` (`ErrorInfo.reason` starting with `"API_KEY_"`). Malformed or missing `details` give `None` / `False`, never an exception.
+- [X] T019 [US2] In `src/invio/llm/google.py`, add `_safe_detail(exc: errors.APIError) -> str`. It returns `sanitize_detail(exc.message)` if `exc.message` is a `str`, else `""`. It never uses `str(exc)` or `exc.details` text.
+- [X] T020 [US2] In `src/invio/llm/google.py`, add `_classify_status(exc: errors.APIError, model, now) -> Failure`:
   - `exc.code` 400 with `_is_api_key_invalid` → `Failure("auth", False, LLMAuthError(describe(f"Google rejected the API key; check {_ENV_VAR}", model, 400), ...), 400)`.
   - 429 with `_is_quota_exhausted` → `Failure("quota", False, LLMQuotaError(describe("Google quota exhausted; check plan, billing and daily limits", model, 429), ...), 429)`.
   - Otherwise delegate to the shared `classify_status(...)` with `detail=_safe_detail(exc)`. Pass `headers`: the response headers, plus `{"retry-after": str(delay)}` when `_retry_delay` gives a value and no `Retry-After` header is present.
-- [ ] T021 [US2] In `src/invio/llm/google.py`, add `_classify(exc, model, now) -> Failure | None`, checked in this order:
+- [X] T021 [US2] In `src/invio/llm/google.py`, add `_classify(exc, model, now) -> Failure | None`, checked in this order:
   1. `httpx.TimeoutException` → `timeout_failure`.
   2. `errors.APIError` → `_classify_status`.
   3. `errors.UnknownApiResponseError | json.JSONDecodeError | httpx.DecodingError` → `bad_response_failure`.

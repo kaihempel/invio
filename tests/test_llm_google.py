@@ -1,9 +1,14 @@
 """Offline tests of the Google (Gemini) provider (recorded HTTP fixtures, no network, no key)."""
 
 import asyncio
+import json
+import logging
+from datetime import UTC, datetime
 from pathlib import Path
 
+import httpx
 import pytest
+from google.genai import errors as google_errors
 from pydantic import BaseModel
 
 from invio.graph.nodes.relevance import RelevanceResult
@@ -11,12 +16,19 @@ from invio.graph.nodes.summarize_item import ItemSummary
 from invio.llm.base import (
     LLMAuthError,
     LLMConfigError,
+    LLMError,
     LLMInvalidOutputError,
+    LLMInvalidRequestError,
+    LLMQuotaError,
+    LLMRateLimitError,
+    LLMUnavailableError,
     Usage,
 )
-from invio.llm.google import GoogleProvider, gemini_schema
-from invio.llm.registry import ModelRegistry, load_registry
-from tests.google_helpers import API_KEY, BASE_URL, Nested, make_provider
+from invio.llm.factory import _LoggedProvider
+from invio.llm.google import GoogleProvider, _classify, gemini_schema
+from invio.llm.http_retry import RetryPolicy
+from invio.llm.registry import ModelRegistry, default_registry, load_registry
+from tests.google_helpers import API_KEY, BASE_URL, FIXTURE_DIR, HANG, Nested, make_provider
 from tests.llm_helpers import Score, make_settings, write_registry
 
 SYSTEM = "You rate things."
@@ -26,6 +38,7 @@ SMART = "gemini-3.8-flash"
 MODEL = FAST
 FAST_ALLOWANCE = 1024
 SMART_ALLOWANCE = 4096
+NOW = datetime(2026, 10, 9, 12, 0, tzinfo=UTC)
 
 
 async def _complete(
@@ -339,3 +352,378 @@ async def test_concurrent_calls_in_one_loop_share_one_client() -> None:
 
     assert recorder.clients_created == 1
     await provider.aclose()
+
+
+# --- blocks (US2) ----------------------------------------------------------------------------
+
+
+async def _call(provider: GoogleProvider, operation: str) -> object:
+    if operation == "complete":
+        return await _complete(provider)
+    return await _structured(provider)
+
+
+OPERATIONS = ["complete", "structured"]
+
+
+@pytest.mark.parametrize("operation", OPERATIONS)
+async def test_blocked_prompt_raises_invalid_output_without_retry_or_repair(
+    operation: str,
+) -> None:
+    provider, recorder, waits = make_provider("blocked_prompt", "json_ok")
+
+    with pytest.raises(LLMInvalidOutputError) as info:
+        await _call(provider, operation)
+
+    error = info.value
+    assert "SAFETY" in str(error)
+    assert "HARM_CATEGORY_DANGEROUS_CONTENT" in str(error)
+    assert "HARM_CATEGORY_HARASSMENT" not in str(error)  # not blocked
+    assert MODEL in str(error)
+    assert (error.provider, error.model) == ("google", MODEL)
+    assert "SAFETY" in error.errors
+    assert error.usage == Usage(12, 0)
+    assert "PROMPT-TEXT-SENTINEL" not in str(error) + error.errors
+    assert len(recorder.requests) == 1
+    assert waits == []
+
+
+@pytest.mark.parametrize("operation", OPERATIONS)
+async def test_other_block_reasons_are_named(operation: str) -> None:
+    provider, recorder, _ = make_provider("blocked_prompt_other")
+
+    with pytest.raises(LLMInvalidOutputError, match="PROHIBITED_CONTENT"):
+        await _call(provider, operation)
+
+    assert len(recorder.requests) == 1
+
+
+@pytest.mark.parametrize("operation", OPERATIONS)
+@pytest.mark.parametrize(
+    ("fixture", "reason"),
+    [
+        ("stopped_safety", "SAFETY"),
+        ("stopped_recitation", "RECITATION"),
+        ("stopped_spii", "SPII"),
+    ],
+)
+async def test_stopped_answers_name_the_reason_and_hide_partial_text(
+    operation: str, fixture: str, reason: str
+) -> None:
+    provider, recorder, _ = make_provider(fixture, "json_ok")
+
+    with pytest.raises(LLMInvalidOutputError) as info:
+        await _call(provider, operation)
+
+    assert reason in str(info.value)
+    assert reason in info.value.errors
+    assert "PARTIAL-ANSWER-TEXT" not in str(info.value) + info.value.errors + repr(info.value)
+    assert info.value.usage == Usage(12, 3)
+    assert len(recorder.requests) == 1
+
+
+async def test_stopped_answer_names_blocked_categories() -> None:
+    provider, _, _ = make_provider("stopped_safety")
+
+    with pytest.raises(LLMInvalidOutputError, match="HARM_CATEGORY_HATE_SPEECH"):
+        await _complete(provider)
+
+
+@pytest.mark.parametrize("operation", OPERATIONS)
+async def test_cut_off_answer_is_unavailable_without_retry_or_repair(operation: str) -> None:
+    provider, recorder, _ = make_provider("text_max_tokens", "json_ok")
+
+    with pytest.raises(LLMUnavailableError, match="MAX_TOKENS") as info:
+        await _call(provider, operation)
+
+    assert "PARTIAL-ANSWER-TEXT" not in str(info.value)
+    assert len(recorder.requests) == 1
+
+
+@pytest.mark.parametrize("fixture", ["text_empty", "no_candidates"])
+async def test_empty_free_text_is_unavailable(fixture: str) -> None:
+    provider, recorder, _ = make_provider(fixture)
+
+    with pytest.raises(LLMUnavailableError, match="no answer text"):
+        await _complete(provider)
+
+    assert len(recorder.requests) == 1
+
+
+async def test_blocked_prompt_log_line_carries_the_input_tokens(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    provider, _, _ = make_provider("blocked_prompt")
+    logged = _LoggedProvider(provider, name="google", registry=default_registry())
+
+    with caplog.at_level(logging.INFO, logger="invio.llm"), pytest.raises(LLMInvalidOutputError):
+        await logged.complete(SYSTEM, USER, model=MODEL, temperature=0, max_tokens=5)
+
+    (record,) = [r for r in caplog.records if r.getMessage() == "llm.error"]
+    assert record.error == "LLMInvalidOutputError"  # type: ignore[attr-defined]
+    assert record.input_tokens == 12  # type: ignore[attr-defined]
+    assert "PROMPT-TEXT-SENTINEL" not in str([r.__dict__ for r in caplog.records])
+
+
+# --- error mapping and retries (US2) ---------------------------------------------------------
+
+RETRIES = RetryPolicy(max_retries=2)
+
+
+@pytest.mark.parametrize("fixture", ["error_401", "error_403", "error_400_api_key_invalid"])
+async def test_rejected_key_is_an_auth_error_after_one_request(fixture: str) -> None:
+    provider, recorder, waits = make_provider(fixture, "text_ok", retry=RETRIES)
+
+    with pytest.raises(LLMAuthError, match="INVIO_GOOGLE_API_KEY") as info:
+        await _complete(provider)
+
+    assert (info.value.provider, info.value.model) == ("google", MODEL)
+    assert len(recorder.requests) == 1
+    assert waits == []
+
+
+@pytest.mark.parametrize("fixture", ["error_400", "error_404_model"])
+async def test_rejected_request_is_not_retried(fixture: str) -> None:
+    provider, recorder, _ = make_provider(fixture, "text_ok", retry=RETRIES)
+
+    with pytest.raises(LLMInvalidRequestError) as info:
+        await _complete(provider)
+
+    assert info.value.status == (400 if fixture == "error_400" else 404)
+    assert len(recorder.requests) == 1
+
+
+@pytest.mark.parametrize(
+    ("fixture", "wait"),
+    [
+        ("error_429_retry_delay", 7.0),
+        ("error_429_retry_after_header", 3.0),
+        ("error_429_bare", 1.0),
+    ],
+)
+async def test_rate_limit_is_retried_after_the_hinted_wait(fixture: str, wait: float) -> None:
+    provider, recorder, waits = make_provider(fixture, "text_ok", retry=RETRIES)
+
+    text, _ = await _complete(provider)
+
+    assert text == "Hello"
+    assert waits == [wait]
+    assert len(recorder.requests) == 2
+
+
+async def test_retry_info_wins_over_the_retry_after_header() -> None:
+    response = httpx.Response(
+        429,
+        headers={"retry-after": "3"},
+        json=json.loads((FIXTURE_DIR / "error_429_retry_delay.json").read_text())["body"],
+    )
+    provider, _, waits = make_provider(response, "text_ok", retry=RETRIES)
+
+    await _complete(provider)
+
+    assert waits == [7.0]
+
+
+async def test_fractional_retry_delay_is_honoured() -> None:
+    body = {
+        "error": {
+            "code": 429,
+            "message": "slow down",
+            "status": "RESOURCE_EXHAUSTED",
+            "details": [
+                {"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "0.500s"}
+            ],
+        }
+    }
+    provider, _, waits = make_provider(httpx.Response(429, json=body), "text_ok", retry=RETRIES)
+
+    await _complete(provider)
+
+    assert waits == [0.5]
+
+
+async def test_exhausted_rate_limit_raises_with_the_last_hint() -> None:
+    provider, recorder, waits = make_provider(*["error_429_retry_delay"] * 3, retry=RETRIES)
+
+    with pytest.raises(LLMRateLimitError) as info:
+        await _complete(provider)
+
+    assert not isinstance(info.value, LLMQuotaError)
+    assert info.value.retry_after == 7.0
+    assert len(recorder.requests) == 3
+    assert waits == [7.0, 7.0]
+
+
+async def test_retry_delay_above_the_cap_fails_at_once() -> None:
+    provider, recorder, waits = make_provider("error_429_retry_delay_long", retry=RETRIES)
+
+    with pytest.raises(LLMRateLimitError) as info:
+        await _complete(provider)
+
+    assert info.value.retry_after == 3600.0
+    assert len(recorder.requests) == 1
+    assert waits == []
+
+
+@pytest.mark.parametrize("fixture", ["error_429_daily_quota", "error_429_zero_quota"])
+async def test_exhausted_quota_is_not_retried(fixture: str) -> None:
+    provider, recorder, waits = make_provider(fixture, "text_ok", retry=RETRIES)
+
+    with pytest.raises(LLMQuotaError) as info:
+        await _complete(provider)
+
+    assert isinstance(info.value, LLMRateLimitError)
+    assert info.value.retry_after is None
+    assert len(recorder.requests) == 1
+    assert waits == []
+
+
+@pytest.mark.parametrize("fixture", ["error_500", "error_503", "error_504"])
+async def test_server_errors_are_retried_then_unavailable(fixture: str) -> None:
+    provider, recorder, waits = make_provider(*[fixture] * 3, retry=RETRIES)
+
+    with pytest.raises(LLMUnavailableError):
+        await _complete(provider)
+
+    assert len(recorder.requests) == 3
+    assert waits == [1.0, 2.0]
+
+
+async def test_server_error_followed_by_success() -> None:
+    provider, _, _ = make_provider("error_503", "text_ok", retry=RETRIES)
+
+    assert (await _complete(provider))[0] == "Hello"
+
+
+async def test_connect_error_is_retried_then_unavailable() -> None:
+    provider, recorder, _ = make_provider(*[httpx.ConnectError("down")] * 3, retry=RETRIES)
+
+    with pytest.raises(LLMUnavailableError, match="connection failed"):
+        await _complete(provider)
+
+    assert len(recorder.requests) == 3
+
+
+async def test_read_timeout_is_not_retried() -> None:
+    provider, recorder, _ = make_provider(httpx.ReadTimeout("slow"), "text_ok", retry=RETRIES)
+
+    with pytest.raises(LLMUnavailableError, match="timed out"):
+        await _complete(provider)
+
+    assert len(recorder.requests) == 1
+
+
+async def test_hanging_request_hits_the_call_deadline() -> None:
+    provider, recorder, _ = make_provider(HANG, "text_ok", retry=RETRIES, timeout_seconds=0.05)
+
+    with pytest.raises(LLMUnavailableError):
+        await _complete(provider)
+
+    assert len(recorder.requests) == 1
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [httpx.InvalidURL("bad"), httpx.LocalProtocolError("bad"), httpx.UnsupportedProtocol("x")],
+)
+async def test_unsendable_request_is_not_retried(exc: Exception) -> None:
+    provider, recorder, _ = make_provider(exc, "text_ok", retry=RETRIES)
+
+    with pytest.raises(LLMUnavailableError, match="could not be sent"):
+        await _complete(provider)
+
+    assert len(recorder.requests) == 1
+
+
+async def test_non_json_answer_is_unavailable_without_retry() -> None:
+    provider, recorder, _ = make_provider("malformed_200", "text_ok", retry=RETRIES)
+
+    with pytest.raises(LLMUnavailableError, match="unexpected response"):
+        await _complete(provider)
+
+    assert len(recorder.requests) == 1
+
+
+async def test_decoding_error_is_an_unexpected_response() -> None:
+    provider, recorder, _ = make_provider(httpx.DecodingError("bad gzip"), "text_ok")
+
+    with pytest.raises(LLMUnavailableError, match="unexpected response"):
+        await _complete(provider)
+
+    assert len(recorder.requests) == 1
+
+
+async def test_unknown_exceptions_propagate_unchanged() -> None:
+    provider, _, _ = make_provider(RuntimeError("boom"))
+
+    with pytest.raises(RuntimeError, match="boom"):
+        await _complete(provider)
+
+
+def test_classify_ignores_unrecognized_exceptions() -> None:
+    assert _classify(RuntimeError("x"), MODEL, lambda: NOW) is None
+
+
+ERROR_FIXTURES = [
+    "error_400",
+    "error_400_api_key_invalid",
+    "error_400_echo",
+    "error_401",
+    "error_403",
+    "error_404_model",
+    "error_429_bare",
+    "error_429_daily_quota",
+    "error_429_zero_quota",
+    "error_429_retry_delay_long",
+    "error_500",
+    "error_503",
+    "error_504",
+    "malformed_200",
+    "blocked_prompt",
+    "stopped_safety",
+    "text_max_tokens",
+    "text_empty",
+]
+
+
+@pytest.mark.parametrize("fixture", ERROR_FIXTURES)
+async def test_errors_and_logs_leak_nothing(fixture: str, caplog: pytest.LogCaptureFixture) -> None:
+    provider, _, _ = make_provider(fixture, retry=RetryPolicy(max_retries=0))
+
+    with caplog.at_level(logging.DEBUG, logger="invio"), pytest.raises(LLMError) as info:
+        await _complete(provider)
+
+    error = info.value
+    text = str(error) + repr(error) + getattr(error, "errors", "")
+    assert MODEL in str(error)
+    for secret in (API_KEY, SYSTEM, USER, "PROMPT-ECHO", "PARTIAL-ANSWER-TEXT", '{"error"'):
+        assert secret not in text
+        assert secret not in str([r.__dict__ for r in caplog.records])
+    for chained in (error.__cause__, error.__context__):
+        assert chained is None or not isinstance(chained, google_errors.APIError)
+
+
+async def test_error_detail_is_truncated() -> None:
+    provider, _, _ = make_provider("error_400_echo")
+
+    with pytest.raises(LLMInvalidRequestError) as info:
+        await _complete(provider)
+
+    assert "bad request" in str(info.value)
+    assert len(str(info.value)) < 500
+
+
+async def test_retry_log_carries_only_the_known_fields(caplog: pytest.LogCaptureFixture) -> None:
+    provider, _, _ = make_provider("error_429_retry_delay", "error_503", "text_ok", retry=RETRIES)
+
+    with caplog.at_level(logging.WARNING, logger="invio.llm"):
+        await _complete(provider)
+
+    first, second = [r for r in caplog.records if r.getMessage() == "llm.retry"]
+    assert (first.provider, first.model, first.attempt) == ("google", MODEL, 1)  # type: ignore[attr-defined]
+    assert (first.status, first.failure, first.wait_s) == (429, "rate_limit", 7.0)  # type: ignore[attr-defined]
+    assert (second.attempt, second.status, second.failure) == (2, 503, "server")  # type: ignore[attr-defined]
+    dump = str([r.__dict__ for r in caplog.records])
+    assert API_KEY not in dump
+    assert "PROMPT-TEXT-SENTINEL" not in dump
+    assert all(r.exc_info is None for r in caplog.records)
