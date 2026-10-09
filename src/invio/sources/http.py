@@ -372,6 +372,19 @@ class SafeHttpClient:
         """
         await self._guard(self._parse(url))
 
+    async def robots_sitemaps(self, url: str) -> tuple[str, ...]:
+        """The ``Sitemap:`` URLs announced by the robots.txt of ``url``'s origin.
+
+        Uses the cached policy (robots.txt is fetched once per origin, shared with :meth:`get`)
+        and works with ``respect_robots=False`` too. Never raises: a robots.txt that is
+        missing, unreadable or refused, a refused target or an invalid ``url`` give ``()``.
+        """
+        try:
+            target = await self._guard(self._parse(url))
+        except FetchError:
+            return ()
+        return (await self._robots.policy(target.origin)).sitemaps
+
     @asynccontextmanager
     async def admission(self, url: str) -> AsyncIterator[None]:
         """Admit a fetch made outside the client (a browser navigation) to ``url``.

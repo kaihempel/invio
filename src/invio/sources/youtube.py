@@ -48,11 +48,13 @@ from invio.config.job import (
     parse_youtube_channel,
     parse_youtube_playlist,
 )
+from invio.config.settings import Settings
 from invio.domain import Candidate, url_hash
 from invio.sources.errors import FetchError
 from invio.sources.freshness import age_cutoff, clamp_or_expire
+from invio.sources.text import collapse
 
-__all__ = ["Extractor", "YoutubeSource"]
+__all__ = ["Extractor", "ListingSummary", "YoutubeSource"]
 
 type Extractor = Callable[[str, Mapping[str, object]], Mapping[str, object]]
 """``(listing_url, yt_dlp_options) -> info mapping``; blocking, runs in a worker thread."""
@@ -69,6 +71,8 @@ _PLACEHOLDER_TITLES: Final = frozenset({"[Private video]", "[Deleted video]"})
 _HIDDEN_AVAILABILITY: Final = frozenset(
     {"private", "needs_auth", "subscriber_only", "premium_only"}
 )
+
+_DESCRIBE_ITEMS: Final = 5
 
 _Kind = Literal["channel_id", "handle", "playlist_id"]
 
@@ -102,6 +106,15 @@ class _Video:
     @property
     def url(self) -> str:
         return f"https://www.youtube.com/watch?v={self.id}"
+
+
+@dataclass(frozen=True, slots=True)
+class ListingSummary:
+    """What :meth:`YoutubeSource.describe` learned about a channel or playlist."""
+
+    title: str | None
+    entry_count: int
+    newest: datetime | None
 
 
 class _NullLogger:
@@ -146,6 +159,16 @@ class YoutubeSource:
         self._executor = ThreadPoolExecutor(_MAX_WORKERS, thread_name_prefix="invio-youtube")
         self._closed = False
 
+    @classmethod
+    def from_settings(cls, settings: Settings) -> Self:
+        """The adapter configured from ``settings`` (blank cookies/proxy are already ``None``)."""
+        proxy = settings.youtube_proxy
+        return cls(
+            cookies_file=settings.youtube_cookies_file,
+            proxy=proxy.get_secret_value() if proxy is not None else None,
+            timeout=settings.youtube_timeout_seconds,
+        )
+
     def close(self) -> None:
         """Shut the worker pool down without waiting for (possibly hung) extractions."""
         self._closed = True
@@ -160,28 +183,8 @@ class YoutubeSource:
         network or HTTP-level failure, an unusable result or an unreadable cookies file.
         Raises :class:`RuntimeError` after :meth:`close`.
         """
-        if self._closed:
-            raise RuntimeError("YoutubeSource is closed")
-        locator = _Locator.from_config(config)
-        url = locator.listing_url()
-        self._check_cookies(url)
-        options = self._options(config.max_items)
-        loop = asyncio.get_running_loop()
-        try:
-            info = await asyncio.wait_for(
-                loop.run_in_executor(self._executor, partial(self._extract, url, options)),
-                self._timeout,
-            )
-        except FetchError:
-            raise
-        except TimeoutError:
-            _log.warning("source.youtube_failed", extra={"error": "TimeoutError"})
-            raise FetchError("timeout", url=url) from None
-        except Exception as exc:
-            _log.warning("source.youtube_failed", extra={"error": type(exc).__name__})
-            reason, status = _classify_safely(exc)
-            raise FetchError(reason, url=url, status=status) from None
-
+        url = _Locator.from_config(config).listing_url()
+        info = await self._extract_info(url, config.max_items)
         videos = _videos(_entries(info, url))
         now = self._now()
         cutoff = age_cutoff(now, config.max_age_days)
@@ -202,6 +205,42 @@ class YoutubeSource:
             )
             for video in _newest_first(kept)[: config.max_items]
         ]
+
+    async def describe(
+        self, config: YoutubeChannelSource | YoutubePlaylistSource, /
+    ) -> ListingSummary:
+        """Title, size and newest date of the first few listed videos (for source discovery).
+
+        Same extraction, limits and errors as :meth:`fetch`, but only ``_DESCRIBE_ITEMS`` entries
+        are listed. Raises :class:`RuntimeError` after :meth:`close`.
+        """
+        url = _Locator.from_config(config).listing_url()
+        info = await self._extract_info(url, _DESCRIBE_ITEMS)
+        videos = _videos(_entries(info, url))
+        dates = [video.published for video in videos if video.published is not None]
+        return ListingSummary(_listing_title(info), len(videos), max(dates, default=None))
+
+    async def _extract_info(self, url: str, max_items: int) -> object:
+        """Run the extractor for the listing ``url`` on the worker pool under the hard timeout."""
+        if self._closed:
+            raise RuntimeError("YoutubeSource is closed")
+        self._check_cookies(url)
+        options = self._options(max_items)
+        loop = asyncio.get_running_loop()
+        try:
+            return await asyncio.wait_for(
+                loop.run_in_executor(self._executor, partial(self._extract, url, options)),
+                self._timeout,
+            )
+        except FetchError:
+            raise
+        except TimeoutError:
+            _log.warning("source.youtube_failed", extra={"error": "TimeoutError"})
+            raise FetchError("timeout", url=url) from None
+        except Exception as exc:
+            _log.warning("source.youtube_failed", extra={"error": type(exc).__name__})
+            reason, status = _classify_safely(exc)
+            raise FetchError(reason, url=url, status=status) from None
 
     def _check_cookies(self, url: str) -> None:
         path = self._cookies_file
@@ -229,6 +268,17 @@ class YoutubeSource:
         if self._proxy:
             options["proxy"] = self._proxy
         return options
+
+
+def _listing_title(info: object) -> str | None:
+    """The listing's own title, else its ``channel`` or ``uploader``; whitespace collapsed."""
+    if not isinstance(info, Mapping):
+        return None
+    for key in ("title", "channel", "uploader"):
+        value = info.get(key)
+        if isinstance(value, str) and (text := collapse(value)):
+            return text
+    return None
 
 
 def _newest_first(videos: list[_Video]) -> list[_Video]:

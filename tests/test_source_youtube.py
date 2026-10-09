@@ -8,13 +8,16 @@ from pathlib import Path
 import pytest
 
 from invio.config.job import YoutubePlaylistSource
+from invio.config.settings import Settings
 from invio.domain import Candidate, url_hash
 from invio.sources.base import Source
 from invio.sources.errors import FetchError, is_transient_fetch
+from invio.sources.youtube import ListingSummary, YoutubeSource
 from tests.youtube_helpers import (
     LISTING_URL,
     NOW,
     PROXY,
+    RAW_MESSAGE,
     FakeExtractor,
     channel,
     entry,
@@ -452,3 +455,110 @@ async def test_unreadable_cookies_file_fails(tmp_path: Path) -> None:
 
     assert info.value.reason == "cookies_unavailable"
     assert extract.calls == []
+
+
+# --- from_settings -----------------------------------------------------------------------------
+
+
+def test_from_settings_passes_cookies_proxy_and_timeout_through(tmp_path: Path) -> None:
+    cookies = tmp_path / "cookies.txt"
+    settings = Settings(
+        _env_file=None,
+        youtube_cookies_file=cookies,
+        youtube_proxy=PROXY,  # type: ignore[arg-type]
+        youtube_timeout_seconds=12.5,
+    )
+
+    adapter = YoutubeSource.from_settings(settings)
+    try:
+        assert adapter._cookies_file == cookies
+        assert adapter._proxy == PROXY  # the secret is unwrapped
+        assert adapter._timeout == 12.5
+        assert adapter._options(5)["proxy"] == PROXY
+    finally:
+        adapter.close()
+
+
+def test_from_settings_defaults_have_no_cookies_or_proxy() -> None:
+    adapter = YoutubeSource.from_settings(Settings(_env_file=None))
+    try:
+        assert adapter._cookies_file is None
+        assert adapter._proxy is None
+    finally:
+        adapter.close()
+
+
+# --- describe ----------------------------------------------------------------------------------
+
+
+async def test_describe_reads_title_count_and_newest_from_the_listing() -> None:
+    extract = FakeExtractor(
+        {
+            "title": "  Some   Channel ",
+            **listing(
+                entry("a", "Old", timestamp=1_772_000_000),
+                entry("b", "New", timestamp=1_773_000_000),
+                entry("c", "Undated"),
+            ),
+        }
+    )
+
+    summary = await source(extract).describe(channel("@creator"))
+
+    assert summary == ListingSummary("Some Channel", 3, datetime.fromtimestamp(1_773_000_000, UTC))
+    [(url, options)] = extract.calls
+    assert url == "https://www.youtube.com/@creator/videos"
+    assert options["playlistend"] == 5
+
+
+@pytest.mark.parametrize(
+    ("info", "title"),
+    [
+        ({"channel": "Chan", "uploader": "Up"}, "Chan"),
+        ({"uploader": "Up"}, "Up"),
+        ({"title": "  ", "uploader": "Up"}, "Up"),
+        ({"title": 7}, None),
+        ({}, None),
+    ],
+)
+async def test_describe_falls_back_to_channel_then_uploader(
+    info: dict[str, object], title: str | None
+) -> None:
+    extract = FakeExtractor(info | listing(entry("a")))
+
+    summary = await source(extract).describe(playlist())
+
+    assert summary.title == title
+
+
+async def test_describe_undated_or_empty_listings_have_no_newest() -> None:
+    undated = await source(FakeExtractor(listing(entry("a")))).describe(channel())
+    empty = await source(FakeExtractor(listing())).describe(channel())
+
+    assert (undated.entry_count, undated.newest) == (1, None)
+    assert (empty.entry_count, empty.newest) == (0, None)
+
+
+async def test_describe_maps_extractor_failures_to_fetch_errors() -> None:
+    extract = FakeExtractor(exc=RuntimeError(RAW_MESSAGE))
+
+    with pytest.raises(FetchError) as info:
+        await source(extract).describe(channel())
+
+    assert info.value.url == LISTING_URL
+    assert RAW_MESSAGE not in str(info.value)
+
+
+async def test_describe_without_entries_is_an_invalid_response() -> None:
+    with pytest.raises(FetchError) as info:
+        await source(FakeExtractor({"title": "x"})).describe(channel())
+
+    assert info.value.reason == "invalid_response"
+
+
+async def test_describe_after_close_raises() -> None:
+    adapter = source(FakeExtractor())
+    adapter.close()
+
+    with pytest.raises(RuntimeError, match="closed"):
+        await adapter.describe(channel())

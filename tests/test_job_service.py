@@ -26,7 +26,12 @@ from invio.config.job import (
     JobConfig,
     JobConfigError,
     JobYamlLoader,
+    RssSource,
     ScheduleConfig,
+    SitemapSource,
+    SourceConfig,
+    YoutubeChannelSource,
+    YoutubePlaylistSource,
     load_yaml,
     validate_job,
     write_yaml,
@@ -45,6 +50,7 @@ from invio.services.jobs import (
     JobRecord,
     JobService,
     JobSummary,
+    SourceExistsError,
     StoredJobConfigError,
     check_job_name,
 )
@@ -156,7 +162,7 @@ def test_create_race_integrity_error(
     job_service: JobService, job_data: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     job_service.create("ai-news", job_data)
-    monkeypatch.setattr(JobRepository, "get_by_name", lambda self, name: None)
+    monkeypatch.setattr(JobRepository, "get_by_name", lambda self, name, **_: None)
     with pytest.raises(JobExistsError) as info:
         job_service.create("ai-news", job_data)
     assert info.value.name == "ai-news"
@@ -692,7 +698,7 @@ def test_create_race_leaves_existing_job_unchanged(
     fake_clock.advance(timedelta(days=1))
     other = {**job_data, "schedule": {**job_data["schedule"], "time": "01:00"}}
     with monkeypatch.context() as m:
-        m.setattr(JobRepository, "get_by_name", lambda self, name: None)
+        m.setattr(JobRepository, "get_by_name", lambda self, name, **_: None)
         with pytest.raises(JobExistsError) as info:
             job_service.create("ai-news", other)
     # FR-020: the storage error is only the chained cause, never the raised type.
@@ -993,6 +999,7 @@ def test_storage_failure_on_commit_leaves_store_unchanged(
         pytest.param(JobNotFoundError("x"), id="not-found"),
         pytest.param(JobNameError("x", "must not be empty"), id="name"),
         pytest.param(StoredJobConfigError("x", ["a: bad"]), id="stored-config"),
+        pytest.param(SourceExistsError("x", "rss"), id="source-exists"),
     ],
 )
 def test_errors_survive_pickle_and_copy(error: Exception) -> None:
@@ -1165,3 +1172,165 @@ def test_check_job_name_is_public() -> None:
     with pytest.raises(JobNameError) as info:
         check_job_name(" x")
     assert info.value.rule == "must not have leading or trailing whitespace"
+
+
+# --- append_source ---------------------------------------------------------------------------
+
+NEW_FEED = RssSource(type="rss", url="https://blog.example.org/feed.xml")
+
+
+def _only_one_source(config: Any) -> JobConfig:
+    """Stands in for ``_validate``: refuses a job with more than one source."""
+    if len(config["sources"]) > 1:
+        raise JobConfigError(None, ["sources: too many sources"])
+    return validate_job(config)
+
+
+def test_append_source_adds_it_last_and_keeps_the_rest(
+    job_service: JobService, job_data: dict[str, Any]
+) -> None:
+    before = job_service.create("j", job_data)
+
+    record = job_service.append_source("j", NEW_FEED)
+
+    assert [s.model_dump(mode="json") for s in record.config.sources[:-1]] == [
+        s.model_dump(mode="json") for s in before.config.sources
+    ]
+    assert record.config.sources[-1] == NEW_FEED
+    assert record.config.model_copy(update={"sources": before.config.sources}) == before.config
+    assert job_service.get_by_name("j") == record
+
+
+def test_append_source_recalculates_next_run_for_enabled_jobs_only(
+    job_service: JobService,
+    job_data: dict[str, Any],
+    fake_clock: FakeClock,
+    next_run_calls: NextRunCalls,
+) -> None:
+    job_service.create("on", job_data)
+    job_service.create("off", job_data)
+    job_service.set_enabled("off", False)
+    fake_clock.advance(timedelta(days=1))
+    next_run_calls.clear()
+
+    enabled = job_service.append_source("on", NEW_FEED)
+    disabled = job_service.append_source("off", NEW_FEED)
+
+    assert enabled.next_run_at == fake_clock.now + timedelta(hours=1)
+    assert disabled.next_run_at is None
+    assert len(next_run_calls) == 1
+
+
+def test_append_source_unknown_job(job_service: JobService) -> None:
+    with pytest.raises(JobNotFoundError):
+        job_service.append_source("missing", NEW_FEED)
+
+
+def test_append_source_to_an_invalid_stored_job_writes_nothing(
+    job_service: JobService, store: Callable[[], Any]
+) -> None:
+    with store() as s:
+        s.add(Job(name="broken", config={"bogus": 1}))
+    before = _stored_job(store, "broken")
+
+    with pytest.raises(StoredJobConfigError):
+        job_service.append_source("broken", NEW_FEED)
+
+    assert _stored_job(store, "broken") == before
+
+
+@pytest.mark.parametrize(
+    ("existing", "source"),
+    [
+        pytest.param(
+            {"type": "rss", "url": "https://example.com/feed.xml"},
+            RssSource(type="rss", url="https://example.com/feed.xml?utm_source=x"),
+            id="rss-tracking-param",
+        ),
+        pytest.param(
+            {"type": "sitemap", "url": "https://example.com/sitemap.xml"},
+            SitemapSource(type="sitemap", url="https://EXAMPLE.com:443/sitemap.xml"),
+            id="sitemap-canonical",
+        ),
+        pytest.param(
+            {"type": "youtube_channel", "channel_id": "@Creator"},
+            YoutubeChannelSource(
+                type="youtube_channel", channel_id="https://www.youtube.com/@creator/videos"
+            ),
+            id="channel-handle-case",
+        ),
+        pytest.param(
+            {"type": "youtube_channel", "channel_id": "UCabc"},
+            YoutubeChannelSource(
+                type="youtube_channel", channel_id="https://www.youtube.com/channel/UCabc"
+            ),
+            id="channel-id-url",
+        ),
+        pytest.param(
+            {"type": "youtube_playlist", "playlist_id": "PL1"},
+            YoutubePlaylistSource(
+                type="youtube_playlist", playlist_id="https://www.youtube.com/playlist?list=PL1"
+            ),
+            id="playlist-url",
+        ),
+    ],
+)
+def test_append_source_refuses_a_source_the_job_has(
+    job_service: JobService,
+    job_data: dict[str, Any],
+    existing: dict[str, Any],
+    source: SourceConfig,
+) -> None:
+    job_data["sources"] = [existing]
+    job_service.create("j", job_data)
+    before = job_service.stored_config("j")
+
+    with pytest.raises(SourceExistsError) as info:
+        job_service.append_source("j", source)
+
+    assert info.value.name == "j"
+    assert info.value.source_type == source.type
+    assert not isinstance(info.value, JobConfigError)
+    assert job_service.stored_config("j") == before
+
+
+def test_append_source_same_url_of_another_type_is_not_a_duplicate(
+    job_service: JobService, job_data: dict[str, Any]
+) -> None:
+    job_data["sources"] = [{"type": "rss", "url": "https://example.com/feed.xml"}]
+    job_service.create("j", job_data)
+
+    record = job_service.append_source(
+        "j", SitemapSource(type="sitemap", url="https://example.com/feed.xml")
+    )
+
+    assert [s.type for s in record.config.sources] == ["rss", "sitemap"]
+
+
+def test_append_source_that_breaks_validation_changes_nothing(
+    job_service: JobService, job_data: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    job_service.create("j", job_data)
+    before = job_service.stored_config("j")
+    monkeypatch.setattr("invio.services.jobs._validate", _only_one_source)
+
+    with pytest.raises(JobConfigError) as info:
+        job_service.append_source("j", NEW_FEED)
+
+    assert "too many sources" in str(info.value)
+    assert job_service.stored_config("j") == before
+
+
+def test_append_source_logs_one_update_without_the_configuration(
+    job_service: JobService, job_data: dict[str, Any], caplog: pytest.LogCaptureFixture
+) -> None:
+    job_service.create("j", job_data)
+    caplog.set_level(logging.INFO, logger="invio.services.jobs")
+    caplog.clear()
+
+    job_service.append_source("j", NEW_FEED)
+
+    [record] = _service_records(caplog)
+    assert (record.__dict__["event"], record.__dict__["job_name"]) == ("job.updated", "j")
+    assert "blog.example.org" not in record.getMessage()
+    assert "blog.example.org" not in str(record.__dict__)

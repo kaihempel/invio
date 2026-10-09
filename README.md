@@ -431,6 +431,35 @@ already exists, invalid name, aborted, declined preview or delete, aborted edit;
 file or stored config, missing or unusable setting (database URL, model registry), or an
 interactive command without a terminal.
 
+### Finding sources: `invio source discover`
+
+```bash
+invio source discover URL [--add-to JOB [--pick N]]
+```
+
+Looks for what a website offers and prints each source as a numbered entry with title, newest
+entry date and a YAML snippet for the `sources:` list of a job. `URL` may be a site, a page, a
+feed, a sitemap or a YouTube channel or playlist (`example.com` means `https://example.com`).
+It searches the feeds the page announces (`<link rel="alternate">`), the common locations
+(`/feed`, `/rss`, `/atom.xml`, `/sitemap.xml`) at the site root and in the page's folder, the
+`Sitemap:` entries of `robots.txt` (first 5), and YouTube channel and playlist links on the page.
+Every candidate is fetched and parsed before it is offered; failures are listed on stderr as
+`Not offered: <url>: <reason>`. Comment feeds come last, marked `(comments)`. Entering a YouTube
+channel or playlist address directly makes no HTTP request, only the YouTube listing is read.
+
+`--add-to JOB` appends one source to an existing job after the whole job validates again (needs
+`INVIO_DATABASE_URL`). With a terminal you pick from a list (or cancel); without one the single
+candidate is added, and `--pick N` chooses candidate `N` of several. A source the job already
+has is left alone. `--pick` needs `--add-to`.
+
+All requests go through the safe HTTP client: private and internal addresses are refused,
+`robots.txt` is honoured, size and rate limits apply.
+
+Exit codes: `0` at least one source found (and, with `--add-to`, added, already present or
+cancelled); `1` nothing found, job not found, `--pick` out of range, several candidates without
+`--pick` in a script; `2` invalid usage, configuration or stored job, or a job that no longer
+validates with the new source (nothing is saved).
+
 ## LLM layer
 
 `invio.llm` is the provider-neutral LLM contract used by pipeline nodes. A provider offers

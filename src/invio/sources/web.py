@@ -29,7 +29,14 @@ from invio.sources.http import FetchResult, NotModified, SafeHttpClient, charset
 from invio.sources.text import node_text, parse_html, readable, teaser
 from invio.sources.urls import canonical_url, http_url_or_none
 
-__all__ = ["PageRenderer", "RenderedPage", "WebPageSource"]
+__all__ = [
+    "PageRenderer",
+    "RenderedPage",
+    "WebPageSource",
+    "decode_html",
+    "html_base_url",
+    "is_html",
+]
 
 _HTML_TYPES: Final = frozenset({"text/html", "application/xhtml+xml"})
 _BOMS: Final = (
@@ -171,9 +178,9 @@ class WebPageSource:
         result = await self._client.get(url)
         if isinstance(result, NotModified):
             return []
-        if not _is_html(result.headers, result.content):
+        if not is_html(result.headers, result.content):
             raise FetchError("not_html", url=url)
-        return _candidates(config, _decode(result), final_url=result.url)
+        return _candidates(config, decode_html(result), final_url=result.url)
 
     async def _fetch_rendered(self, config: WebSource) -> list[Candidate]:
         url = str(config.url)
@@ -243,7 +250,7 @@ def _candidates(config: WebSource, html: str, *, final_url: str) -> list[Candida
     ]
 
 
-def _decode(result: FetchResult) -> str:
+def decode_html(result: FetchResult) -> str:
     """Decode the body: BOM, then the header charset, then ``<meta>``, then UTF-8.
 
     The HTML standard's precedence without heuristics. Invalid bytes are replaced, so the same
@@ -284,7 +291,7 @@ def _web_encoding(label: str) -> str | None:
     return name if _WEB_ENCODINGS.fullmatch(name) else None
 
 
-def _is_html(headers: Mapping[str, str], content: bytes) -> bool:
+def is_html(headers: Mapping[str, str], content: bytes) -> bool:
     """HTML by ``Content-Type``; without one, by the start of the body (MIME sniffing).
 
     The start may follow a BOM (a UTF-16 body is read as such) and whitespace, and is a
@@ -360,7 +367,7 @@ def _links(
     and either matches ``url_pattern`` (searched in the absolute URL, any host) or, without a
     pattern, is on the host of ``final_url``. The first occurrence of a URL wins.
     """
-    base = _base_url(tree, final_url)
+    base = html_base_url(tree, final_url)
     pattern = re.compile(url_pattern) if url_pattern is not None else None
     host = urlsplit(final_url).hostname  # lower-cased
     seen = set(page_urls)
@@ -408,7 +415,7 @@ def _anchors(regions: Sequence[LexborNode]) -> Iterator[LexborNode]:
         yield from region.css("a[href]")
 
 
-def _base_url(tree: LexborHTMLParser, final_url: str) -> str:
+def html_base_url(tree: LexborHTMLParser, final_url: str) -> str:
     """The URL relative links resolve against: the first valid ``<base href>``, else the page."""
     node = tree.css_first("base[href]")
     if node is None:

@@ -18,6 +18,7 @@ from invio.pipeline import deps as deps_module
 from invio.pipeline.deps import default_deps
 from invio.scheduling.next_run import compute_next_run
 from invio.sources.http import NotModified, SafeHttpClient
+from invio.sources.youtube import YoutubeSource
 from tests.http_helpers import FakeResolver, RecordingTransport
 from tests.llm_helpers import write_registry
 from tests.pipeline_helpers import article_html, make_job_config
@@ -85,6 +86,8 @@ class _RecordingYoutube:
         self.fetched: list[Any] = []
         self.closed = 0
         _RecordingYoutube.instances.append(self)
+
+    from_settings = classmethod(YoutubeSource.from_settings.__func__)  # type: ignore[attr-defined]
 
     async def fetch(self, config: Any) -> list[Any]:
         self.fetched.append(config)

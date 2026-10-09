@@ -48,6 +48,25 @@ def test_job_get_by_name(db_session: Session) -> None:
     assert repo.get_by_name("missing") is None
 
 
+def test_job_get_by_name_for_update_locks_the_row(db_session: Session) -> None:
+    repo = JobRepository(db_session)
+    added = repo.add(Job(name="a", config={}))
+    db_session.flush()
+    statements: list[str] = []
+
+    def record(conn: object, cursor: object, statement: str, *args: object) -> None:
+        statements.append(statement)
+
+    engine = db_session.get_bind()
+    event.listen(engine, "before_cursor_execute", record)
+    try:
+        assert repo.get_by_name("a", for_update=True) is added
+    finally:
+        event.remove(engine, "before_cursor_execute", record)
+    # SQLite has no row locks (its writers are serialised); the clause is left out there.
+    assert ("FOR UPDATE" in statements[-1]) is (engine.dialect.name != "sqlite")
+
+
 def test_job_list_ordered_and_filtered(db_session: Session) -> None:
     repo = JobRepository(db_session)
     for name in ("b", "a"):

@@ -31,9 +31,10 @@ import httpx2
 
 from invio.sources.errors import BlockedError, FetchError
 from invio.sources.netguard import Origin
-from invio.sources.urls import DEFAULT_PORTS
+from invio.sources.urls import DEFAULT_PORTS, WEB_SCHEMES
 
 __all__ = [
+    "MAX_SITEMAPS",
     "ROBOTS_AGENT_TOKEN",
     "ROBOTS_MAX_BYTES",
     "ROBOTS_RETRY_AFTER",
@@ -43,6 +44,7 @@ __all__ = [
 ]
 
 ROBOTS_AGENT_TOKEN: Final = "invio"
+MAX_SITEMAPS: Final = 50  # ``Sitemap:`` lines kept per robots.txt
 ROBOTS_MAX_BYTES: Final = 512_000
 ROBOTS_RETRY_AFTER: Final = 300.0
 # Failures that may be gone on the next attempt; anything else is kept for the run.
@@ -73,6 +75,7 @@ class RobotsPolicy:
     rules: tuple[_Rule, ...] = ()
     crawl_delay: float | None = None
     expires_at: float | None = None
+    sitemaps: tuple[str, ...] = ()
 
     def allows(self, url: str) -> bool:
         """True if the ``invio`` agent may fetch ``url``."""
@@ -154,7 +157,8 @@ class _Group:
 
 def parse_robots(text: str) -> RobotsPolicy:
     """Parse robots.txt ``text`` into the policy of the ``invio`` agent (RFC 9309)."""
-    groups = _groups(text.removeprefix("﻿").splitlines())
+    text_lines = text.removeprefix("﻿").splitlines()
+    groups = _groups(text_lines)
     own = [group for group in groups if ROBOTS_AGENT_TOKEN in group.agents]
     selected = own or [group for group in groups if "*" in group.agents]
     lines = [line for group in selected for line in group.lines]
@@ -164,7 +168,32 @@ def parse_robots(text: str) -> RobotsPolicy:
         if key in ("allow", "disallow") and value  # an empty Disallow allows everything
     )
     delays = (_crawl_delay(value) for key, value in lines if key == "crawl-delay")
-    return RobotsPolicy("parsed", rules, next((d for d in delays if d is not None), None))
+    return RobotsPolicy(
+        "parsed",
+        rules,
+        next((d for d in delays if d is not None), None),
+        sitemaps=_sitemaps(text_lines),
+    )
+
+
+def _sitemaps(lines: Iterable[str]) -> tuple[str, ...]:
+    """The ``Sitemap:`` URLs in file order: absolute http(s) with a host, independent of groups."""
+    found: list[str] = []
+    for raw in lines:
+        if len(found) >= MAX_SITEMAPS:
+            break
+        key, sep, value = raw.split("#", 1)[0].partition(":")
+        if not sep or key.strip().lower() != "sitemap":
+            continue
+        url = value.strip()
+        try:
+            parts = urlsplit(url)
+            valid = parts.scheme.lower() in WEB_SCHEMES and bool(parts.hostname)
+        except ValueError:
+            valid = False
+        if valid:
+            found.append(url)
+    return tuple(found)
 
 
 def _groups(lines: Iterable[str]) -> list[_Group]:
