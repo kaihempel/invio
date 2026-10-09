@@ -1,6 +1,7 @@
 """Tests of the pure schema converter ``invio.llm.google.gemini_schema``."""
 
 import copy
+import enum
 from typing import Any, Literal
 
 import jsonschema
@@ -152,3 +153,65 @@ def test_prefix_items_and_lists_are_converted() -> None:
 
     assert schema["prefixItems"] == [{"type": "string"}, {"type": "integer"}]
     assert schema["minItems"] == 2
+
+
+class _Mood(enum.Enum):
+    HAPPY = "happy"
+    SAD = "sad"
+
+
+class _Inner(BaseModel):
+    tag: Nested
+    mood: _Mood
+
+
+class _Outer(BaseModel):
+    """Optional and list-of references, an enum definition and a reference inside a reference."""
+
+    maybe: _Inner | None = None
+    many: list[_Inner] | None = None
+    mood: _Mood
+
+
+def test_references_inside_any_of_and_nested_definitions_are_inlined() -> None:
+    original = _Outer.model_json_schema()
+    schema = gemini_schema(original)
+
+    assert "$defs" not in schema
+    assert "$ref" not in repr(schema)
+    maybe = schema["properties"]["maybe"]["anyOf"]
+    assert maybe[1] == {"type": "null"}
+    assert maybe[0]["properties"]["tag"]["properties"]["main"]["properties"]["weight"] == {
+        "minimum": 0,
+        "title": "Weight",
+        "type": "integer",
+    }
+    many = schema["properties"]["many"]["anyOf"][0]
+    assert many["type"] == "array"
+    assert many["items"]["properties"]["mood"]["enum"] == ["happy", "sad"]
+    assert schema["properties"]["mood"]["enum"] == ["happy", "sad"]
+    sample = {
+        "maybe": {
+            "tag": {
+                "main": {"name": "a", "weight": 1},
+                "others": [],
+                "backup": {"name": "b", "weight": 2},
+            },
+            "mood": "sad",
+        },
+        "many": None,
+        "mood": "happy",
+    }
+    jsonschema.validate(sample, schema)
+    jsonschema.validate(sample, original)
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate({**sample, "mood": "angry"}, schema)
+
+
+class _Loop(BaseModel):
+    items: list["_Loop"] | None = None
+
+
+def test_recursion_through_any_of_and_items_is_a_config_error() -> None:
+    with pytest.raises(LLMConfigError, match="recursive"):
+        _convert(_Loop)

@@ -727,3 +727,214 @@ async def test_retry_log_carries_only_the_known_fields(caplog: pytest.LogCapture
     assert API_KEY not in dump
     assert "PROMPT-TEXT-SENTINEL" not in dump
     assert all(r.exc_info is None for r in caplog.records)
+
+
+# --- QA gap coverage (issue #32) -------------------------------------------------------------
+
+
+def _response(candidate: dict[str, object] | None, usage: dict[str, int]) -> httpx.Response:
+    body: dict[str, object] = {"usageMetadata": usage, "modelVersion": "recorded"}
+    if candidate is not None:
+        body["candidates"] = [{"index": 0, **candidate}]
+    return httpx.Response(200, json=body)
+
+
+@pytest.mark.parametrize("operation", OPERATIONS)
+async def test_stopped_answer_counts_thinking_tokens_in_the_attached_usage(
+    operation: str,
+) -> None:
+    """FR-007 + FR-013b: a blocked answer carries the usage, thought tokens included."""
+    stopped = _response(
+        {"finishReason": "SAFETY", "content": {"role": "model", "parts": [{"text": "x"}]}},
+        {"promptTokenCount": 12, "candidatesTokenCount": 3, "thoughtsTokenCount": 40},
+    )
+    provider, recorder, _ = make_provider(stopped, "json_ok")
+
+    with pytest.raises(LLMInvalidOutputError) as info:
+        await _call(provider, operation)
+
+    assert info.value.usage == Usage(12, 43)
+    assert len(recorder.requests) == 1
+
+
+@pytest.mark.parametrize("operation", OPERATIONS)
+async def test_blocked_prompt_with_partial_usage_attaches_zero_output(operation: str) -> None:
+    """Edge case: missing counts are zero; the blocked call's input tokens stay attached."""
+    provider, _, _ = make_provider("blocked_prompt_other")
+
+    with pytest.raises(LLMInvalidOutputError) as info:
+        await _call(provider, operation)
+
+    assert info.value.usage == Usage(12, 0)
+
+
+async def test_partial_usage_counts_are_zero_and_summed_over_the_repair() -> None:
+    """Edge case: ``no_candidates`` reports only the prompt count; the repair adds its own."""
+    provider, _, _ = make_provider("no_candidates", "json_ok")
+
+    _, usage = await _structured(provider)
+
+    assert usage == Usage(24, 3, 2)
+
+
+async def test_structured_usage_counts_thinking_tokens() -> None:
+    """FR-013b for structured output: thought tokens are output tokens."""
+    answer = _response(
+        {
+            "finishReason": "STOP",
+            "content": {"role": "model", "parts": [{"text": '{"score": 0.8, "reason": "fits"}'}]},
+        },
+        {"promptTokenCount": 12, "candidatesTokenCount": 3, "thoughtsTokenCount": 20},
+    )
+    provider, _, _ = make_provider(answer)
+
+    _, usage = await _structured(provider)
+
+    assert usage == Usage(12, 23)
+
+
+class _Holder(BaseModel):
+    """An optional nested sub-model and an optional list of them."""
+
+    first: Score | None = None
+    rest: list[Score] | None = None
+
+
+async def test_optional_nested_references_round_trip() -> None:
+    """US1-5 / edge case: optional fields with shared sub-definitions validate completely."""
+    text = json.dumps(
+        {"first": {"score": 0.5, "reason": "a"}, "rest": [{"score": 0.1, "reason": "b"}]}
+    )
+    answer = _response(
+        {"finishReason": "STOP", "content": {"role": "model", "parts": [{"text": text}]}},
+        {"promptTokenCount": 1, "candidatesTokenCount": 1},
+    )
+    provider, recorder, _ = make_provider(answer)
+
+    value, _ = await _structured(provider, _Holder)
+
+    assert value.first == Score(score=0.5, reason="a")
+    assert value.rest == [Score(score=0.1, reason="b")]
+    sent = recorder.requests[0].body["generationConfig"]["responseJsonSchema"]
+    assert "$ref" not in repr(sent)
+    assert "$defs" not in sent
+
+
+# SC-005: the structured path yields the same error type and retry behaviour per category.
+STRUCTURED_FAILURES = [
+    pytest.param(("error_401", "json_ok"), LLMAuthError, 1, id="auth"),
+    pytest.param(("error_429_daily_quota", "json_ok"), LLMQuotaError, 1, id="quota"),
+    pytest.param(("error_400", "json_ok"), LLMInvalidRequestError, 1, id="rejected"),
+    pytest.param(("error_404_model", "json_ok"), LLMInvalidRequestError, 1, id="unknown-model"),
+    pytest.param(("error_503",) * 3, LLMUnavailableError, 3, id="server"),
+    pytest.param(("error_429_bare",) * 3, LLMRateLimitError, 3, id="rate-limit"),
+    pytest.param((httpx.ReadTimeout("slow"), "json_ok"), LLMUnavailableError, 1, id="timeout"),
+    pytest.param(("malformed_200", "json_ok"), LLMUnavailableError, 1, id="malformed"),
+    pytest.param(("text_max_tokens", "json_ok"), LLMUnavailableError, 1, id="cut-off"),
+]
+
+
+@pytest.mark.parametrize(("replies", "error", "requests"), STRUCTURED_FAILURES)
+async def test_structured_failure_categories_match_free_text(
+    replies: tuple[object, ...], error: type[LLMError], requests: int
+) -> None:
+    provider, recorder, _ = make_provider(*replies, retry=RETRIES)
+
+    with pytest.raises(error) as info:
+        await _structured(provider)
+
+    assert (info.value.provider, info.value.model) == ("google", MODEL)
+    assert len(recorder.requests) == requests
+
+
+async def test_structured_rate_limit_is_retried_after_the_hinted_wait() -> None:
+    provider, recorder, waits = make_provider("error_429_retry_delay", "json_ok", retry=RETRIES)
+
+    value, usage = await _structured(provider)
+
+    assert value.score == 0.8
+    assert usage.requests == 1
+    assert waits == [7.0]
+    assert len(recorder.requests) == 2
+
+
+async def test_structured_hanging_request_hits_the_call_deadline() -> None:
+    """FR-012 for structured output."""
+    provider, recorder, _ = make_provider(HANG, "json_ok", retry=RETRIES, timeout_seconds=0.05)
+
+    with pytest.raises(LLMUnavailableError):
+        await _structured(provider)
+
+    assert len(recorder.requests) == 1
+
+
+# SC-008 / FR-011: every error path of both operations, including the ones not in ERROR_FIXTURES.
+LEAK_REPLIES: list[object] = [
+    *ERROR_FIXTURES,
+    "error_429_retry_delay",
+    "error_429_retry_after_header",
+    "blocked_prompt_other",
+    "stopped_recitation",
+    "stopped_spii",
+    "no_candidates",
+    httpx.ReadTimeout("slow"),
+    httpx.ConnectError("down"),
+]
+
+
+@pytest.mark.parametrize("operation", OPERATIONS)
+@pytest.mark.parametrize("reply", LEAK_REPLIES, ids=str)
+async def test_every_error_path_leaks_nothing_through_the_logged_provider(
+    operation: str, reply: object, caplog: pytest.LogCaptureFixture
+) -> None:
+    replies = (reply,) if operation == "complete" else (reply, "json_invalid")
+    provider, _, _ = make_provider(*replies, retry=RetryPolicy(max_retries=0))
+    logged = _LoggedProvider(provider, name="google", registry=default_registry())
+
+    with caplog.at_level(logging.DEBUG, logger="invio"), pytest.raises(LLMError) as info:
+        if operation == "complete":
+            await logged.complete(SYSTEM, USER, model=MODEL, temperature=0, max_tokens=5)
+        else:
+            await logged.complete_structured(SYSTEM, USER, Score, model=MODEL, temperature=0)
+
+    error = info.value
+    assert MODEL in str(error)
+    assert error.provider == "google"
+    text = str(error) + repr(error) + getattr(error, "errors", "")
+    dump = str([r.__dict__ for r in caplog.records])
+    for secret in (API_KEY, SYSTEM, USER, "PROMPT-ECHO", "PARTIAL-ANSWER-TEXT", '{"error"'):
+        assert secret not in text
+        assert secret not in dump
+    assert [r for r in caplog.records if r.getMessage() == "llm.error"]
+
+
+# FR-015: the per-call log line.
+
+
+async def test_successful_call_logs_one_llm_call_record(caplog: pytest.LogCaptureFixture) -> None:
+    provider, _, _ = make_provider("text_with_thoughts")
+    logged = _LoggedProvider(provider, name="google", registry=default_registry())
+
+    with caplog.at_level(logging.INFO, logger="invio.llm"):
+        await logged.complete(SYSTEM, USER, model=MODEL, temperature=0, max_tokens=50)
+
+    (record,) = [r for r in caplog.records if r.getMessage() == "llm.call"]
+    assert (record.provider, record.model) == ("google", MODEL)  # type: ignore[attr-defined]
+    assert (record.input_tokens, record.output_tokens) == (12, 43)  # type: ignore[attr-defined]
+    assert record.cost_usd is not None  # type: ignore[attr-defined]
+    assert record.repaired is False  # type: ignore[attr-defined]
+    assert record.duration_ms >= 0  # type: ignore[attr-defined]
+
+
+async def test_repaired_structured_call_logs_the_repair_flag_and_summed_tokens(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    provider, _, _ = make_provider("json_invalid", "json_ok")
+    logged = _LoggedProvider(provider, name="google", registry=default_registry())
+
+    with caplog.at_level(logging.INFO, logger="invio.llm"):
+        await logged.complete_structured(SYSTEM, USER, Score, model=MODEL, temperature=0)
+
+    (record,) = [r for r in caplog.records if r.getMessage() == "llm.call"]
+    assert record.repaired is True  # type: ignore[attr-defined]
+    assert (record.input_tokens, record.output_tokens) == (24, 6)  # type: ignore[attr-defined]
