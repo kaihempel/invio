@@ -1,0 +1,30 @@
+{
+  "status": 200,
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": {
+    "candidates": [
+      {
+        "finishReason": "MAX_TOKENS",
+        "index": 0,
+        "content": {
+          "role": "model",
+          "parts": [
+            {
+              "text": "PARTIAL-ANSWER-TEXT"
+            }
+          ]
+        }
+      }
+    ],
+    "modelVersion": "recorded",
+    "responseId": "r-1",
+    "usageMetadata": {
+      "promptTokenCount": 12,
+      "candidatesTokenCount": 5,
+      "totalTokenCount": 47,
+      "thoughtsTokenCount": 30
+    }
+  }
+}

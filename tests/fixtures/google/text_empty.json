@@ -1,0 +1,25 @@
+{
+  "status": 200,
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": {
+    "candidates": [
+      {
+        "finishReason": "STOP",
+        "index": 0,
+        "content": {
+          "role": "model",
+          "parts": []
+        }
+      }
+    ],
+    "modelVersion": "recorded",
+    "responseId": "r-1",
+    "usageMetadata": {
+      "promptTokenCount": 12,
+      "candidatesTokenCount": 0,
+      "totalTokenCount": 12
+    }
+  }
+}

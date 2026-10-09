@@ -1,0 +1,13 @@
+{
+  "status": 200,
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": {
+    "promptFeedback": {},
+    "usageMetadata": {
+      "promptTokenCount": 12
+    },
+    "modelVersion": "recorded"
+  }
+}

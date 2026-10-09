@@ -1,0 +1,14 @@
+{
+  "status": 429,
+  "headers": {
+    "content-type": "application/json",
+    "retry-after": "3"
+  },
+  "body": {
+    "error": {
+      "code": 429,
+      "message": "You exceeded your current quota, please check your plan and billing details.",
+      "status": "RESOURCE_EXHAUSTED"
+    }
+  }
+}

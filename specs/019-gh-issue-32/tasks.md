@@ -90,12 +90,12 @@ description: "Task list for the Google (Gemini) provider (issue #32)"
 
 ### Tests for User Story 1
 
-- [ ] T007 [P] [US1] Create the offline harness `tests/google_helpers.py`, modelled on `tests/anthropic_helpers.py` but binding `sdk_harness` to `httpx` (not `httpx2`):
+- [X] T007 [P] [US1] Create the offline harness `tests/google_helpers.py`, modelled on `tests/anthropic_helpers.py` but binding `sdk_harness` to `httpx` (not `httpx2`):
   - `FIXTURE_DIR = tests/fixtures/google`, `API_KEY = "AIza-test-SECRET123"`, `BASE_URL = "https://generativelanguage.googleapis.test/"`.
   - `load_fixture(name)` returning an `httpx.Response`.
   - `Recorder` and `recording_options`.
   - `make_provider(*replies, retry=None, timeout_seconds=60.0, registry=None, uniform=None, sleep=None, now=None)` returning `(GoogleProvider, Recorder, waits)`, with `registry` defaulting to `default_registry()`.
-- [ ] T008 [P] [US1] Create recorded success fixtures in `tests/fixtures/google/`. Each file has the `{"status", "headers", "body"}` shape used by `sdk_harness.load_fixture`, and the body uses the REST `generateContent` shape (`{"candidates": [{"content": {"role": "model", "parts": [...]}, "finishReason": "STOP", "index": 0}], "usageMetadata": {...}, "modelVersion": ...}`):
+- [X] T008 [P] [US1] Create recorded success fixtures in `tests/fixtures/google/`. Each file has the `{"status", "headers", "body"}` shape used by `sdk_harness.load_fixture`, and the body uses the REST `generateContent` shape (`{"candidates": [{"content": {"role": "model", "parts": [...]}, "finishReason": "STOP", "index": 0}], "usageMetadata": {...}, "modelVersion": ...}`):
   - `text_ok.json`: one text part `"OK"`, usage `promptTokenCount: 12`, `candidatesTokenCount: 3`, no thoughts.
   - `text_with_thoughts.json`: one `{"text": "...", "thought": true}` part plus one answer part, usage `promptTokenCount: 12`, `candidatesTokenCount: 3`, `thoughtsTokenCount: 40`.
   - `text_no_usage.json`: `usageMetadata` omitted.
@@ -108,7 +108,7 @@ description: "Task list for the Google (Gemini) provider (issue #32)"
   - `json_item_summary.json`: a valid `ItemSummary` (single-line `headline`, 4 `bullets`, `why_relevant`).
   - `json_item_summary_too_few.json`: an `ItemSummary` with 2 bullets, which violates `minItems: 3` and is enforced locally.
   - `json_nested.json`: an answer for the test model of T009 (nested sub-model, list of sub-models).
-- [ ] T009 [P] [US1] Create `tests/test_llm_google_schema.py` for the pure converter `invio.llm.google.gemini_schema` ([data-model](data-model.md), "Service-compatible shape"):
+- [X] T009 [P] [US1] Create `tests/test_llm_google_schema.py` for the pure converter `invio.llm.google.gemini_schema` ([data-model](data-model.md), "Service-compatible shape"):
   - The `RelevanceResult` schema loses `minLength` but keeps `minimum: 0` / `maximum: 1`, `additionalProperties: false` and `required`.
   - The `ItemSummary` schema keeps `minItems: 3` / `maxItems: 6` and loses `minLength`.
   - A model with a nested sub-model used twice and a `list[SubModel]` has every `$ref` inlined and no `$defs` left. The result validates the same sample under `jsonschema`, which is in the dev group.
@@ -118,7 +118,7 @@ description: "Task list for the Google (Gemini) provider (issue #32)"
   - A recursive model (self-reference) raises `LLMConfigError` naming the schema.
   - A non-local `$ref` raises `LLMConfigError`.
   - The input dict is not mutated.
-- [ ] T010 [P] [US1] Create `tests/test_llm_google.py` with the US1 cases (`make_provider` from T007):
+- [X] T010 [P] [US1] Create `tests/test_llm_google.py` with the US1 cases (`make_provider` from T007):
   - **Free text.** `complete` returns `("OK", Usage(12, 3))`. The request goes to `.../v1beta/models/<model>:generateContent`. Its body has:
     - `systemInstruction` with the system text;
     - `contents` with the user text;
@@ -149,13 +149,13 @@ description: "Task list for the Google (Gemini) provider (issue #32)"
   - **Unregistered model.** Calling with a model that is not in the registry raises `LLMConfigError` before any request.
   - **Credentials.** The key is sent only as `x-goog-api-key`, to `BASE_URL`, with no `authorization` header. This holds even with `GOOGLE_API_KEY`, `GEMINI_API_KEY`, `GOOGLE_GEMINI_BASE_URL` and `GOOGLE_GENAI_USE_VERTEXAI=true` set via `monkeypatch.setenv`.
   - **Clients.** `aclose()` closes the client of the running loop, and the next call builds a new one (`recorder.clients_created == 2`).
-- [ ] T011 [P] [US1] Extend `tests/test_llm_factory.py` with `test_google_resolves_from_its_module_and_registry_file_only`, modelled on the Anthropic test at `tests/test_llm_factory.py:499`:
+- [X] T011 [P] [US1] Extend `tests/test_llm_factory.py` with `test_google_resolves_from_its_module_and_registry_file_only`, modelled on the Anthropic test at `tests/test_llm_factory.py:499`:
   - `google.py` and `models.d/google.yaml` exist, and `factory.py` does not mention `google`.
   - `resolve()` of a job with `provider: google` and the first/second registry models returns a wrapped `GoogleProvider` and the model id.
 
 ### Implementation for User Story 1
 
-- [ ] T012 [US1] Create `src/invio/llm/google.py`. It is the success path only; error classification is T021.
+- [X] T012 [US1] Create `src/invio/llm/google.py`. It is the success path only; error classification is T021.
   - **Module docstring**, in the style of `anthropic.py`, covering:
     - the API choice;
     - the thinking/allowance/temperature rules ([research R2/R3](research.md));
