@@ -3,6 +3,7 @@
 import os
 import re
 import sys
+from datetime import date
 from decimal import Decimal
 from pathlib import Path
 
@@ -440,3 +441,134 @@ def test_every_anthropic_model_defines_max_output_tokens() -> None:
 
     assert len(models) == 2
     assert all(info.max_output_tokens and info.max_output_tokens > 0 for info in models)
+
+
+def _entry_with(tmp_path: Path, field: str, raw: str) -> Path:
+    return _write_raw(
+        tmp_path,
+        "p.yaml",
+        "schema_version: 1\nprovider: p\nmodels:\n  m:\n    input_price_per_mtok: 1\n"
+        f"    output_price_per_mtok: 1\n    context_window: 5\n    {field}: {raw}\n",
+    )
+
+
+def test_thinking_fields_are_accepted_and_exposed(tmp_path: Path) -> None:
+    models_dir = write_registry(
+        tmp_path,
+        "google",
+        {
+            "m": {
+                **ENTRY,
+                "thinking_level": "low",
+                "thinking_allowance_tokens": 2048,
+                "keep_default_temperature": True,
+            }
+        },
+    )
+
+    info = load_registry([models_dir]).get("m")
+
+    assert info is not None
+    assert info.thinking_level == "low"
+    assert info.thinking_allowance_tokens == 2048
+    assert info.keep_default_temperature is True
+
+
+def test_thinking_fields_default_when_absent(tmp_path: Path) -> None:
+    info = load_registry([write_registry(tmp_path, "p", {"m": ENTRY})]).get("m")
+
+    assert info is not None
+    assert info.thinking_level is None
+    assert info.thinking_allowance_tokens is None
+    assert info.keep_default_temperature is False
+
+
+def test_existing_registry_files_load_without_thinking_fields() -> None:
+    registry = default_registry()
+
+    for provider in ("mistral", "openai", "anthropic"):
+        models = registry.models_for(provider)
+        assert models
+        assert all(
+            info.thinking_level is None
+            and info.thinking_allowance_tokens is None
+            and info.keep_default_temperature is False
+            for info in models
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "raw"),
+    [
+        ("thinking_level", "low"),
+        ("thinking_allowance_tokens", "5"),
+        ("keep_default_temperature", "false"),
+    ],
+)
+def test_thinking_fields_are_rejected_for_other_providers(
+    tmp_path: Path, field: str, raw: str
+) -> None:
+    models_dir = _entry_with(tmp_path, field, raw)
+
+    with pytest.raises(
+        ModelRegistryError, match=rf"p\.yaml: models\.m: {field} not supported for provider 'p'"
+    ):
+        load_registry([models_dir])
+
+
+def test_thinking_allowance_without_level_is_rejected(tmp_path: Path) -> None:
+    models_dir = write_registry(
+        tmp_path, "google", {"m": {**ENTRY, "thinking_allowance_tokens": 10}}
+    )
+
+    with pytest.raises(
+        ModelRegistryError, match=r"google\.yaml: models\.m: thinking_allowance_tokens requires"
+    ):
+        load_registry([models_dir])
+
+
+@pytest.mark.parametrize("raw", ["off", "none", "1", "'LOW'", "true"])
+def test_unknown_thinking_level_is_rejected(tmp_path: Path, raw: str) -> None:
+    models_dir = _entry_with(tmp_path, "thinking_level", raw)
+
+    with pytest.raises(ModelRegistryError, match=r"p\.yaml.*models\.m\.thinking_level"):
+        load_registry([models_dir])
+
+
+@pytest.mark.parametrize("raw", ["0", "-5", "5.0", "'5'", "true"])
+def test_invalid_thinking_allowance_is_rejected(tmp_path: Path, raw: str) -> None:
+    models_dir = _entry_with(tmp_path, "thinking_allowance_tokens", raw)
+
+    with pytest.raises(ModelRegistryError, match=r"p\.yaml.*models\.m\.thinking_allowance_tokens"):
+        load_registry([models_dir])
+
+
+@pytest.mark.parametrize("raw", ["'yes'", "1", "0", "null"])
+def test_invalid_keep_default_temperature_is_rejected(tmp_path: Path, raw: str) -> None:
+    models_dir = _entry_with(tmp_path, "keep_default_temperature", raw)
+
+    with pytest.raises(ModelRegistryError, match=r"p\.yaml.*models\.m\.keep_default_temperature"):
+        load_registry([models_dir])
+
+
+def test_every_google_model_defines_thinking_and_keeps_the_default_temperature() -> None:
+    models = default_registry().models_for("google")
+
+    assert [info.model_id for info in models] == ["gemini-3.5-flash-lite", "gemini-3.8-flash"]
+    assert all(info.thinking_level is not None for info in models)
+    assert all(
+        info.thinking_allowance_tokens and info.thinking_allowance_tokens > 0 for info in models
+    )
+    assert all(info.keep_default_temperature is True for info in models)
+
+
+def test_gemini_flash_price_is_updated_once_the_announced_change_applies() -> None:
+    # Google raises gemini-3.8-flash to 1.50 / 7.50 per MTok on 2027-01-01 (see google.yaml).
+    info = default_registry().get("gemini-3.8-flash")
+
+    assert info is not None
+    if date.today() >= date(2027, 1, 1):
+        prices = (info.input_price_per_mtok, info.output_price_per_mtok)
+        assert prices == (Decimal("1.50"), Decimal("7.50")), (
+            "update the gemini-3.8-flash prices in models.d/google.yaml"
+        )

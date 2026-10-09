@@ -1,0 +1,13 @@
+{
+  "status": 400,
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": {
+    "error": {
+      "code": 400,
+      "message": "Invalid JSON payload received.",
+      "status": "INVALID_ARGUMENT"
+    }
+  }
+}

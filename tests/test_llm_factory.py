@@ -527,3 +527,31 @@ def test_anthropic_without_key_names_the_setting() -> None:
 
     assert "'anthropic'" in str(info.value)
     assert "INVIO_ANTHROPIC_API_KEY" in str(info.value)
+
+
+# --- Google provider (issue #32) -----------------------------------------------------------
+
+
+def test_google_resolves_from_its_module_and_registry_file_only(
+    job_data: dict[str, Any],
+) -> None:
+    """SC-001 for Google: ``google.py`` + ``models.d/google.yaml``, no ``factory.py``."""
+    from invio.llm.google import GoogleProvider
+
+    package = Path(invio.llm.__file__).parent
+    assert (package / "google.py").is_file()
+    assert (package / "models.d" / "google.yaml").is_file()
+    assert "google" not in Path(factory.__file__).read_text(encoding="utf-8").lower()
+    default_registry.cache_clear()
+    first, second = (info.model_id for info in default_registry().models_for("google"))
+    job_data["llm"] = {"provider": "google", "models": {"fast": first, "smart": second}}
+    llm = JobConfig.model_validate(job_data).llm
+    settings = make_settings(google_api_key="AIza-test-SECRET123")
+
+    provider = get_provider("google", settings)
+    resolved, model = resolve(llm, "smart", settings)
+
+    assert factory._REGISTRY["google"] is GoogleProvider
+    assert provider is not None
+    assert resolved is not None
+    assert model == second

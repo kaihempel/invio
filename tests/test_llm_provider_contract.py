@@ -3,7 +3,8 @@
 The suite runs once per provider harness: :class:`FakeProvider` (scripted), ``MistralProvider``
 (recorded HTTP via ``tests/mistral_helpers.py``) and ``OpenAIProvider`` (recorded HTTP via
 ``tests/openai_helpers.py``) and ``AnthropicProvider`` (recorded HTTP via
-``tests/anthropic_helpers.py``). A harness maps the abstract :class:`Outcome` of each request to
+``tests/anthropic_helpers.py``) and ``GoogleProvider`` (recorded HTTP via
+``tests/google_helpers.py``). A harness maps the abstract :class:`Outcome` of each request to
 whatever its provider needs (a scripted step or a recorded fixture). Retries are disabled so
 every error outcome costs exactly one request; retry behaviour itself is covered by the
 provider-specific test modules.
@@ -30,7 +31,7 @@ from invio.llm.base import (
 )
 from invio.llm.fake import FakeProvider, FakeReply, FakeStep
 from invio.llm.http_retry import RetryPolicy
-from tests import anthropic_helpers, mistral_helpers, openai_helpers
+from tests import anthropic_helpers, google_helpers, mistral_helpers, openai_helpers
 from tests.llm_helpers import Score
 
 SYSTEM = "You rate things."
@@ -160,11 +161,34 @@ class AnthropicHarness(ProviderHarness):
         return provider
 
 
+class GoogleHarness(ProviderHarness):
+    name = "google"
+    model = "gemini-3.5-flash-lite"
+
+    _FIXTURES: ClassVar[dict[Outcome, str]] = {
+        Outcome.TEXT: "text_ok",
+        Outcome.STRUCTURED: "json_ok",
+        Outcome.STRUCTURED_INVALID: "json_invalid",
+        Outcome.AUTH: "error_401",
+        Outcome.RATE_LIMIT: "error_429_bare",
+        Outcome.UNAVAILABLE: "error_503",
+        Outcome.INVALID_REQUEST: "error_400",
+    }
+
+    def build(self, *outcomes: Outcome) -> LLMProvider:
+        provider, recorder, _ = google_helpers.make_provider(
+            *(self._FIXTURES[outcome] for outcome in outcomes), retry=NO_RETRIES
+        )
+        self.requests_made = lambda: len(recorder.requests)
+        return provider
+
+
 HARNESSES: tuple[type[ProviderHarness], ...] = (
     FakeHarness,
     MistralHarness,
     OpenAIHarness,
     AnthropicHarness,
+    GoogleHarness,
 )
 
 

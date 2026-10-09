@@ -12,7 +12,13 @@ models:                    # mapping, may be empty
     output_price_per_mtok: <number >= 0>   # USD per 1,000,000 output tokens
     context_window: <integer > 0>          # tokens
     max_output_tokens: <integer > 0>       # optional; tokens; required for anthropic models
+    thinking_level: <minimal|low|medium|high>  # optional; required for google models
+    thinking_allowance_tokens: <integer > 0>  # optional; required for google models
+    keep_default_temperature: <true|false>  # optional, default false; the request sends no temperature
 ```
 
 Files are parsed strictly: unknown keys, missing fields, invalid values, a `provider` that
-differs from the file name and a model id defined in two files are all errors.
+differs from the file name and a model id defined in two files are all errors. The thinking
+fields (`thinking_level`, `thinking_allowance_tokens`, `keep_default_temperature`) are only
+accepted for providers that read them (currently `google`), and `thinking_allowance_tokens`
+requires `thinking_level`.

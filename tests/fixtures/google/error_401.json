@@ -1,0 +1,13 @@
+{
+  "status": 401,
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": {
+    "error": {
+      "code": 401,
+      "message": "Request had invalid authentication.",
+      "status": "UNAUTHENTICATED"
+    }
+  }
+}

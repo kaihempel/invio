@@ -503,6 +503,31 @@ cut-off (`max_tokens`) answers raise `LLMUnavailableError`. Only the `x-api-key`
 sent, to `https://api.anthropic.com`: `ANTHROPIC_AUTH_TOKEN` and `ANTHROPIC_BASE_URL` are
 ignored.
 
+### Google
+
+Set `INVIO_GOOGLE_API_KEY` (see `.env.example`) and name `provider: google` in a job's `llm`
+section. The shipped models are listed in `src/invio/llm/models.d/google.yaml`
+(`gemini-3.5-flash-lite` for `fast`, `gemini-3.8-flash` for `smart`); the header of the file
+notes that `gemini-3.8-flash` gets more expensive on 2027-01-01. The provider uses the official
+`google-genai` SDK on the Gemini Developer API (`generateContent`); every call is one stateless
+request. Gemini 3 models always think, so every `google` registry entry must define
+`thinking_level` (sent with every request) and `thinking_allowance_tokens` (added to the
+`max_tokens` of a free-text call, because thought tokens count against the output limit), or
+building the provider fails with `LLMConfigError`. Thinking tokens are billed and reported as
+output tokens. With `keep_default_temperature: true` (both shipped models) the request sends no
+temperature, as Google recommends for Gemini 3, so answers are not deterministic. Structured
+requests send a converted JSON schema (`$defs` inlined, unsupported value constraints dropped; the
+Pydantic model still validates the answer, with one repair attempt). A schema using a keyword
+whose loss would widen it (`not`, `if`/`then`/`else`, a multi-branch `allOf`, ...) raises
+`LLMConfigError` before any request. A blocked prompt or an answer the
+service stopped for a policy reason (safety, recitation, ...) raises `LLMInvalidOutputError`
+naming the reason, without retry or repair; cut-off (`MAX_TOKENS`) and empty answers raise
+`LLMUnavailableError`. Retries, typed errors and the `llm.retry` log line are the shared ones
+(`invio.llm.http_retry`); the `RetryInfo` delay of a 429 is the wait hint, and an exhausted daily
+quota raises `LLMQuotaError` without retrying. Only the Gemini Developer API is used, with the
+key as the `x-goog-api-key` header: `GOOGLE_API_KEY`, `GEMINI_API_KEY`, `GOOGLE_GEMINI_BASE_URL`
+and `GOOGLE_GENAI_USE_VERTEXAI` are ignored.
+
 ### Common provider notes
 
 The HTTP client is created per event loop. Call `await provider.aclose()` before the loop ends
@@ -514,6 +539,7 @@ Check a provider setup with one tiny request:
 invio llm test mistral [--model MODEL]
 invio llm test openai [--model MODEL]
 invio llm test anthropic [--model MODEL]
+invio llm test google [--model MODEL]
 ```
 
 It prints `ok provider=... model=... input_tokens=... output_tokens=... duration_ms=...` and
@@ -523,7 +549,7 @@ model is the provider's cheapest registered one.
 
 The test suite never touches the network. Optional live tests (plain and structured call)
 use the real API of each provider whose key is set (`INVIO_MISTRAL_API_KEY`,
-`INVIO_OPENAI_API_KEY`, `INVIO_ANTHROPIC_API_KEY`): `uv run pytest -m live`. Without a `-m`
+`INVIO_OPENAI_API_KEY`, `INVIO_ANTHROPIC_API_KEY`, `INVIO_GOOGLE_API_KEY`): `uv run pytest -m live`. Without a `-m`
 expression that names `live`, they are skipped. Every provider must pass the shared contract suite
 `tests/test_llm_provider_contract.py`; a new provider adds one harness there.
 
@@ -538,6 +564,9 @@ models:
     output_price_per_mtok: 1.5
     context_window: 128000
     max_output_tokens: 8192   # optional; required for anthropic models
+    thinking_level: low       # optional (minimal|low|medium|high); required for google models
+    thinking_allowance_tokens: 2048   # optional; required for google models
+    keep_default_temperature: true    # optional, default false; send no temperature
 ```
 
 `default_registry().cost(model, usage)` returns the cost as a `Decimal` with 6 decimals (or

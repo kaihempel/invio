@@ -4,7 +4,11 @@ Registry files are versioned (``schema_version: 1``) and parsed strictly; every 
 :class:`~invio.llm.base.ModelRegistryError` naming the file. Costs are computed with
 :class:`~decimal.Decimal` and quantized to the precision of ``llm_usage.cost_usd``. An entry may
 carry the optional ``max_output_tokens`` (the model's largest answer size); providers that need
-it, such as Anthropic, check for it when they are built.
+it, such as Anthropic, check for it when they are built. The optional ``thinking_level``,
+``thinking_allowance_tokens`` and ``keep_default_temperature`` fields describe how a provider
+must call a thinking model (Google requires the first two). They are accepted only in the files
+of the providers in :data:`THINKING_PROVIDERS`, and ``thinking_allowance_tokens`` only together
+with ``thinking_level``, so a misplaced field fails loudly instead of being ignored.
 """
 
 import functools
@@ -15,13 +19,26 @@ from pathlib import Path
 from typing import Annotated, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, StrictInt, ValidationError, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictBool,
+    StrictInt,
+    ValidationError,
+    field_validator,
+)
 
 import invio.llm
 from invio.domain import COST_PRECISION
 from invio.llm.base import LLMConfigError, ModelRegistryError, Usage
 
 _PRICE_UNIT = Decimal(1_000_000)
+
+ThinkingLevel = Literal["minimal", "low", "medium", "high"]
+# Providers that read the thinking fields; in any other registry file they are an error.
+THINKING_PROVIDERS = frozenset({"google"})
+_THINKING_FIELDS = ("thinking_level", "thinking_allowance_tokens", "keep_default_temperature")
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,6 +51,9 @@ class ModelInfo:
     output_price_per_mtok: Decimal
     context_window: int
     max_output_tokens: int | None = None
+    thinking_level: ThinkingLevel | None = None
+    thinking_allowance_tokens: int | None = None
+    keep_default_temperature: bool = False
 
 
 class _ModelEntry(BaseModel):
@@ -43,6 +63,9 @@ class _ModelEntry(BaseModel):
     output_price_per_mtok: Decimal = Field(ge=0, allow_inf_nan=False)
     context_window: StrictInt = Field(gt=0)
     max_output_tokens: StrictInt | None = Field(default=None, gt=0)
+    thinking_level: ThinkingLevel | None = None
+    thinking_allowance_tokens: StrictInt | None = Field(default=None, gt=0)
+    keep_default_temperature: StrictBool = False
 
     @field_validator("input_price_per_mtok", "output_price_per_mtok", mode="before")
     @classmethod
@@ -126,7 +149,23 @@ def _parse_file(path: Path) -> _RegistryFile:
         raise ModelRegistryError(
             f"{path}: provider '{parsed.provider}' does not match file name '{path.stem}'"
         )
+    for model_id, entry in parsed.models.items():
+        _check_thinking_fields(path, parsed.provider, model_id, entry)
     return parsed
+
+
+def _check_thinking_fields(path: Path, provider: str, model_id: str, entry: _ModelEntry) -> None:
+    if provider not in THINKING_PROVIDERS:
+        misplaced = [field for field in _THINKING_FIELDS if field in entry.model_fields_set]
+        if misplaced:
+            raise ModelRegistryError(
+                f"{path}: models.{model_id}: {', '.join(misplaced)} not supported for "
+                f"provider '{provider}'"
+            )
+    if entry.thinking_allowance_tokens is not None and entry.thinking_level is None:
+        raise ModelRegistryError(
+            f"{path}: models.{model_id}: thinking_allowance_tokens requires thinking_level"
+        )
 
 
 def load_registry(dirs: Sequence[Path] | None = None) -> ModelRegistry:
@@ -151,6 +190,9 @@ def load_registry(dirs: Sequence[Path] | None = None) -> ModelRegistry:
                     output_price_per_mtok=entry.output_price_per_mtok,
                     context_window=entry.context_window,
                     max_output_tokens=entry.max_output_tokens,
+                    thinking_level=entry.thinking_level,
+                    thinking_allowance_tokens=entry.thinking_allowance_tokens,
+                    keep_default_temperature=entry.keep_default_temperature,
                 )
     return ModelRegistry(models)
 

@@ -1,0 +1,13 @@
+{
+  "status": 504,
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": {
+    "error": {
+      "code": 504,
+      "message": "The request timed out.",
+      "status": "DEADLINE_EXCEEDED"
+    }
+  }
+}

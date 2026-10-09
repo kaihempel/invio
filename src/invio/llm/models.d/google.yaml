@@ -1,0 +1,34 @@
+# Google (Gemini) models, USD per 1,000,000 tokens (paid tier, standard, non-batch prices).
+# The registry orders models by id, so the order in this file carries no meaning.
+# Every google entry must define `thinking_level` and `thinking_allowance_tokens`: every request
+# sends the level, and free-text calls add the allowance to the caller's max_tokens, because
+# thinking tokens count against the output limit.
+# `keep_default_temperature: true` follows Google's Gemini 3 guidance to leave the temperature at
+# its default of 1.0; the request then sends no temperature.
+# Output prices include thinking tokens.
+# Verified on 2026-10-09 from
+#   https://ai.google.dev/gemini-api/docs/models
+#   https://ai.google.dev/gemini-api/docs/pricing
+#   https://ai.google.dev/gemini-api/docs/thinking
+#   https://ai.google.dev/gemini-api/docs/gemini-3
+# gemini-3.8-flash costs 1.50 input / 7.50 output from 2027-01-01: update this file then
+# (tests/test_llm_registry.py fails from that date until it is updated).
+# gemini-3.8-flash does not accept the `minimal` thinking level, hence `low`.
+---
+schema_version: 1
+provider: google
+models:
+  gemini-3.5-flash-lite:
+    input_price_per_mtok: 0.30
+    output_price_per_mtok: 2.50
+    context_window: 1048576
+    thinking_level: minimal
+    thinking_allowance_tokens: 1024
+    keep_default_temperature: true
+  gemini-3.8-flash:
+    input_price_per_mtok: 0.75
+    output_price_per_mtok: 3.75
+    context_window: 1048576
+    thinking_level: low
+    thinking_allowance_tokens: 4096
+    keep_default_temperature: true

@@ -26,9 +26,10 @@ from invio.llm.base import (
     require_api_key,
 )
 from invio.llm.fake import FakeProvider, FakeReply
+from invio.llm.google import GoogleProvider
 from invio.llm.mistral import MistralProvider
 from invio.llm.openai import OpenAIProvider
-from tests import anthropic_helpers, openai_helpers
+from tests import anthropic_helpers, google_helpers, openai_helpers
 from tests.llm_helpers import write_registry
 from tests.mistral_helpers import API_KEY, Recorder, Reply, recording_options
 
@@ -842,3 +843,146 @@ def test_recorded_anthropic_hanging_request_is_bounded_by_the_timeout(
     assert "0.2 s" in _last_message(result)
     assert len(recorder.requests) == 1
     assert waits == []
+
+
+# --- Google (issue #32, US3) ----------------------------------------------------------------
+
+GEMINI_CHEAP = "gemini-3.5-flash-lite"
+GEMINI_SMART = "gemini-3.8-flash"
+
+
+@pytest.fixture
+def google_registry(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The shipped registry, which lists the two Google models."""
+    registry = llm_registry.load_registry()
+    monkeypatch.setattr(llm_registry, "default_registry", lambda: registry)
+
+
+def _recorded_google(
+    *replies: google_helpers.Reply, built: list[GoogleProvider] | None = None
+) -> tuple[google_helpers.Recorder, list[float]]:
+    """Register a real ``GoogleProvider`` on recorded HTTP replies as ``google``.
+
+    Needs ``patched_providers`` (isolated registry). The key comes from the settings as in
+    production; only the HTTP transport, the base URL and the retry sleep are replaced.
+    """
+    recorder = google_helpers.Recorder(replies)
+    options, waits = google_helpers.recording_options(recorder)
+
+    class _Recorded(GoogleProvider):
+        @classmethod
+        def from_settings(cls, settings: Settings, *, registry: Any = None) -> Self:
+            provider = cls(
+                require_api_key(settings, "google"),
+                timeout_seconds=settings.llm_timeout_seconds,
+                registry=registry,
+                **options,
+            )
+            if built is not None:
+                built.append(provider)
+            return provider
+
+    factory.register_provider("google")(_Recorded)
+    return recorder, waits
+
+
+def test_recorded_google_success(
+    patched_providers: Register, monkeypatch: pytest.MonkeyPatch, google_registry: None
+) -> None:
+    monkeypatch.setenv("INVIO_GOOGLE_API_KEY", google_helpers.API_KEY)
+    recorder, _ = _recorded_google("text_ok")
+
+    result = _invoke("google")
+
+    assert result.exit_code == 0, result.stderr
+    assert re.fullmatch(
+        rf"ok provider=google model={GEMINI_CHEAP} input_tokens=12 output_tokens=3 "
+        r"duration_ms=\d+(\.\d+)?\n",
+        result.stdout,
+    )
+    (request,) = recorder.requests
+    assert [client.is_closed for client in recorder.clients] == [True]
+    assert request.path == f"/v1beta/models/{GEMINI_CHEAP}:generateContent"
+    assert request.headers["x-goog-api-key"] == google_helpers.API_KEY
+    config = request.body["generationConfig"]
+    assert config["maxOutputTokens"] == 5 + 1024
+    assert "temperature" not in config
+    assert "Hello" not in result.stdout + result.stderr
+    assert google_helpers.API_KEY not in result.stdout + result.stderr
+
+
+def test_recorded_google_model_option_selects_that_model(
+    patched_providers: Register, monkeypatch: pytest.MonkeyPatch, google_registry: None
+) -> None:
+    monkeypatch.setenv("INVIO_GOOGLE_API_KEY", google_helpers.API_KEY)
+    recorder, _ = _recorded_google("text_ok")
+
+    result = _invoke("google", "--model", GEMINI_SMART)
+
+    assert result.exit_code == 0, result.stderr
+    assert f"model={GEMINI_SMART}" in result.stdout
+    (request,) = recorder.requests
+    assert request.path == f"/v1beta/models/{GEMINI_SMART}:generateContent"
+    assert request.body["generationConfig"]["maxOutputTokens"] == 5 + 4096
+
+
+def test_recorded_google_unknown_model_exits_2(
+    patched_providers: Register, monkeypatch: pytest.MonkeyPatch, google_registry: None
+) -> None:
+    monkeypatch.setenv("INVIO_GOOGLE_API_KEY", google_helpers.API_KEY)
+    recorder, _ = _recorded_google("text_ok")
+
+    result = _invoke("google", "--model", "gpt-x")
+
+    assert result.exit_code == 2
+    assert _last_message(result) == (
+        "Configuration error: model 'gpt-x' is not registered for LLM provider 'google'"
+    )
+    assert recorder.requests == []
+
+
+def test_recorded_google_without_key_makes_no_request(
+    patched_providers: Register, monkeypatch: pytest.MonkeyPatch, google_registry: None
+) -> None:
+    recorder, _ = _recorded_google("text_ok")
+
+    result = _invoke("google")
+
+    assert result.exit_code == 2
+    assert _last_message(result) == (
+        "Configuration error: LLM provider 'google' needs an API key: set INVIO_GOOGLE_API_KEY"
+    )
+    assert recorder.requests == []
+    assert recorder.clients_created == 0
+
+
+@pytest.mark.parametrize(
+    ("replies", "error", "requests"),
+    [
+        (("error_401",), "LLMAuthError", 1),
+        (("error_503",) * 4, "LLMUnavailableError", 4),
+        (("blocked_prompt",), "LLMInvalidOutputError", 1),
+    ],
+    ids=["401", "503", "blocked"],
+)
+def test_recorded_google_failures_exit_1(
+    patched_providers: Register,
+    monkeypatch: pytest.MonkeyPatch,
+    google_registry: None,
+    replies: tuple[google_helpers.Reply, ...],
+    error: str,
+    requests: int,
+) -> None:
+    monkeypatch.setenv("INVIO_GOOGLE_API_KEY", google_helpers.API_KEY)
+    recorder, _ = _recorded_google(*replies)
+
+    result = _invoke("google")
+
+    assert result.exit_code == 1
+    assert _last_message(result).startswith(f"Error: {error}: ")
+    assert result.stdout == ""
+    assert "Traceback" not in result.stderr
+    assert google_helpers.API_KEY not in result.stderr
+    assert "Reply with OK." not in result.stderr
+    assert len(recorder.requests) == requests
+    assert [client.is_closed for client in recorder.clients] == [True]

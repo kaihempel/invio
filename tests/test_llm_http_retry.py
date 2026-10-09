@@ -5,10 +5,11 @@ from datetime import UTC, datetime
 
 import pytest
 
-from invio.llm.base import LLMError, LLMUnavailableError
+from invio.llm.base import LLMError, LLMRateLimitError, LLMUnavailableError
 from invio.llm.http_retry import (
     Failure,
     RetryPolicy,
+    classify_status,
     describe,
     retry_after,
     run_with_retries,
@@ -32,6 +33,27 @@ def test_retry_after_matches_header_names_case_insensitively(name: str) -> None:
 
 def test_retry_after_without_header_is_none() -> None:
     assert retry_after({"content-type": "x"}, lambda: NOW) is None
+
+
+@pytest.mark.parametrize(("hint", "expected"), [(None, 7.0), (2.5, 2.5)])
+def test_classify_status_rate_limit_prefers_the_wait_hint(
+    hint: float | None, expected: float
+) -> None:
+    failure = classify_status(
+        429,
+        label="X",
+        env_var="X_KEY",
+        provider="p",
+        model="m",
+        detail="",
+        headers={"Retry-After": "7"},
+        now=lambda: NOW,
+        wait_hint=hint,
+    )
+
+    assert failure.retry_after == expected
+    assert isinstance(failure.error, LLMRateLimitError)
+    assert failure.error.retry_after == expected
 
 
 def test_sanitize_detail_collapses_whitespace_and_truncates() -> None:
