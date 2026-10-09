@@ -40,6 +40,7 @@ class RecordedRequest(NamedTuple):
     has_authorization: bool
     host: str
     x_api_key: str | None
+    headers: dict[str, str]
 
 
 class Recorder:
@@ -61,6 +62,7 @@ class Recorder:
                 "authorization" in request.headers,
                 request.url.host,
                 request.headers.get("x-api-key"),
+                {name.lower(): value for name, value in request.headers.items()},
             )
         )
         if not self._queue:

@@ -26,8 +26,8 @@ description: "Task list for the Google (Gemini) provider (issue #32)"
 
 ## Phase 1: Setup
 
-- [ ] T001 Create the branch `gh-issue-32` from an up-to-date `main` (`git fetch origin && git switch -c gh-issue-32 origin/main`) and commit the Spec Kit artifacts in `specs/019-gh-issue-32/` (spec, plan, research, data model, contracts, quickstart, tasks, checklists) as the first commit. All later work is committed on this branch (constitution, Development Workflow).
-- [ ] T002 Add `google-genai>=2.29,<3` to `dependencies` in `pyproject.toml`, run `uv lock` and commit the updated `uv.lock`. Against the installed SDK, verify the following and record the results in `specs/019-gh-issue-32/research.md` (new section "R8 – SDK verification"):
+- [X] T001 Create the branch `gh-issue-32` from an up-to-date `main` (`git fetch origin && git switch -c gh-issue-32 origin/main`) and commit the Spec Kit artifacts in `specs/019-gh-issue-32/` (spec, plan, research, data model, contracts, quickstart, tasks, checklists) as the first commit. All later work is committed on this branch (constitution, Development Workflow).
+- [X] T002 Add `google-genai>=2.29,<3` to `dependencies` in `pyproject.toml`, run `uv lock` and commit the updated `uv.lock`. Against the installed SDK, verify the following and record the results in `specs/019-gh-issue-32/research.md` (new section "R8 – SDK verification"):
   - (a) `mypy --strict` accepts `from google import genai` / `from google.genai import errors, types` without `ignore_missing_imports`. If not, add a narrow `[[tool.mypy.overrides]]` with a justification comment.
   - (b) With `genai.Client(vertexai=False, api_key=..., http_options=types.HttpOptions(base_url=..., api_version="v1beta", timeout=<ms>, httpx_async_client=<httpx.AsyncClient>))`, a request:
     - is sent to `<base_url>/v1beta/models/<model>:generateContent`;
@@ -46,7 +46,7 @@ description: "Task list for the Google (Gemini) provider (issue #32)"
 
 **Purpose**: the registry fields required by FR-013a/c, the Google registry file that uses them, and the harness change used by all provider tests.
 
-- [ ] T003 In `src/invio/llm/registry.py`, add three optional fields to `ModelInfo` and `_ModelEntry` and copy them in `load_registry`:
+- [X] T003 In `src/invio/llm/registry.py`, add three optional fields to `ModelInfo` and `_ModelEntry` and copy them in `load_registry`:
   - `thinking_level: Literal["minimal", "low", "medium", "high"] | None = None`.
   - `thinking_allowance_tokens: StrictInt | None = Field(default=None, gt=0)` (`ModelInfo`: `int | None = None`).
   - `keep_default_temperature: StrictBool = False` (`ModelInfo`: `bool = False`).
@@ -55,7 +55,7 @@ description: "Task list for the Google (Gemini) provider (issue #32)"
   - `thinking_level: <minimal|low|medium|high>  # optional; required for google models`
   - `thinking_allowance_tokens: <integer > 0>  # optional; required for google models`
   - `keep_default_temperature: <true|false>  # optional, default false; the request sends no temperature`
-- [ ] T004 Create `src/invio/llm/models.d/google.yaml` (`schema_version: 1`, `provider: google`) with exactly two models, first = fast and second = smart:
+- [X] T004 Create `src/invio/llm/models.d/google.yaml` (`schema_version: 1`, `provider: google`) with exactly two models, first = fast and second = smart:
   - `gemini-3.5-flash-lite`: `input_price_per_mtok: 0.30`, `output_price_per_mtok: 2.50`, `context_window: 1048576`, `thinking_level: minimal`, `thinking_allowance_tokens: 1024`, `keep_default_temperature: true`.
   - `gemini-3.8-flash`: `input_price_per_mtok: 0.75`, `output_price_per_mtok: 3.75`, `context_window: 1048576`, `thinking_level: low`, `thinking_allowance_tokens: 4096`, `keep_default_temperature: true`.
   - Header comment, modelled on `anthropic.yaml`. It records:
@@ -66,14 +66,14 @@ description: "Task list for the Google (Gemini) provider (issue #32)"
     - that `gemini-3.8-flash` costs 1.50/7.50 from 2027-01-01, so the file must be updated then;
     - that output prices include thinking tokens.
   - Re-verify IDs, prices and thinking levels against Google's pages on the day of implementation.
-- [ ] T005 Extend `tests/test_llm_registry.py`:
+- [X] T005 Extend `tests/test_llm_registry.py`:
   - The three fields are accepted and exposed on `ModelInfo`. They default to `None` / `None` / `False` when absent, and the existing `mistral.yaml`, `openai.yaml` and `anthropic.yaml` still load unchanged.
   - These values are rejected with a `ModelRegistryError` naming the file and the field:
     - an unknown `thinking_level` (`"off"`, `"none"`, `1`);
     - a `thinking_allowance_tokens` of `0`, a negative number, a float or a string;
     - a `keep_default_temperature` given as `"yes"` or `1`.
   - The real `google.yaml` defines `thinking_level` and `thinking_allowance_tokens` for every entry, and sets `keep_default_temperature: true` for both models.
-- [ ] T006 [P] In `tests/sdk_harness.py`, add `headers: dict[str, str]` (lower-cased names) to `RecordedRequest` and fill it in `Recorder.__call__`. Keep the existing fields, so `tests/test_llm_anthropic.py`, `test_llm_openai.py` and `test_llm_mistral.py` are unchanged. Run those three modules to confirm.
+- [X] T006 [P] In `tests/sdk_harness.py`, add `headers: dict[str, str]` (lower-cased names) to `RecordedRequest` and fill it in `Recorder.__call__`. Keep the existing fields, so `tests/test_llm_anthropic.py`, `test_llm_openai.py` and `test_llm_mistral.py` are unchanged. Run those three modules to confirm.
 
 **Checkpoint**: the registry suite and the existing provider suites are green.
 
