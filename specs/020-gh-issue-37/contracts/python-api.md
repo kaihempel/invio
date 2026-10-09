@@ -115,7 +115,11 @@ def dump_yaml_data(data: Mapping[str, Any]) -> str: ...  # job file style, multi
 ## `invio.cli.errors` (changed)
 
 ```python
-def format_llm_error(exc: LLMError, *, provider: str | None = None, model: str | None = None) -> str: ...
+def format_llm_error(
+    exc: LLMError, *, provider: str | None = None, model: str | None = None
+) -> str: ...
+
+
 # "Error: [<provider>/<model>: ]<ErrorClass>: <message>"; also used by `invio llm test`
 ```
 
