@@ -1,0 +1,10 @@
+User-agent: *
+Disallow:
+
+Sitemap: https://example.com/map-1.xml
+Sitemap: https://example.com/map-2.xml
+Sitemap: https://example.com/map-3.xml
+Sitemap: https://example.com/map-4.xml
+Sitemap: https://example.com/map-5.xml
+Sitemap: https://example.com/map-6.xml
+Sitemap: https://example.com/map-7.xml

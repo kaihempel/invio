@@ -57,7 +57,7 @@ async def default_deps(
     engine = create_db_engine(check_database_url(settings.require_secret("database_url")))
     providers: list[LLMProvider] = []
     web: WebPageSource | None = None
-    youtube = _youtube_source(settings)
+    youtube = YoutubeSource.from_settings(settings)
     try:
         client = SafeHttpClient(
             HttpClientConfig.from_settings(settings),
@@ -125,16 +125,6 @@ async def default_deps(
     finally:
         youtube.close()
         await _close_all(web, providers, engine)
-
-
-def _youtube_source(settings: Settings) -> YoutubeSource:
-    """The YouTube adapter (blank cookies/proxy values are already ``None`` in ``Settings``)."""
-    proxy = settings.youtube_proxy
-    return YoutubeSource(
-        cookies_file=settings.youtube_cookies_file,
-        proxy=proxy.get_secret_value() if proxy is not None else None,
-        timeout=settings.youtube_timeout_seconds,
-    )
 
 
 async def _close_all(

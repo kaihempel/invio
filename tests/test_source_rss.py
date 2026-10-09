@@ -10,7 +10,13 @@ from invio.config.job import RssSource
 from invio.domain import Candidate, url_hash
 from invio.sources.base import Source
 from invio.sources.http import FetchError, HttpClientConfig, SafeHttpClient
-from invio.sources.rss import TEASER_MAX_CHARS, RssFeedSource, _entry_date
+from invio.sources.rss import (
+    TEASER_MAX_CHARS,
+    FeedSummary,
+    RssFeedSource,
+    _entry_date,
+    describe_feed,
+)
 from invio.sources.text import html_to_text
 from tests.http_helpers import LOOPBACK, LoopbackServer, Route, server  # noqa: F401
 
@@ -514,3 +520,98 @@ def test_html_to_text(html: str, expected: str) -> None:
 )
 def test_entry_date_is_defensive(entry: dict[str, object], expected: datetime | None) -> None:
     assert _entry_date(entry) == expected
+
+
+# --- describe_feed -----------------------------------------------------------------------------
+
+DISCOVERY = Path(__file__).parent / "fixtures" / "discovery"
+
+
+def test_describe_rss_fixture() -> None:
+    summary = describe_feed((DISCOVERY / "feed_rss.xml").read_bytes())
+
+    assert summary == FeedSummary(
+        title="Example Blog", entry_count=3, newest=datetime(2026, 10, 1, 8, 0, tzinfo=UTC)
+    )
+
+
+def test_describe_atom_fixture_uses_published_else_updated() -> None:
+    summary = describe_feed((DISCOVERY / "feed_atom.xml").read_bytes())
+
+    assert summary == FeedSummary(
+        title="Example Atom", entry_count=2, newest=datetime(2026, 10, 2, 10, 0, tzinfo=UTC)
+    )
+
+
+def test_describe_empty_but_well_formed_feed() -> None:
+    summary = describe_feed((DISCOVERY / "feed_empty.xml").read_bytes())
+
+    assert summary == FeedSummary(title="Empty Blog", entry_count=0, newest=None)
+
+
+def test_describe_entries_without_dates_have_no_newest() -> None:
+    summary = describe_feed(rss("<title>A</title><link>https://e.com/a</link>"))
+
+    assert summary == FeedSummary(title="T", entry_count=1, newest=None)
+
+
+def test_describe_truncated_feed_with_entries_is_still_a_feed() -> None:
+    content = rss("<title>A</title><link>https://e.com/a</link>").removesuffix(b"</channel></rss>")
+
+    summary = describe_feed(content)
+
+    assert summary is not None
+    assert summary.entry_count == 1
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        (DISCOVERY / "feed_broken.xml").read_bytes(),
+        (DISCOVERY / "not_a_feed.html").read_bytes(),
+        b"",
+    ],
+)
+def test_describe_rejects_what_is_not_a_feed(content: bytes) -> None:
+    assert describe_feed(content) is None
+
+
+def test_describe_title_html_is_stripped_and_collapsed() -> None:
+    content = (
+        b'<?xml version="1.0"?><rss version="2.0"><channel>'
+        b"<title>&lt;b&gt;Big&lt;/b&gt;\n   News &amp;amp; More</title>"
+        b"<link>https://e.com/</link><description>d</description></channel></rss>"
+    )
+
+    summary = describe_feed(content)
+
+    assert summary is not None
+    assert summary.title == "Big News & More"
+
+
+def test_describe_plain_text_atom_title_keeps_angle_brackets() -> None:
+    content = (
+        b'<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom">'
+        b'<title type="text">a &lt;b&gt; c</title><id>x</id>'
+        b"<updated>2026-01-01T00:00:00Z</updated></feed>"
+    )
+
+    summary = describe_feed(content)
+
+    assert summary is not None
+    assert summary.title == "a <b> c"
+
+
+def test_describe_missing_title_is_none() -> None:
+    content = b'<?xml version="1.0"?><rss version="2.0"><channel><link>https://e.com/</link></channel></rss>'
+
+    assert describe_feed(content) == FeedSummary(title=None, entry_count=0, newest=None)
+
+
+def test_describe_truncated_feed_needs_an_entry_link_that_resolves() -> None:
+    truncated = b"</channel></rss>"
+    relative = rss("<title>A</title><link>/a</link>").removesuffix(truncated)
+    unusable = rss("<title>A</title><link>mailto:me@e.com</link>").removesuffix(truncated)
+
+    assert describe_feed(relative, base_url="https://e.com/feed") is not None
+    assert describe_feed(unusable, base_url="https://e.com/feed") is None

@@ -61,3 +61,12 @@ def test_questionary_none_answer_aborts() -> None:
         prompts._answer(None)
     assert prompts._answer("x") == "x"
     assert prompts._answer(False) is False
+
+
+def test_source_discovery_stays_below_the_upper_layers() -> None:
+    banned = ("invio.cli", "invio.services", "invio.pipeline", "invio.db")
+    path = Path(invio.__file__).parent / "sources" / "discover.py"
+
+    offenders = [m for m in _imported_modules(path) if m.startswith(banned)]
+
+    assert offenders == []

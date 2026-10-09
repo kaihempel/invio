@@ -26,7 +26,14 @@ from invio.sources.freshness import age_cutoff, clamp_or_expire
 from invio.sources.http import NotModified, SafeHttpClient
 from invio.sources.urls import http_url_or_none
 
-__all__ = ["MAX_CHILD_SITEMAPS", "MAX_DEPTH", "MAX_ENTRIES_PER_SITEMAP", "SitemapUrlSource"]
+__all__ = [
+    "MAX_CHILD_SITEMAPS",
+    "MAX_DEPTH",
+    "MAX_ENTRIES_PER_SITEMAP",
+    "SitemapSummary",
+    "SitemapUrlSource",
+    "describe_sitemap",
+]
 
 MAX_DEPTH: Final = 2
 MAX_ENTRIES_PER_SITEMAP: Final = 500
@@ -44,6 +51,15 @@ _PARTIAL_DATE: Final = re.compile(r"^(\d{4})(?:-(\d{2}))?$")
 class _Entry:
     loc: str
     lastmod: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class SitemapSummary:
+    """What :func:`describe_sitemap` learns: kind, number of entries and newest ``lastmod``."""
+
+    is_index: bool
+    entry_count: int  # ``<url>`` entries of a urlset, ``<sitemap>`` children of an index
+    newest: datetime | None
 
 
 class SitemapUrlSource:
@@ -120,6 +136,27 @@ class SitemapUrlSource:
         return list(candidates.values())
 
 
+def describe_sitemap(content: bytes, *, url: str, limit: int) -> SitemapSummary | None:
+    """Summarise ``content`` if it is a ``urlset`` or ``sitemapindex``, else ``None``.
+
+    Malformed XML (and a body that inflates beyond ``limit`` bytes, for gzip) is "not a
+    sitemap", not an error. Children of an index are not fetched.
+    """
+    try:
+        root = _parse(content, limit, url=url)
+    except FetchError:
+        return None
+    kind = _local_name(root.tag)
+    if kind not in ("urlset", "sitemapindex"):
+        return None
+    container = "url" if kind == "urlset" else "sitemap"
+    entries = _children_text(root, container)
+    dates = [date for _, node in entries if (date := _node_lastmod(node)) is not None]
+    return SitemapSummary(
+        is_index=kind == "sitemapindex", entry_count=len(entries), newest=max(dates, default=None)
+    )
+
+
 def _local_name(tag: object) -> str:
     """The tag without its ``{namespace}`` prefix (sitemaps in the wild omit or vary it)."""
     return tag.rsplit("}", 1)[-1] if isinstance(tag, str) else ""
@@ -171,9 +208,13 @@ def _urlset_entries(root: Element, base_url: str) -> list[_Entry]:
         url = http_url_or_none(loc, base_url)
         if url is None:
             continue
-        lastmod = next((c.text for c in node if _local_name(c.tag) == "lastmod"), None)
-        entries.append(_Entry(url, _parse_lastmod(lastmod)))
+        entries.append(_Entry(url, _node_lastmod(node)))
     return entries
+
+
+def _node_lastmod(node: Element) -> datetime | None:
+    """The parsed ``<lastmod>`` child of a ``<url>`` or ``<sitemap>`` element, if any."""
+    return _parse_lastmod(next((c.text for c in node if _local_name(c.tag) == "lastmod"), None))
 
 
 def _parse_lastmod(value: str | None) -> datetime | None:

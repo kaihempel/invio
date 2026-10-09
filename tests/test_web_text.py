@@ -12,11 +12,12 @@ from invio.sources.http import FetchResult
 from invio.sources.text import parse_html
 from invio.sources.web import (
     _content_hash,
-    _decode,
-    _is_html,
     _region_text,
     _regions,
     _title,
+    decode_html,
+    html_base_url,
+    is_html,
 )
 
 URL = "https://example.org/page"
@@ -237,46 +238,46 @@ def page(text: str = TEXT, head: str = "") -> str:
 
 
 def test_default_encoding_is_utf8() -> None:
-    assert TEXT in _decode(result(page().encode("utf-8"), "text/html"))
-    assert TEXT in _decode(result(page().encode("utf-8")))
+    assert TEXT in decode_html(result(page().encode("utf-8"), "text/html"))
+    assert TEXT in decode_html(result(page().encode("utf-8")))
 
 
 def test_header_charset_is_honoured() -> None:
     content = page().encode("iso-8859-1")
 
-    assert "Grüße aus Köln, café" in _decode(result(content, "text/html; charset=ISO-8859-1"))
+    assert "Grüße aus Köln, café" in decode_html(result(content, "text/html; charset=ISO-8859-1"))
 
 
 def test_header_charset_beats_meta_charset() -> None:
     content = page(head='<meta charset="iso-8859-1">').encode("utf-8")
 
-    assert TEXT in _decode(result(content, 'text/html; charset="utf-8"'))
+    assert TEXT in decode_html(result(content, 'text/html; charset="utf-8"'))
 
 
 def test_meta_charset_is_used_without_header_charset() -> None:
     content = page(head='<meta charset="iso-8859-1">').encode("iso-8859-1")
 
-    assert "Grüße aus Köln, café" in _decode(result(content, "text/html"))
+    assert "Grüße aus Köln, café" in decode_html(result(content, "text/html"))
 
 
 def test_meta_http_equiv_content_type_is_used() -> None:
     meta = '<meta http-equiv="Content-Type" content="text/html; charset=ISO-8859-1">'
     content = page(head=meta).encode("iso-8859-1")
 
-    assert "Grüße aus Köln, café" in _decode(result(content, "text/html"))
+    assert "Grüße aus Köln, café" in decode_html(result(content, "text/html"))
 
 
 def test_meta_beyond_the_first_1024_bytes_is_ignored() -> None:
     padding = "<!--" + "x" * 1100 + "-->"
     content = page(head=padding + '<meta charset="iso-8859-1">').encode("utf-8")
 
-    assert TEXT in _decode(result(content, "text/html"))
+    assert TEXT in decode_html(result(content, "text/html"))
 
 
 def test_bom_beats_header_and_meta() -> None:
     content = b"\xef\xbb\xbf" + page(head='<meta charset="iso-8859-1">').encode("utf-8")
 
-    decoded = _decode(result(content, "text/html; charset=iso-8859-1"))
+    decoded = decode_html(result(content, "text/html; charset=iso-8859-1"))
 
     assert TEXT in decoded
     assert not decoded.startswith("﻿")
@@ -287,30 +288,30 @@ def test_utf16_bom_is_honoured(encoding: str) -> None:
     bom = {"utf-16-le": b"\xff\xfe", "utf-16-be": b"\xfe\xff"}[encoding]
     content = bom + page().encode(encoding)
 
-    assert TEXT in _decode(result(content, "text/html; charset=utf-8"))
+    assert TEXT in decode_html(result(content, "text/html; charset=utf-8"))
 
 
 @pytest.mark.parametrize("label", ["bogus-charset", "utf-16", "utf-32"])
 def test_unknown_or_unusable_meta_charset_falls_back_to_utf8(label: str) -> None:
     content = page(head=f'<meta charset="{label}">').encode("utf-8")
 
-    assert TEXT in _decode(result(content, "text/html"))
+    assert TEXT in decode_html(result(content, "text/html"))
 
 
 def test_unknown_header_charset_falls_back_to_the_meta_or_utf8() -> None:
     content = page().encode("utf-8")
 
-    assert TEXT in _decode(result(content, "text/html; charset=bogus"))
+    assert TEXT in decode_html(result(content, "text/html; charset=bogus"))
 
 
 def test_invalid_bytes_are_replaced_not_raised() -> None:
-    assert "�" in _decode(result(b"<p>\xff\xfe\xfa</p>", "text/html; charset=utf-8"))
+    assert "�" in decode_html(result(b"<p>\xff\xfe\xfa</p>", "text/html; charset=utf-8"))
 
 
 def test_same_text_in_utf8_and_latin1_hashes_equal() -> None:
     text = "Grüße aus Köln, café"
-    utf8 = _decode(result(page(text).encode("utf-8"), "text/html; charset=utf-8"))
-    latin1 = _decode(result(page(text).encode("iso-8859-1"), "text/html; charset=iso-8859-1"))
+    utf8 = decode_html(result(page(text).encode("utf-8"), "text/html; charset=utf-8"))
+    latin1 = decode_html(result(page(text).encode("iso-8859-1"), "text/html; charset=iso-8859-1"))
 
     assert hash_of(utf8) == hash_of(latin1)
 
@@ -323,7 +324,7 @@ def test_same_text_in_utf8_and_latin1_hashes_equal() -> None:
     ["text/html", "TEXT/HTML; charset=utf-8", "application/xhtml+xml", " text/html ;q=1"],
 )
 def test_html_content_types_are_accepted(content_type: str) -> None:
-    assert _is_html({"content-type": content_type}, b"anything")
+    assert is_html({"content-type": content_type}, b"anything")
 
 
 @pytest.mark.parametrize(
@@ -333,7 +334,7 @@ def test_html_content_types_are_accepted(content_type: str) -> None:
 def test_other_content_types_are_rejected_even_if_the_body_looks_like_html(
     content_type: str,
 ) -> None:
-    assert not _is_html({"content-type": content_type}, b"<!doctype html><html>")
+    assert not is_html({"content-type": content_type}, b"<!doctype html><html>")
 
 
 @pytest.mark.parametrize(
@@ -353,7 +354,7 @@ def test_other_content_types_are_rejected_even_if_the_body_looks_like_html(
     ],
 )
 def test_missing_content_type_sniffs_for_an_html_start(body: bytes) -> None:
-    assert _is_html({}, body)
+    assert is_html({}, body)
 
 
 @pytest.mark.parametrize(
@@ -370,7 +371,7 @@ def test_missing_content_type_sniffs_for_an_html_start(body: bytes) -> None:
     ],
 )
 def test_missing_content_type_rejects_other_bodies(body: bytes) -> None:
-    assert not _is_html({}, body)
+    assert not is_html({}, body)
 
 
 # --- charset allowlist -----------------------------------------------------------------------
@@ -399,7 +400,7 @@ def test_missing_content_type_rejects_other_bodies(body: bytes) -> None:
 def test_web_encodings_are_honoured(label: str, text: str) -> None:
     content = f"<p>{text}</p>".encode(label)
 
-    assert text in _decode(result(content, f"text/html; charset={label}"))
+    assert text in decode_html(result(content, f"text/html; charset={label}"))
 
 
 @pytest.mark.parametrize(
@@ -427,20 +428,20 @@ def test_web_encodings_are_honoured(label: str, text: str) -> None:
 def test_legacy_labels_are_read_as_browsers_read_them(label: str, codec: str, text: str) -> None:
     content = f"<p>{text}</p>".encode(codec)
 
-    assert text in _decode(result(content, f"text/html; charset={label}"))
+    assert text in decode_html(result(content, f"text/html; charset={label}"))
     meta = f'<meta charset="{label}">'.encode() + content
-    assert text in _decode(result(meta, "text/html"))
+    assert text in decode_html(result(meta, "text/html"))
 
 
 @pytest.mark.parametrize("label", ["iso-8859-1", "latin1", "l1", "ascii", "us-ascii"])
 def test_latin1_and_ascii_labels_mean_windows_1252(label: str) -> None:
-    assert "€ é" in _decode(result(b"<p>\x80 \xe9</p>", f"text/html; charset={label}"))
+    assert "€ é" in decode_html(result(b"<p>\x80 \xe9</p>", f"text/html; charset={label}"))
 
 
 def test_utf16_header_without_bom_is_little_endian() -> None:
     content = "<p>héllo</p>".encode("utf-16-le")
 
-    assert "héllo" in _decode(result(content, "text/html; charset=utf-16"))
+    assert "héllo" in decode_html(result(content, "text/html; charset=utf-16"))
 
 
 @pytest.mark.parametrize(
@@ -449,6 +450,22 @@ def test_utf16_header_without_bom_is_little_endian() -> None:
 def test_other_codecs_are_rejected_like_unknown_labels(label: str) -> None:
     content = "<p>caf\u00e9 +AGE- \\u0041</p>".encode()
 
-    assert "caf\u00e9 +AGE- \\u0041" in _decode(result(content, f"text/html; charset={label}"))
+    assert "caf\u00e9 +AGE- \\u0041" in decode_html(result(content, f"text/html; charset={label}"))
     meta = f'<meta charset="{label}">'.encode() + content
-    assert "caf\u00e9 +AGE- \\u0041" in _decode(result(meta, "text/html"))
+    assert "caf\u00e9 +AGE- \\u0041" in decode_html(result(meta, "text/html"))
+
+
+# --- html_base_url ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("html", "expected"),
+    [
+        ("<p>x</p>", URL),
+        ('<base href="https://cdn.example.org/a/"><p>x</p>', "https://cdn.example.org/a/"),
+        ('<base href="/docs/"><p>x</p>', "https://example.org/docs/"),
+        ('<base href="javascript:void(0)"><p>x</p>', URL),
+    ],
+)
+def test_html_base_url(html: str, expected: str) -> None:
+    assert html_base_url(parse_html(html), URL) == expected

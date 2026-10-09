@@ -11,7 +11,12 @@ from invio.config.job import SitemapSource
 from invio.domain import Candidate
 from invio.sources.base import Source
 from invio.sources.http import FetchError, HttpClientConfig, SafeHttpClient
-from invio.sources.sitemap import MAX_ENTRIES_PER_SITEMAP, SitemapUrlSource
+from invio.sources.sitemap import (
+    MAX_ENTRIES_PER_SITEMAP,
+    SitemapSummary,
+    SitemapUrlSource,
+    describe_sitemap,
+)
 from tests.http_helpers import LOOPBACK, LoopbackServer, Route, server  # noqa: F401
 
 SITEMAPS = Path(__file__).parent / "fixtures" / "sitemaps"
@@ -203,3 +208,64 @@ def test_config_rejects_invalid_pattern() -> None:
         SitemapSource.model_validate(
             {"type": "sitemap", "url": "https://e.com/s.xml", "url_pattern": "("}
         )
+
+
+# --- describe_sitemap --------------------------------------------------------------------------
+
+DISCOVERY = Path(__file__).parent / "fixtures" / "discovery"
+LIMIT = 1_000_000
+
+
+def describe(content: bytes, limit: int = LIMIT) -> SitemapSummary | None:
+    return describe_sitemap(content, url="https://example.com/sitemap.xml", limit=limit)
+
+
+def test_describe_urlset_counts_urls_and_finds_the_newest_lastmod() -> None:
+    summary = describe((DISCOVERY / "sitemap_urlset.xml").read_bytes())
+
+    assert summary == SitemapSummary(
+        is_index=False, entry_count=3, newest=datetime(2026, 9, 30, tzinfo=UTC)
+    )
+
+
+def test_describe_index_counts_children_without_fetching_them() -> None:
+    summary = describe((DISCOVERY / "sitemap_index.xml").read_bytes())
+
+    assert summary == SitemapSummary(
+        is_index=True, entry_count=2, newest=datetime(2026, 9, 20, tzinfo=UTC)
+    )
+
+
+def test_describe_urlset_without_lastmod_has_no_newest() -> None:
+    assert describe(urlset(url("https://e.com/a"))) == SitemapSummary(False, 1, None)
+
+
+def test_describe_empty_urlset_is_still_a_sitemap() -> None:
+    assert describe(urlset()) == SitemapSummary(False, 0, None)
+
+
+def test_describe_gzip_body() -> None:
+    body = gzip.compress(urlset(url("https://e.com/a", "2026-01-02")))
+
+    assert describe(body) == SitemapSummary(False, 1, datetime(2026, 1, 2, tzinfo=UTC))
+
+
+def test_describe_gzip_inflating_beyond_the_limit_is_not_a_sitemap() -> None:
+    body = gzip.compress(urlset(url("https://e.com/" + "a" * 5_000)))
+
+    assert describe(body, limit=1_000) is None
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        (DISCOVERY / "feed_rss.xml").read_bytes(),
+        (DISCOVERY / "not_a_feed.html").read_bytes(),
+        b"<urlset xmlns='x'><url><loc>https://e.com/a</loc>",  # truncated
+        b"",
+        b"\x1f\x8bnot really gzip",
+        b'<!DOCTYPE urlset [<!ENTITY a "b">]><urlset><url><loc>&a;</loc></url></urlset>',
+    ],
+)
+def test_describe_rejects_what_is_not_a_sitemap(content: bytes) -> None:
+    assert describe(content) is None

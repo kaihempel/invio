@@ -27,7 +27,7 @@ from invio.sources.http import NotModified, SafeHttpClient
 from invio.sources.text import TEASER_MAX_CHARS, collapse, html_to_text, teaser
 from invio.sources.urls import http_url_or_none
 
-__all__ = ["TEASER_MAX_CHARS", "RssFeedSource"]
+__all__ = ["TEASER_MAX_CHARS", "FeedSummary", "RssFeedSource", "describe_feed"]
 
 # Notes feedparser raises for a feed it parsed fine: no or a non-XML Content-Type (the body is
 # passed without headers on purpose) and an encoding that differs from the declared one.
@@ -41,6 +41,16 @@ class _ParsedFeed:
     version: str  # e.g. "rss20" or "atom10"; empty when the body is no known feed format
     broken: bool  # the parser hit a real error (not just a harmless bozo note)
     entries: list[Mapping[str, Any]]
+    title: str = ""  # the feed's own title as plain text; empty when absent
+
+
+@dataclass(frozen=True, slots=True)
+class FeedSummary:
+    """What :func:`describe_feed` learns about a feed: its title, size and newest entry date."""
+
+    title: str | None
+    entry_count: int
+    newest: datetime | None
 
 
 class RssFeedSource:
@@ -74,8 +84,7 @@ class RssFeedSource:
         feed = _parse(result.content)
         mapped = [_candidate(entry, base_url=result.url) for entry in feed.entries]
         candidates = [candidate for candidate in mapped if candidate is not None]
-        # Some entries survive a parse error (truncated feed); none means it is unusable.
-        if not feed.version or (feed.broken and not candidates):
+        if not _is_usable(feed, has_entries=bool(candidates)):
             raise FetchError("malformed_feed", url=url)
         now = self._now()
         cutoff = age_cutoff(now, config.max_age_days)
@@ -94,6 +103,40 @@ class RssFeedSource:
         return kept
 
 
+def describe_feed(content: bytes, *, base_url: str | None = None) -> FeedSummary | None:
+    """Summarise ``content`` if it is a feed, else ``None``.
+
+    The same rule as :meth:`RssFeedSource.fetch`: feedparser must recognise a feed format, and
+    a parse error is tolerated only while at least one entry survived. A well-formed feed
+    without entries is a feed (``entry_count`` 0, no newest date). The newest date is the
+    latest ``published`` (else ``updated``) of the entries. Pass the feed's ``base_url`` (its
+    final URL) so that "usable" means an entry link that resolves to an http(s) URL, as in
+    ``fetch``; without it any non-blank link counts.
+    """
+    feed = _parse(content)
+    linked = any(_has_link(entry, base_url) for entry in feed.entries)
+    if not _is_usable(feed, has_entries=linked):
+        return None
+    dates = [date for entry in feed.entries if (date := _entry_date(entry)) is not None]
+    return FeedSummary(
+        title=feed.title or None,
+        entry_count=len(feed.entries),
+        newest=max(dates, default=None),
+    )
+
+
+def _has_link(entry: Mapping[str, Any], base_url: str | None) -> bool:
+    if base_url is not None:
+        return _entry_url(entry, base_url=base_url) is not None
+    link = entry.get("link")
+    return isinstance(link, str) and bool(link.strip())
+
+
+def _is_usable(feed: _ParsedFeed, *, has_entries: bool) -> bool:
+    """A recognised feed format; a parse error is survivable only with some usable entry."""
+    return bool(feed.version) and not (feed.broken and not has_entries)
+
+
 def _parse(content: bytes) -> _ParsedFeed:
     """Parse ``content`` with feedparser.
 
@@ -108,7 +151,15 @@ def _parse(content: bytes) -> _ParsedFeed:
         version=str(parsed.get("version") or ""),
         broken=error is not None and not isinstance(error, _HARMLESS_BOZO),
         entries=entries,
+        title=_feed_title(parsed.get("feed")),
     )
+
+
+def _feed_title(feed: object) -> str:
+    """The feed's title as plain text (HTML stripped unless declared ``text/plain``)."""
+    if not isinstance(feed, Mapping):
+        return ""
+    return collapse(_entry_text(feed, "title"))
 
 
 def _candidate(entry: Mapping[str, Any], *, base_url: str) -> Candidate | None:

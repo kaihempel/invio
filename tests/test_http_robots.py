@@ -12,6 +12,7 @@ from invio.sources.http import (
     HttpClientConfig,
     SafeHttpClient,
 )
+from invio.sources.robots import parse_robots
 from tests.http_helpers import LOOPBACK, LoopbackServer, Route, second_server, server  # noqa: F401
 
 
@@ -447,3 +448,93 @@ async def test_permanent_failure_disallows_for_the_whole_run(error: FetchError) 
     assert (policy.mode, policy.expires_at) == ("disallow_all", None)
     assert await cache.policy(origin) is policy
     assert len(calls) == 1
+
+
+# --- Sitemap: lines ----------------------------------------------------------------------------
+
+
+def test_parse_robots_collects_sitemap_lines_in_file_order() -> None:
+    policy = parse_robots(
+        "Sitemap: https://example.com/a.xml\n"
+        "User-agent: *\n"
+        "Disallow: /x\n"
+        "SITEMAP: http://example.com/b.xml  # comment\n"
+        "\n"
+        "User-agent: otherbot\n"
+        "sitemap:https://example.com/c.xml\n"
+    )
+
+    assert policy.sitemaps == (
+        "https://example.com/a.xml",
+        "http://example.com/b.xml",
+        "https://example.com/c.xml",
+    )
+
+
+def test_parse_robots_keeps_only_absolute_http_sitemap_urls() -> None:
+    policy = parse_robots(
+        "Sitemap: /relative.xml\n"
+        "Sitemap: ftp://example.com/s.xml\n"
+        "Sitemap: javascript:alert(1)\n"
+        "Sitemap: https:///nohost.xml\n"
+        "Sitemap: http://[::1/unclosed.xml\n"
+        "Sitemap:\n"
+        "Sitemap: https://example.com/ok.xml\n"
+    )
+
+    assert policy.sitemaps == ("https://example.com/ok.xml",)
+
+
+def test_parse_robots_without_sitemaps_has_none() -> None:
+    assert parse_robots("User-agent: *\nDisallow:\n").sitemaps == ()
+
+
+async def test_robots_sitemaps_returns_the_announced_urls_and_reuses_the_cache(
+    server: LoopbackServer,
+) -> None:
+    robots(server, "User-agent: *\nSitemap: https://example.com/s.xml\n")
+    pages(server, "/page")
+
+    async with make_client() as client:
+        found = await client.robots_sitemaps(f"{server.base_url}/page")
+        await client.get(f"{server.base_url}/page")
+
+    assert found == ("https://example.com/s.xml",)
+    assert server.paths().count("/robots.txt") == 1
+
+
+async def test_robots_sitemaps_works_without_respecting_robots(server: LoopbackServer) -> None:
+    robots(server, "Sitemap: https://example.com/s.xml\n")
+
+    async with make_client(respect_robots=False) as client:
+        found = await client.robots_sitemaps(server.base_url)
+
+    assert found == ("https://example.com/s.xml",)
+    assert server.paths() == ["/robots.txt"]
+
+
+@pytest.mark.parametrize("status", [404, 500])
+async def test_robots_sitemaps_is_empty_without_a_usable_robots_txt(
+    server: LoopbackServer, status: int
+) -> None:
+    server.routes["/robots.txt"] = Route(status=status)
+
+    async with make_client() as client:
+        assert await client.robots_sitemaps(server.base_url) == ()
+
+
+async def test_robots_sitemaps_is_empty_for_a_refused_origin() -> None:
+    async with SafeHttpClient(HttpClientConfig(host_interval=0.01)) as client:
+        assert await client.robots_sitemaps("http://10.0.0.5/") == ()
+        assert await client.robots_sitemaps("ftp://example.com/") == ()
+
+
+def test_parse_robots_caps_the_collected_sitemaps() -> None:
+    from invio.sources.robots import MAX_SITEMAPS, parse_robots
+
+    text = "".join(f"Sitemap: https://h/s{i}.xml\n" for i in range(MAX_SITEMAPS + 20))
+
+    policy = parse_robots(text)
+
+    assert len(policy.sitemaps) == MAX_SITEMAPS
+    assert policy.sitemaps[0] == "https://h/s0.xml"
