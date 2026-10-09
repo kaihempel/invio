@@ -203,7 +203,7 @@ class _Capture:
     captured: ClassVar[list[Settings]] = []
 
     @classmethod
-    def from_settings(cls, settings: Settings) -> Self:
+    def from_settings(cls, settings: Settings, *, registry: Any = None) -> Self:
         cls.captured.append(settings)
         return cls()
 
@@ -246,7 +246,7 @@ def _recorded_mistral(*replies: Reply) -> tuple[Recorder, list[float]]:
 
     class _Recorded(MistralProvider):
         @classmethod
-        def from_settings(cls, settings: Settings) -> Self:
+        def from_settings(cls, settings: Settings, *, registry: Any = None) -> Self:
             return cls(
                 require_api_key(settings, "mistral"),
                 timeout_seconds=settings.llm_timeout_seconds,
@@ -450,7 +450,7 @@ def _recorded_openai(
 
     class _Recorded(OpenAIProvider):
         @classmethod
-        def from_settings(cls, settings: Settings) -> Self:
+        def from_settings(cls, settings: Settings, *, registry: Any = None) -> Self:
             provider = cls(
                 require_api_key(settings, "openai"),
                 timeout_seconds=settings.llm_timeout_seconds,
@@ -666,11 +666,11 @@ def _recorded_anthropic(
 
     class _Recorded(AnthropicProvider):
         @classmethod
-        def from_settings(cls, settings: Settings) -> Self:
+        def from_settings(cls, settings: Settings, *, registry: Any = None) -> Self:
             provider = cls(
                 require_api_key(settings, "anthropic"),
                 timeout_seconds=settings.llm_timeout_seconds,
-                registry=llm_registry.default_registry(),
+                registry=registry,
                 **options,
             )
             if built is not None:
@@ -698,8 +698,9 @@ def test_recorded_anthropic_success(
     (request,) = recorder.requests
     assert [client.is_closed for client in recorder.clients] == [True]
     assert (request.method, request.path) == ("POST", "/v1/messages")
-    assert request.has_api_key_header
+    assert request.x_api_key == anthropic_helpers.API_KEY
     assert (request.body["model"], request.body["temperature"]) == (CLAUDE_CHEAP, 0)
+    assert request.body["max_tokens"] == 5
     assert request.body["max_tokens"] == 5
     assert "Hello" not in result.stdout + result.stderr
     assert anthropic_helpers.API_KEY not in result.stdout + result.stderr

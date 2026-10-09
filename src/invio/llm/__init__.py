@@ -7,7 +7,9 @@ Modules:
 * ``registry``: model registry (prices, context windows) merged from ``models.d/*.yaml``.
 * ``factory``: ``@register_provider``, provider discovery, ``get_provider`` and ``resolve``.
 * ``fake``: scripted ``FakeProvider`` for tests.
-* ``http_retry``: retry policy, retry loop and helpers shared by the HTTP-based providers.
+* ``http_retry``: retry policy, retry loop and the error classification shared by the
+  HTTP-based providers.
+* ``loop_clients``: the per-event-loop SDK client table shared by the HTTP-based providers.
 * ``mistral``: the Mistral provider (official SDK, retries with backoff).
 * ``openai``: the OpenAI provider (official SDK, Responses API, shared retry loop).
 * ``anthropic``: the Anthropic provider (official SDK, Messages API, forced tool for structured

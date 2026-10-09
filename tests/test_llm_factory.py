@@ -113,7 +113,7 @@ def test_registry_error_wins_over_missing_key(
 ) -> None:
     class Keyed:
         @classmethod
-        def from_settings(cls, settings: Settings) -> Self:
+        def from_settings(cls, settings: Settings, *, registry: Any = None) -> Self:
             require_api_key(settings, "mistral")
             return cls()
 
@@ -156,9 +156,9 @@ def test_resolve_uses_default_registry_and_settings_when_omitted(
 
 class _KeyedProvider(FakeProvider):
     @classmethod
-    def from_settings(cls, settings: Settings) -> Self:
+    def from_settings(cls, settings: Settings, *, registry: Any = None) -> Self:
         require_api_key(settings, "mistral")
-        return super().from_settings(settings)
+        return super().from_settings(settings, registry=registry)
 
 
 def test_missing_key_surfaces_at_get_provider(patched_providers: Register) -> None:
@@ -295,7 +295,7 @@ ACME_MODULE = textwrap.dedent(
     @register_provider("acme")
     class AcmeProvider:
         @classmethod
-        def from_settings(cls, settings: object) -> Self:
+        def from_settings(cls, settings: object, *, registry: object = None) -> Self:
             return cls()
 
         async def complete(self, system, user, *, model, temperature, max_tokens):

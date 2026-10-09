@@ -143,16 +143,28 @@ def test_provider_without_max_output_tokens_in_registry_is_a_config_error(
         make_provider(registry=registry)
 
 
-def test_factory_built_provider_reads_limits_from_the_default_registry(tmp_path: Path) -> None:
-    """Research R5: ``get_provider(registry=...)`` does not forward the registry."""
+def test_factory_forwards_its_registry_to_the_provider(tmp_path: Path) -> None:
     entry = {"input_price_per_mtok": 1, "output_price_per_mtok": 1, "context_window": 10}
     custom = load_registry([write_registry(tmp_path, "anthropic", {"m": entry})])
 
-    provider = factory.get_provider(
-        "anthropic", make_settings(anthropic_api_key=API_KEY), registry=custom
+    with pytest.raises(LLMConfigError, match="max_output_tokens"):
+        factory.get_provider("anthropic", make_settings(anthropic_api_key=API_KEY), registry=custom)
+
+
+def test_from_settings_uses_a_given_registry(tmp_path: Path) -> None:
+    entry = {
+        "input_price_per_mtok": 1,
+        "output_price_per_mtok": 1,
+        "context_window": 10,
+        "max_output_tokens": 1234,
+    }
+    custom = load_registry([write_registry(tmp_path, "anthropic", {MODEL: entry})])
+
+    provider = AnthropicProvider.from_settings(
+        make_settings(anthropic_api_key=API_KEY), registry=custom
     )
 
-    assert provider is not None  # a directly constructed one would raise LLMConfigError
+    assert provider._registry is custom
 
 
 async def test_directly_built_provider_uses_its_own_registry(tmp_path: Path) -> None:
@@ -192,7 +204,7 @@ async def test_complete_sends_the_expected_request() -> None:
 
     (request,) = recorder.requests
     assert (request.method, request.path) == ("POST", "/v1/messages")
-    assert request.has_api_key_header
+    assert request.x_api_key == API_KEY
     assert request.body["model"] == MODEL
     assert request.body["max_tokens"] == 50
     assert request.body["system"] == SYSTEM
@@ -589,7 +601,7 @@ async def test_only_the_api_key_header_is_sent_to_the_injected_host(
 
     (request,) = recorder.requests
     assert request.host == httpx2.URL(BASE_URL).host
-    assert request.has_api_key_header
+    assert request.x_api_key == API_KEY
     assert not request.has_authorization
 
 
@@ -1177,7 +1189,7 @@ async def test_sdk_retries_are_disabled_and_timeout_has_a_margin() -> None:
     provider, _, _ = make_provider("message_ok", timeout_seconds=10.0)
     await _complete(provider)
 
-    sdk_client, _ = next(iter(provider._clients.values()))
+    sdk_client, _ = next(iter(provider._clients.entries.values()))
 
     assert sdk_client.max_retries == 0
     assert sdk_client.timeout == 15.0

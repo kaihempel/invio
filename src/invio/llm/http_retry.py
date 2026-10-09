@@ -8,7 +8,10 @@ and jitter (:class:`RetryPolicy`); a ``Retry-After`` hint is honoured up to
 authentication, rejected requests, ...) are raised at once.
 
 Nothing here depends on an SDK: the helpers take plain values (status, response headers, body
-text). Only :mod:`invio.llm.base` and the standard library are imported.
+text, transport exception classes). Only :mod:`invio.llm.base` and the standard library are
+imported. :func:`classify_status`, :func:`classify_transport`, :func:`timeout_failure` and
+:func:`bad_response_failure` build the failures every provider shares, so a provider's
+``classify`` only has to unwrap its SDK exceptions and check its own special cases.
 
 Error hygiene: the loop raises ``failure.error`` outside the ``except`` block, so the SDK
 exception is neither its ``__cause__`` nor its ``__context__``, and its warning log record
@@ -19,18 +22,29 @@ This is the *inner*, per-request layer. It is separate from the graph-level
 """
 
 import logging
+import math
 import re
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 
-from invio.llm.base import LLMError
+from invio.llm.base import (
+    LLMAuthError,
+    LLMError,
+    LLMInvalidRequestError,
+    LLMRateLimitError,
+    LLMUnavailableError,
+)
 
 logger = logging.getLogger("invio.llm")
 
 MAX_DETAIL_CHARS = 300
 _DELTA_SECONDS = re.compile(r"[0-9]+(?:\.[0-9]+)?")
+AUTH_STATUSES = frozenset({401, 403})
+_RATE_LIMIT_STATUS = 429
+_CLIENT_ERRORS = range(400, 500)
+_SERVER_ERRORS = range(500, 600)
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,6 +127,87 @@ def describe(what: str, model: str, status: int | None, detail: str = "") -> str
     """Build an error message from a summary, the status, the model and a sanitized detail."""
     where = f"HTTP {status}, model {model}" if status is not None else f"model {model}"
     return f"{what} ({where}){': ' + detail if detail else ''}"
+
+
+def timeout_failure(label: str, *, provider: str, model: str) -> Failure:
+    """Return the (not retried) failure of a request that timed out."""
+    message = describe(f"{label} request timed out", model, None)
+    return Failure("timeout", False, LLMUnavailableError(message, provider=provider, model=model))
+
+
+def bad_response_failure(
+    label: str, *, provider: str, model: str, cause: str, status: int | None = None
+) -> Failure:
+    """Return the (not retried) failure of a response the client cannot use."""
+    message = describe(f"{label} returned an unexpected response{cause}", model, status)
+    error = LLMUnavailableError(message, provider=provider, model=model)
+    return Failure("bad_response", False, error, status)
+
+
+def classify_transport(
+    cause: BaseException,
+    *,
+    label: str,
+    provider: str,
+    model: str,
+    unsendable: tuple[type[BaseException], ...],
+    bad_response: tuple[type[BaseException], ...],
+) -> Failure:
+    """Classify a connection-level failure by the transport exception that caused it.
+
+    ``unsendable`` failures happened before anything was sent and ``bad_response`` ones mean the
+    server answered with something the client cannot use: retrying helps neither. Every other
+    cause is a retryable connection failure.
+    """
+    name = type(cause).__name__
+    if isinstance(cause, unsendable):
+        message = describe(f"{label} request could not be sent ({name})", model, None)
+        error = LLMUnavailableError(message, provider=provider, model=model)
+        return Failure("unsendable", False, error)
+    if isinstance(cause, bad_response):
+        return bad_response_failure(label, provider=provider, model=model, cause=f" ({name})")
+    message = describe(f"{label} connection failed ({name})", model, None)
+    return Failure("connection", True, LLMUnavailableError(message, provider=provider, model=model))
+
+
+def classify_status(
+    status: int,
+    *,
+    label: str,
+    env_var: str,
+    provider: str,
+    model: str,
+    detail: str,
+    headers: Mapping[str, str],
+    now: Callable[[], datetime],
+) -> Failure:
+    """Classify an HTTP error status the same way for every provider.
+
+    401/403 are authentication failures naming ``env_var``; 429 is a retryable rate limit that
+    honours ``Retry-After``; 5xx are retryable server errors; other 4xx are rejected requests;
+    anything else is an unexpected response. Provider-specific cases (an exhausted quota) are
+    checked by the caller first. ``detail`` must already be sanitized (:func:`sanitize_detail`).
+    """
+    if status in AUTH_STATUSES:
+        message = describe(f"{label} rejected the API key; check {env_var}", model, status)
+        return Failure("auth", False, LLMAuthError(message, provider=provider, model=model), status)
+    if status == _RATE_LIMIT_STATUS:
+        wait = retry_after(headers, now)
+        message = describe(f"{label} rate limit exceeded", model, status, detail)
+        finite_wait = wait if wait is not None and math.isfinite(wait) else None
+        limited = LLMRateLimitError(
+            message, provider=provider, model=model, retry_after=finite_wait
+        )
+        return Failure("rate_limit", True, limited, status, wait)
+    if status in _SERVER_ERRORS:
+        message = describe(f"{label} server error", model, status, detail)
+        error = LLMUnavailableError(message, provider=provider, model=model)
+        return Failure("server", True, error, status)
+    if status not in _CLIENT_ERRORS:
+        return bad_response_failure(label, provider=provider, model=model, cause="", status=status)
+    message = describe(f"{label} rejected the request", model, status, detail)
+    invalid = LLMInvalidRequestError(message, provider=provider, model=model, status=status)
+    return Failure("invalid_request", False, invalid, status)
 
 
 def strict_schema(node: object) -> object:

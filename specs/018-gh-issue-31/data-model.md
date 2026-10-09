@@ -30,7 +30,7 @@ file is written, and the date recorded in the file header (as in `openai.yaml`).
 | API key | `require_api_key(settings, "anthropic")` → `INVIO_ANTHROPIC_API_KEY` |
 | `timeout_seconds` | `settings.llm_timeout_seconds` |
 | `retry` | `RetryPolicy()` (shared defaults) |
-| registry | `default_registry()` unless injected through the constructor (the factory never injects; research R5); it is validated when the provider is built |
+| registry | the registry passed by the factory or the constructor, else `default_registry()` (research R5); it is validated when the provider is built |
 | base URL | `https://api.anthropic.com` unless injected (tests) |
 | clients | one `(AsyncAnthropic, httpx2.AsyncClient)` per running event loop |
 

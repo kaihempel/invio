@@ -14,19 +14,14 @@ the status and a sanitized provider message only; the API key, the prompt, the a
 raw response body never appear in them, and the SDK exception is neither their ``__cause__``
 nor their ``__context__``.
 
-The SDK client (and so its HTTP connection pool) is bound to the event loop that uses it, so
-there is one client per running loop, created lazily. :meth:`MistralProvider.aclose` closes the
-client of the running loop; clients of loops that were closed meanwhile cannot be closed any
-more and are dropped on the next use (their sockets are released on garbage collection). The
-client table is guarded by a lock, so threads running their own loops may share one provider.
+There is one SDK client per running event loop (:class:`~invio.llm.loop_clients.LoopClients`),
+created lazily from ``client_factory``.
 """
 
 import asyncio
 import json
-import math
 import random
 import re
-import threading
 from collections.abc import Awaitable, Callable
 from datetime import datetime
 from typing import TYPE_CHECKING, Self
@@ -38,10 +33,7 @@ from pydantic import BaseModel
 
 from invio.config.settings import Settings
 from invio.llm.base import (
-    LLMAuthError,
-    LLMInvalidRequestError,
     LLMProvider,
-    LLMRateLimitError,
     LLMUnavailableError,
     Usage,
     require_api_key,
@@ -51,26 +43,28 @@ from invio.llm.base import (
 from invio.llm.factory import register_provider
 from invio.llm.http_retry import (
     Failure,
+    bad_response_failure,
+    classify_status,
     describe,
     retry_after,
     run_with_retries,
     sanitize_detail,
     strict_schema,
+    timeout_failure,
     utc_now,
 )
 from invio.llm.http_retry import RetryPolicy as RetryPolicy
+from invio.llm.loop_clients import LoopClients
+from invio.llm.registry import ModelRegistry
 
 # Names the Mistral tests (and older callers) import from here.
 _retry_after = retry_after
 _strict_schema = strict_schema
 
 PROVIDER = "mistral"
+_LABEL = "Mistral"
 _ENV_VAR = "INVIO_MISTRAL_API_KEY"
 _SDK_TIMEOUT_MARGIN_S = 5
-_AUTH_STATUSES = frozenset({401, 403})
-_RATE_LIMIT_STATUS = 429
-_CLIENT_ERRORS = range(400, 500)
-_SERVER_ERRORS = range(500, 600)
 _SCHEMA_NAME_LIMIT = 64
 # Errors raised before anything was sent: retrying cannot help.
 _UNSENDABLE = (httpx2.InvalidURL, httpx2.UnsupportedProtocol, httpx2.LocalProtocolError)
@@ -116,42 +110,28 @@ def _classify(exc: Exception, model: str, now: Callable[[], datetime]) -> Failur
     """Map an SDK or transport exception to a ``Failure``; ``None`` if not recognized."""
     name = type(exc).__name__
     if isinstance(exc, httpx2.TimeoutException):
-        message = describe("Mistral request timed out", model, None)
-        return Failure("timeout", False, _unavailable(message, model))
+        return timeout_failure(_LABEL, provider=PROVIDER, model=model)
     if isinstance(exc, _UNSENDABLE):
-        message = describe(f"Mistral request could not be sent ({name})", model, None)
+        message = describe(f"{_LABEL} request could not be sent ({name})", model, None)
         return Failure("unsendable", False, _unavailable(message, model))
     if isinstance(exc, httpx2.TransportError | errors.NoResponseError):
-        message = describe(f"Mistral connection failed ({name})", model, None)
+        message = describe(f"{_LABEL} connection failed ({name})", model, None)
         return Failure("connection", True, _unavailable(message, model))
     if isinstance(exc, httpx2.HTTPError | httpx2.StreamError | errors.ResponseValidationError):
         # Undecodable body, redirect loop, stream misuse or a body the SDK cannot parse.
-        message = describe(f"Mistral returned an unexpected response ({name})", model, None)
-        return Failure("bad_response", False, _unavailable(message, model))
+        return bad_response_failure(_LABEL, provider=PROVIDER, model=model, cause=f" ({name})")
     if not isinstance(exc, errors.MistralError):
         return None
-    status = exc.status_code
-    detail = _safe_detail(exc)
-    if status in _AUTH_STATUSES:
-        message = describe(f"Mistral rejected the API key; check {_ENV_VAR}", model, status)
-        return Failure("auth", False, LLMAuthError(message, provider=PROVIDER, model=model), status)
-    if status == _RATE_LIMIT_STATUS:
-        wait = retry_after(exc.headers, now)
-        message = describe("Mistral rate limit exceeded", model, status, detail)
-        finite_wait = wait if wait is not None and math.isfinite(wait) else None
-        limited = LLMRateLimitError(
-            message, provider=PROVIDER, model=model, retry_after=finite_wait
-        )
-        return Failure("rate_limit", True, limited, status, wait)
-    if status in _SERVER_ERRORS:
-        message = describe("Mistral server error", model, status, detail)
-        return Failure("server", True, _unavailable(message, model), status)
-    if status not in _CLIENT_ERRORS:
-        message = describe("Mistral returned an unexpected response", model, status)
-        return Failure("bad_response", False, _unavailable(message, model), status)
-    message = describe("Mistral rejected the request", model, status, detail)
-    invalid = LLMInvalidRequestError(message, provider=PROVIDER, model=model, status=status)
-    return Failure("invalid_request", False, invalid, status)
+    return classify_status(
+        exc.status_code,
+        label=_LABEL,
+        env_var=_ENV_VAR,
+        provider=PROVIDER,
+        model=model,
+        detail=_safe_detail(exc),
+        headers=exc.headers,
+        now=now,
+    )
 
 
 def _answer_text(response: models.ChatCompletionResponse) -> str:
@@ -191,12 +171,14 @@ class MistralProvider:
         self._sleep = sleep
         self._uniform = uniform
         self._now = now
-        self._clients: dict[asyncio.AbstractEventLoop, tuple[Mistral, httpx2.AsyncClient]] = {}
-        self._clients_lock = threading.Lock()
+        self._clients = LoopClients(self._build_client)
 
     @classmethod
-    def from_settings(cls, settings: Settings) -> Self:
-        """Build the provider; raises ``LLMAuthError`` naming the env var if the key is missing."""
+    def from_settings(cls, settings: Settings, *, registry: ModelRegistry | None = None) -> Self:
+        """Build the provider; raises ``LLMAuthError`` naming the env var if the key is missing.
+
+        The model ``registry`` is not needed by this provider.
+        """
         return cls(
             require_api_key(settings, PROVIDER), timeout_seconds=settings.llm_timeout_seconds
         )
@@ -204,34 +186,19 @@ class MistralProvider:
     def __repr__(self) -> str:
         return f"MistralProvider(timeout_seconds={self.timeout_seconds!r}, retry={self.retry!r})"
 
-    def _client_for_loop(self) -> Mistral:
-        """Return the SDK client of the running loop, building it on its first use."""
-        loop = asyncio.get_running_loop()
-        with self._clients_lock:
-            entry = self._clients.get(loop)
-            if entry is None:
-                # A closed loop's pool cannot be closed any more: drop it (sockets are released
-                # on garbage collection). Clients of other live loops stay untouched.
-                for closed in [other for other in self._clients if other.is_closed()]:
-                    del self._clients[closed]
-                http_client = self._client_factory()
-                sdk_client = Mistral(
-                    api_key=self._api_key,
-                    async_client=http_client,
-                    server_url=self._server_url,
-                    timeout_ms=int((self.timeout_seconds + _SDK_TIMEOUT_MARGIN_S) * 1000),
-                )
-                entry = (sdk_client, http_client)
-                self._clients[loop] = entry
-        return entry[0]
+    def _build_client(self) -> tuple[Mistral, httpx2.AsyncClient]:
+        http_client = self._client_factory()
+        sdk_client = Mistral(
+            api_key=self._api_key,
+            async_client=http_client,
+            server_url=self._server_url,
+            timeout_ms=int((self.timeout_seconds + _SDK_TIMEOUT_MARGIN_S) * 1000),
+        )
+        return sdk_client, http_client
 
     async def aclose(self) -> None:
         """Close the HTTP client of the running loop; the next call builds a new one."""
-        loop = asyncio.get_running_loop()
-        with self._clients_lock:
-            entry = self._clients.pop(loop, None)
-        if entry is not None:
-            await entry[1].aclose()
+        await self._clients.aclose()
 
     async def _attempt(
         self,
@@ -244,7 +211,7 @@ class MistralProvider:
     ) -> tuple[str, Usage]:
         """Send one HTTP request and return the answer text and usage."""
         response = await with_timeout(
-            self._client_for_loop().chat.complete_async(
+            self._clients.get().chat.complete_async(
                 model=model,
                 messages=messages,
                 temperature=temperature,

@@ -87,13 +87,11 @@ the existing providers `src/invio/llm/openai.py` and `mistral.py`.
     needed (constitution I: the format stays versioned).
   - `from_settings(settings)` is the factory's only hook, and the registry is otherwise reachable
     only through the logging wrapper. Injecting it keeps the factory unchanged.
-- **Registry source**: `get_provider(name, settings, registry=...)` does not forward `registry`
-  to `from_settings` (the factory protocol is `from_settings(settings)` only). So a provider
-  built through the factory always reads limits from `default_registry()`, while the logging
-  wrapper uses the injected registry for cost. In production both are `default_registry()`
-  (`pipeline/deps.py`, `cli/commands/llm.py`). Tests that need custom limits construct
-  `AnthropicProvider(..., registry=...)` directly. This is documented in the module docstring
-  and pinned by a test (T007), so it does not silently diverge.
+- **Registry source** (revised in review): `get_provider(name, settings, registry=...)`
+  forwards its registry to `from_settings(settings, *, registry=None)`, so the provider reads
+  limits from the same registry the logging wrapper prices calls with. Without one,
+  `from_settings` falls back to `default_registry()`. Providers that need no registry ignore the
+  argument. Tests pin both the forwarding and the fallback.
 - **Risk noted**: Anthropic's output-tokens-per-minute limit is estimated from `max_tokens` when
   a request starts, so large limits may trigger 429s on low usage tiers. These are retried, and
   surfaced as "rate limit" once retries are exhausted.

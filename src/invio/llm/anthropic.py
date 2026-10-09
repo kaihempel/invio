@@ -15,9 +15,8 @@ Only models that accept a forced ``tool_choice`` and a ``temperature`` may be re
 it is passed through ``extra_body``. Structured calls request the model's registered
 ``max_output_tokens`` (the answer size is not otherwise known), so every ``anthropic`` registry
 entry must define it: building the provider raises :class:`~invio.llm.base.LLMConfigError`
-otherwise. Providers built by the factory read the registry via ``default_registry()`` (the
-factory does not forward its own registry to ``from_settings``); tests that need other limits
-construct the class directly with ``registry=``.
+otherwise. The factory passes its registry to ``from_settings``, so the limits come from the
+same registry that prices the calls; without one, ``default_registry()`` is used.
 
 All retrying is done by the shared loop in :mod:`invio.llm.http_retry` (the SDK's own retries
 are disabled with ``max_retries=0``); this module only maps SDK exceptions to
@@ -36,19 +35,14 @@ refusal text and the raw body never appear in them, and the SDK exception is nei
 Only the ``x-api-key`` credential is ever sent, to an explicit base URL, so neither
 ``ANTHROPIC_AUTH_TOKEN`` nor ``ANTHROPIC_BASE_URL`` can redirect or replace it.
 
-The SDK client (and so its HTTP connection pool) is bound to the event loop that uses it, so
-there is one client per running loop, created lazily from ``client_factory``.
-:meth:`AnthropicProvider.aclose` closes the client of the running loop; clients of loops that
-were closed meanwhile cannot be closed any more and are dropped on the next use. The client
-table is guarded by a lock, so threads running their own loops may share one provider.
+There is one SDK client per running event loop (:class:`~invio.llm.loop_clients.LoopClients`),
+created lazily from ``client_factory``.
 """
 
 import asyncio
 import json
-import math
 import random
 import re
-import threading
 from collections.abc import Awaitable, Callable
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Self
@@ -62,12 +56,9 @@ from pydantic import BaseModel
 from invio.config.settings import Settings
 from invio.llm import registry as llm_registry
 from invio.llm.base import (
-    LLMAuthError,
     LLMConfigError,
-    LLMInvalidRequestError,
     LLMProvider,
     LLMQuotaError,
-    LLMRateLimitError,
     LLMUnavailableError,
     Usage,
     require_api_key,
@@ -76,26 +67,28 @@ from invio.llm.base import (
 )
 from invio.llm.factory import register_provider
 from invio.llm.http_retry import (
+    AUTH_STATUSES,
     Failure,
     RetryPolicy,
+    bad_response_failure,
+    classify_status,
+    classify_transport,
     describe,
-    retry_after,
     run_with_retries,
     sanitize_detail,
+    timeout_failure,
     utc_now,
 )
+from invio.llm.loop_clients import LoopClients
 from invio.llm.registry import ModelRegistry
 
 PROVIDER = "anthropic"
+_LABEL = "Anthropic"
 _ENV_VAR = "INVIO_ANTHROPIC_API_KEY"
 _DEFAULT_BASE_URL = "https://api.anthropic.com"
 _SDK_TIMEOUT_MARGIN_S = 5
-_AUTH_STATUSES = frozenset({401, 403})
 _PAYMENT_REQUIRED = 402
 _BAD_REQUEST = 400
-_RATE_LIMIT_STATUS = 429
-_CLIENT_ERRORS = range(400, 500)
-_SERVER_ERRORS = range(500, 600)
 _TOOL_NAME_LIMIT = 64
 _BILLING_ERROR = "billing_error"
 _CREDIT_BALANCE = "credit balance"
@@ -127,82 +120,60 @@ def _safe_detail(exc: anthropic.APIStatusError) -> str:
 
 
 def _is_credit_exhausted(exc: anthropic.APIStatusError) -> bool:
-    """Return whether the request was refused because the account has no credit left."""
-    if exc.status_code == _PAYMENT_REQUIRED:
-        return True
-    body = exc.body
-    body_type = None
-    if isinstance(body, dict):
-        error = body.get("error")
-        body_type = error.get("type") if isinstance(error, dict) else body.get("type")
-    if _BILLING_ERROR in (getattr(exc, "type", None), body_type):
+    """Return whether the request was refused because the account has no credit left.
+
+    ``exc.type`` is the SDK's reading of the body's ``error.type``.
+    """
+    if exc.status_code == _PAYMENT_REQUIRED or exc.type == _BILLING_ERROR:
         return True
     return exc.status_code == _BAD_REQUEST and _CREDIT_BALANCE in _safe_detail(exc).lower()
-
-
-def _classify_transport(cause: BaseException, model: str) -> Failure:
-    """Classify a connection-level failure by the (``httpx2``) exception that caused it."""
-    name = type(cause).__name__
-    if isinstance(cause, _UNSENDABLE):
-        message = describe(f"Anthropic request could not be sent ({name})", model, None)
-        return Failure("unsendable", False, _unavailable(message, model))
-    if isinstance(cause, _BAD_RESPONSE):
-        message = describe(f"Anthropic returned an unexpected response ({name})", model, None)
-        return Failure("bad_response", False, _unavailable(message, model))
-    message = describe(f"Anthropic connection failed ({name})", model, None)
-    return Failure("connection", True, _unavailable(message, model))
 
 
 def _classify_status(
     exc: anthropic.APIStatusError, model: str, now: Callable[[], datetime]
 ) -> Failure:
     status = exc.status_code
-    detail = _safe_detail(exc)
-    if status in _AUTH_STATUSES:
-        message = describe(f"Anthropic rejected the API key; check {_ENV_VAR}", model, status)
-        return Failure("auth", False, LLMAuthError(message, provider=PROVIDER, model=model), status)
-    if _is_credit_exhausted(exc):
-        message = describe("Anthropic credit exhausted; check plan and billing", model, status)
+    if status not in AUTH_STATUSES and _is_credit_exhausted(exc):
+        message = describe(f"{_LABEL} credit exhausted; check plan and billing", model, status)
         quota = LLMQuotaError(message, provider=PROVIDER, model=model)
         return Failure("quota", False, quota, status)
-    if status == _RATE_LIMIT_STATUS:
-        wait = retry_after(exc.response.headers, now)
-        message = describe("Anthropic rate limit exceeded", model, status, detail)
-        finite_wait = wait if wait is not None and math.isfinite(wait) else None
-        limited = LLMRateLimitError(
-            message, provider=PROVIDER, model=model, retry_after=finite_wait
-        )
-        return Failure("rate_limit", True, limited, status, wait)
-    if status in _SERVER_ERRORS:
-        message = describe("Anthropic server error", model, status, detail)
-        return Failure("server", True, _unavailable(message, model), status)
-    if status not in _CLIENT_ERRORS:
-        message = describe("Anthropic returned an unexpected response", model, status)
-        return Failure("bad_response", False, _unavailable(message, model), status)
-    message = describe("Anthropic rejected the request", model, status, detail)
-    invalid = LLMInvalidRequestError(message, provider=PROVIDER, model=model, status=status)
-    return Failure("invalid_request", False, invalid, status)
+    return classify_status(
+        status,
+        label=_LABEL,
+        env_var=_ENV_VAR,
+        provider=PROVIDER,
+        model=model,
+        detail=_safe_detail(exc),
+        headers=exc.response.headers,
+        now=now,
+    )
+
+
+def _classify_transport(cause: BaseException, model: str) -> Failure:
+    return classify_transport(
+        cause,
+        label=_LABEL,
+        provider=PROVIDER,
+        model=model,
+        unsendable=_UNSENDABLE,
+        bad_response=_BAD_RESPONSE,
+    )
 
 
 def _classify(exc: Exception, model: str, now: Callable[[], datetime]) -> Failure | None:
     """Map an SDK or transport exception to a ``Failure``; ``None`` if not recognized."""
-    name = type(exc).__name__
     # APITimeoutError is a subclass of APIConnectionError: it must be checked first.
-    if isinstance(exc, anthropic.APITimeoutError):
-        message = describe("Anthropic request timed out", model, None)
-        return Failure("timeout", False, _unavailable(message, model))
+    if isinstance(exc, anthropic.APITimeoutError | httpx2.TimeoutException):
+        return timeout_failure(_LABEL, provider=PROVIDER, model=model)
     if isinstance(exc, anthropic.APIConnectionError):
         # The SDK raises these from the transport exception; inspect what caused them.
         return _classify_transport(exc.__cause__ or exc, model)
     # Raw transport errors that the SDK did not wrap.
-    if isinstance(exc, httpx2.TimeoutException):
-        message = describe("Anthropic request timed out", model, None)
-        return Failure("timeout", False, _unavailable(message, model))
     if isinstance(exc, httpx2.InvalidURL | httpx2.HTTPError):
         return _classify_transport(exc, model)
     if isinstance(exc, anthropic.APIResponseValidationError | json.JSONDecodeError):
-        message = describe(f"Anthropic returned an unexpected response ({name})", model, None)
-        return Failure("bad_response", False, _unavailable(message, model))
+        cause = f" ({type(exc).__name__})"
+        return bad_response_failure(_LABEL, provider=PROVIDER, model=model, cause=cause)
     if isinstance(exc, anthropic.APIStatusError):
         return _classify_status(exc, model, now)
     return None
@@ -279,56 +250,41 @@ class AnthropicProvider:
         self._sleep = sleep
         self._uniform = uniform
         self._now = now
-        self._clients: dict[
-            asyncio.AbstractEventLoop, tuple[AsyncAnthropic, httpx2.AsyncClient]
-        ] = {}
-        self._clients_lock = threading.Lock()
+        self._clients = LoopClients(self._build_client)
 
     @classmethod
-    def from_settings(cls, settings: Settings) -> Self:
-        """Build the provider; raises ``LLMAuthError`` naming the env var if the key is missing."""
+    def from_settings(cls, settings: Settings, *, registry: ModelRegistry | None = None) -> Self:
+        """Build the provider; raises ``LLMAuthError`` naming the env var if the key is missing.
+
+        ``registry`` defaults to ``default_registry()``, looked up at call time so that tests
+        can replace it.
+        """
         return cls(
             require_api_key(settings, PROVIDER),
             timeout_seconds=settings.llm_timeout_seconds,
-            # Looked up at call time so that tests can replace the default registry.
-            registry=llm_registry.default_registry(),
+            registry=registry if registry is not None else llm_registry.default_registry(),
         )
 
     def __repr__(self) -> str:
         return f"AnthropicProvider(timeout_seconds={self.timeout_seconds!r}, retry={self.retry!r})"
 
-    def _client_for_loop(self) -> AsyncAnthropic:
-        """Return the SDK client of the running loop, building it on its first use."""
-        loop = asyncio.get_running_loop()
-        with self._clients_lock:
-            entry = self._clients.get(loop)
-            if entry is None:
-                # A closed loop's pool cannot be closed any more: drop it (sockets are released
-                # on garbage collection). Clients of other live loops stay untouched.
-                for closed in [other for other in self._clients if other.is_closed()]:
-                    del self._clients[closed]
-                http_client = self._client_factory()
-                sdk_client = AsyncAnthropic(
-                    api_key=self._api_key,
-                    # Always explicit: the ANTHROPIC_BASE_URL environment variable must not
-                    # redirect the key to another host. An explicit api_key also keeps
-                    # ANTHROPIC_AUTH_TOKEN out of the request (research R10).
-                    base_url=self._base_url,
-                    http_client=http_client,
-                    max_retries=0,
-                    timeout=self.timeout_seconds + _SDK_TIMEOUT_MARGIN_S,
-                )
-                entry = (sdk_client, http_client)
-                self._clients[loop] = entry
-        return entry[0]
+    def _build_client(self) -> tuple[AsyncAnthropic, httpx2.AsyncClient]:
+        http_client = self._client_factory()
+        sdk_client = AsyncAnthropic(
+            api_key=self._api_key,
+            # Always explicit: the ANTHROPIC_BASE_URL environment variable must not redirect the
+            # key to another host. An explicit api_key also keeps ANTHROPIC_AUTH_TOKEN out of
+            # the request (research R10).
+            base_url=self._base_url,
+            http_client=http_client,
+            max_retries=0,
+            timeout=self.timeout_seconds + _SDK_TIMEOUT_MARGIN_S,
+        )
+        return sdk_client, http_client
 
     async def aclose(self) -> None:
         """Close the HTTP client of the running loop; the next call builds a new one."""
-        loop = asyncio.get_running_loop()
-        with self._clients_lock:
-            entry = self._clients.pop(loop, None)
-        if entry is not None:
-            await entry[1].aclose()
+        await self._clients.aclose()
 
     async def _attempt(
         self,
@@ -350,7 +306,7 @@ class AnthropicProvider:
                 "disable_parallel_tool_use": True,
             }
         message = await with_timeout(
-            self._client_for_loop().messages.create(
+            self._clients.get().messages.create(
                 model=model,
                 max_tokens=max_tokens,
                 system=system,
