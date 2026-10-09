@@ -13,6 +13,7 @@ from invio.cli.main import app
 from invio.config.settings import Settings
 from invio.llm import factory
 from invio.llm import registry as llm_registry
+from invio.llm.anthropic import AnthropicProvider
 from invio.llm.base import (
     LLMAuthError,
     LLMError,
@@ -27,7 +28,7 @@ from invio.llm.base import (
 from invio.llm.fake import FakeProvider, FakeReply
 from invio.llm.mistral import MistralProvider
 from invio.llm.openai import OpenAIProvider
-from tests import openai_helpers
+from tests import anthropic_helpers, openai_helpers
 from tests.llm_helpers import write_registry
 from tests.mistral_helpers import API_KEY, Recorder, Reply, recording_options
 
@@ -619,6 +620,221 @@ def test_recorded_openai_hanging_request_is_bounded_by_the_timeout(
     recorder, waits = _recorded_openai(openai_helpers.HANG)
 
     result = _invoke("openai")
+
+    assert result.exit_code == 1
+    assert _last_message(result).startswith("Error: LLMUnavailableError: ")
+    assert "0.2 s" in _last_message(result)
+    assert len(recorder.requests) == 1
+    assert waits == []
+
+
+# --- Anthropic (issue #31, US3) -----------------------------------------------------------
+
+CLAUDE_CHEAP = "claude-haiku-4-5-20251001"
+CLAUDE_SMART = "claude-sonnet-4-6"
+
+
+def _claude_entry(price: int) -> dict[str, object]:
+    return {**_entry(price), "max_output_tokens": 64000}
+
+
+@pytest.fixture
+def anthropic_registry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A registry with two mistral and two anthropic models at different prices."""
+    directory = tmp_path / "with-anthropic"
+    write_registry(directory, "mistral", {PRICEY: _entry(5), CHEAP: _entry(1)})
+    models_dir = write_registry(
+        directory,
+        "anthropic",
+        {CLAUDE_SMART: _claude_entry(5), CLAUDE_CHEAP: _claude_entry(1)},
+    )
+    registry = llm_registry.load_registry([models_dir])
+    monkeypatch.setattr(llm_registry, "default_registry", lambda: registry)
+
+
+def _recorded_anthropic(
+    *replies: anthropic_helpers.Reply, built: list[AnthropicProvider] | None = None
+) -> tuple[anthropic_helpers.Recorder, list[float]]:
+    """Register a real ``AnthropicProvider`` on recorded HTTP replies as ``anthropic``.
+
+    Needs ``patched_providers`` (isolated registry). The key comes from the settings as in
+    production; only the HTTP transport, the base URL and the retry sleep are replaced. Each
+    provider built by the command is appended to ``built``.
+    """
+    recorder = anthropic_helpers.Recorder(replies)
+    options, waits = anthropic_helpers.recording_options(recorder)
+
+    class _Recorded(AnthropicProvider):
+        @classmethod
+        def from_settings(cls, settings: Settings) -> Self:
+            provider = cls(
+                require_api_key(settings, "anthropic"),
+                timeout_seconds=settings.llm_timeout_seconds,
+                registry=llm_registry.default_registry(),
+                **options,
+            )
+            if built is not None:
+                built.append(provider)
+            return provider
+
+    factory.register_provider("anthropic")(_Recorded)
+    return recorder, waits
+
+
+def test_recorded_anthropic_success(
+    patched_providers: Register, monkeypatch: pytest.MonkeyPatch, anthropic_registry: None
+) -> None:
+    monkeypatch.setenv("INVIO_ANTHROPIC_API_KEY", anthropic_helpers.API_KEY)
+    recorder, _ = _recorded_anthropic("message_ok")
+
+    result = _invoke("anthropic")
+
+    assert result.exit_code == 0, result.stderr
+    assert re.fullmatch(
+        rf"ok provider=anthropic model={CLAUDE_CHEAP} input_tokens=12 output_tokens=3 "
+        r"duration_ms=\d+(\.\d+)?\n",
+        result.stdout,
+    )
+    (request,) = recorder.requests
+    assert [client.is_closed for client in recorder.clients] == [True]
+    assert (request.method, request.path) == ("POST", "/v1/messages")
+    assert request.has_api_key_header
+    assert (request.body["model"], request.body["temperature"]) == (CLAUDE_CHEAP, 0)
+    assert request.body["max_tokens"] == 5
+    assert "Hello" not in result.stdout + result.stderr
+    assert anthropic_helpers.API_KEY not in result.stdout + result.stderr
+
+
+def test_recorded_anthropic_model_option_selects_that_model(
+    patched_providers: Register, monkeypatch: pytest.MonkeyPatch, anthropic_registry: None
+) -> None:
+    monkeypatch.setenv("INVIO_ANTHROPIC_API_KEY", anthropic_helpers.API_KEY)
+    recorder, _ = _recorded_anthropic("message_ok")
+
+    result = _invoke("anthropic", "--model", CLAUDE_SMART)
+
+    assert result.exit_code == 0, result.stderr
+    assert f"model={CLAUDE_SMART}" in result.stdout
+    assert recorder.requests[0].body["model"] == CLAUDE_SMART
+
+
+@pytest.mark.parametrize("model", ["claude-opus-9", CHEAP], ids=["unregistered", "mistral"])
+def test_recorded_anthropic_model_must_be_registered_for_anthropic(
+    patched_providers: Register,
+    monkeypatch: pytest.MonkeyPatch,
+    anthropic_registry: None,
+    model: str,
+) -> None:
+    monkeypatch.setenv("INVIO_ANTHROPIC_API_KEY", anthropic_helpers.API_KEY)
+    recorder, _ = _recorded_anthropic("message_ok")
+
+    result = _invoke("anthropic", "--model", model)
+
+    assert result.exit_code == 2
+    assert _last_message(result) == (
+        f"Configuration error: model '{model}' is not registered for LLM provider 'anthropic'"
+    )
+    assert recorder.requests == []
+
+
+@pytest.mark.parametrize("key", [None, "   "], ids=["missing", "blank"])
+def test_recorded_anthropic_without_key_makes_no_request(
+    patched_providers: Register,
+    monkeypatch: pytest.MonkeyPatch,
+    anthropic_registry: None,
+    key: str | None,
+) -> None:
+    if key is not None:
+        monkeypatch.setenv("INVIO_ANTHROPIC_API_KEY", key)
+    recorder, _ = _recorded_anthropic("message_ok")
+
+    result = _invoke("anthropic")
+
+    assert result.exit_code == 2
+    assert _last_message(result) == (
+        "Configuration error: LLM provider 'anthropic' needs an API key: "
+        "set INVIO_ANTHROPIC_API_KEY"
+    )
+    assert recorder.requests == []
+    assert recorder.clients_created == 0
+
+
+@pytest.mark.parametrize(
+    ("replies", "error", "requests", "waits_expected"),
+    [
+        (("error_401",), "LLMAuthError", 1, []),
+        (("error_403",), "LLMAuthError", 1, []),
+        (("error_429",) * 4, "LLMRateLimitError", 4, [1.0, 2.0, 4.0]),
+        (("error_402",), "LLMQuotaError", 1, []),
+        (("error_529",) * 4, "LLMUnavailableError", 4, [1.0, 2.0, 4.0]),
+        (("error_404_model",), "LLMInvalidRequestError", 1, []),
+        (("malformed_200",), "LLMUnavailableError", 1, []),
+        (("message_refusal",), "LLMUnavailableError", 1, []),
+    ],
+    ids=["401", "403", "429", "402", "529", "404", "malformed", "refusal"],
+)
+def test_recorded_anthropic_failures_exit_1(
+    patched_providers: Register,
+    monkeypatch: pytest.MonkeyPatch,
+    anthropic_registry: None,
+    replies: tuple[anthropic_helpers.Reply, ...],
+    error: str,
+    requests: int,
+    waits_expected: list[float],
+) -> None:
+    monkeypatch.setenv("INVIO_ANTHROPIC_API_KEY", anthropic_helpers.API_KEY)
+    recorder, waits = _recorded_anthropic(*replies)
+
+    result = _invoke("anthropic")
+
+    assert result.exit_code == 1
+    message = _last_message(result)
+    assert message.startswith(f"Error: {error}: Anthropic ")
+    assert f"model {CLAUDE_CHEAP}" in message
+    assert result.stdout == ""
+    assert "Traceback" not in result.stderr
+    assert anthropic_helpers.API_KEY not in result.stderr
+    assert "Reply with OK." not in result.stderr
+    assert len(recorder.requests) == requests
+    assert waits == waits_expected
+    assert [client.is_closed for client in recorder.clients] == [True]
+
+
+def test_recorded_anthropic_auth_failure_names_the_setting(
+    patched_providers: Register, monkeypatch: pytest.MonkeyPatch, anthropic_registry: None
+) -> None:
+    monkeypatch.setenv("INVIO_ANTHROPIC_API_KEY", anthropic_helpers.API_KEY)
+    _recorded_anthropic("error_401")
+
+    result = _invoke("anthropic")
+
+    assert _last_message(result).startswith("Error: LLMAuthError: ")
+    assert "INVIO_ANTHROPIC_API_KEY" in _last_message(result)
+
+
+def test_recorded_anthropic_timeout_is_capped(
+    patched_providers: Register, monkeypatch: pytest.MonkeyPatch, anthropic_registry: None
+) -> None:
+    # SC-005: the command's cap applies to the Anthropic provider like to any other.
+    monkeypatch.setenv("INVIO_ANTHROPIC_API_KEY", anthropic_helpers.API_KEY)
+    monkeypatch.setenv("INVIO_LLM_TIMEOUT_SECONDS", "600")
+    built: list[AnthropicProvider] = []
+    _recorded_anthropic("message_ok", built=built)
+
+    result = _invoke("anthropic")
+
+    assert result.exit_code == 0, result.stderr
+    assert [provider.timeout_seconds for provider in built] == [20.0]
+
+
+def test_recorded_anthropic_hanging_request_is_bounded_by_the_timeout(
+    patched_providers: Register, monkeypatch: pytest.MonkeyPatch, anthropic_registry: None
+) -> None:
+    monkeypatch.setenv("INVIO_ANTHROPIC_API_KEY", anthropic_helpers.API_KEY)
+    monkeypatch.setenv("INVIO_LLM_TIMEOUT_SECONDS", "0.2")
+    recorder, waits = _recorded_anthropic(anthropic_helpers.HANG)
+
+    result = _invoke("anthropic")
 
     assert result.exit_code == 1
     assert _last_message(result).startswith("Error: LLMUnavailableError: ")

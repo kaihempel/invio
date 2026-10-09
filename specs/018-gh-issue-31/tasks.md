@@ -221,7 +221,7 @@ description: "Task list for the Anthropic (Claude) provider (issue #31)"
 
 **Independent Test**: run the command against recorded success and failure responses.
 
-- [ ] T018 [US3] Add `anthropic` cases to `tests/test_cli_llm.py`, following the existing OpenAI cases (patched provider with recorded responses):
+- [x] T018 [US3] Add `anthropic` cases to `tests/test_cli_llm.py`, following the existing OpenAI cases (patched provider with recorded responses):
   - Success prints `ok provider=anthropic model=claude-haiku-4-5-20251001 input_tokens=<n> output_tokens=<n> duration_ms=<ms>` on stdout and exits 0.
   - `--model claude-sonnet-4-6` is accepted; an unregistered `--model` exits 2.
   - A missing key exits 2 naming `INVIO_ANTHROPIC_API_KEY`, with no request made.
@@ -229,7 +229,7 @@ description: "Task list for the Anthropic (Claude) provider (issue #31)"
   - An overloaded service exits 1 with `Error: LLMUnavailableError: ...`.
   - A hanging service is cut off by the command's existing timeout cap and exits 1 with `LLMUnavailableError` (SC-005), as in the existing OpenAI timeout case.
   - All of these pass with `src/invio/cli/commands/llm.py` left unmodified; the diff must not touch that file (FR-013).
-- [ ] T019 [P] [US3] Create `tests/test_llm_anthropic_live.py`, modelled on `tests/test_llm_openai_live.py`:
+- [x] T019 [P] [US3] Create `tests/test_llm_anthropic_live.py`, modelled on `tests/test_llm_openai_live.py`:
   - Marked `live`, and skipped unless `INVIO_ANTHROPIC_API_KEY` is set (captured at import).
   - One `complete` and one `complete_structured` call (`tests.llm_helpers.Score`) against the cheapest registered Anthropic model.
 
