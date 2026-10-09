@@ -486,7 +486,7 @@ def test_thinking_fields_default_when_absent(tmp_path: Path) -> None:
 def test_existing_registry_files_load_without_thinking_fields() -> None:
     registry = default_registry()
 
-    for provider in ("mistral", "openai", "anthropic"):
+    for provider in ("mistral", "openai", "anthropic", "ollama"):
         models = registry.models_for(provider)
         assert models
         assert all(

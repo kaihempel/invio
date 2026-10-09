@@ -28,8 +28,9 @@ from invio.llm.base import (
 from invio.llm.fake import FakeProvider, FakeReply
 from invio.llm.google import GoogleProvider
 from invio.llm.mistral import MistralProvider
+from invio.llm.ollama import OllamaProvider
 from invio.llm.openai import OpenAIProvider
-from tests import anthropic_helpers, google_helpers, openai_helpers
+from tests import anthropic_helpers, google_helpers, ollama_helpers, openai_helpers
 from tests.llm_helpers import write_registry
 from tests.mistral_helpers import API_KEY, Recorder, Reply, recording_options
 
@@ -986,3 +987,76 @@ def test_recorded_google_failures_exit_1(
     assert "Reply with OK." not in result.stderr
     assert len(recorder.requests) == requests
     assert [client.is_closed for client in recorder.clients] == [True]
+
+
+# --- Ollama (issue #33) --------------------------------------------------------------------
+
+OLLAMA_FAST = "llama3.2:3b"
+
+
+def _recorded_ollama(*replies: ollama_helpers.Reply) -> ollama_helpers.Recorder:
+    """Register a real ``OllamaProvider`` on recorded HTTP replies as ``ollama``.
+
+    Needs ``patched_providers`` (isolated registry). The base URL comes from the settings as in
+    production; only the HTTP transport and the retry sleep are replaced.
+    """
+    recorder = ollama_helpers.Recorder(replies)
+    options, _ = ollama_helpers.recording_options(recorder)
+
+    class _Recorded(OllamaProvider):
+        @classmethod
+        def from_settings(cls, settings: Settings, *, registry: Any = None) -> Self:
+            return cls(
+                settings.ollama_base_url, timeout_seconds=settings.llm_timeout_seconds, **options
+            )
+
+    factory.register_provider("ollama")(_Recorded)
+    return recorder
+
+
+def test_recorded_ollama_success_needs_no_key(
+    patched_providers: Register, monkeypatch: pytest.MonkeyPatch, google_registry: None
+) -> None:
+    monkeypatch.setenv("INVIO_OLLAMA_BASE_URL", ollama_helpers.BASE_URL)
+    recorder = _recorded_ollama("chat_ok")
+
+    result = _invoke("ollama")
+
+    assert result.exit_code == 0, result.stderr
+    assert re.fullmatch(
+        rf"ok provider=ollama model={re.escape(OLLAMA_FAST)} input_tokens=12 output_tokens=3 "
+        r"duration_ms=\d+(\.\d+)?\n",
+        result.stdout,
+    )
+    (request,) = recorder.requests
+    assert (request.host, request.path) == ("ollama.test", "/api/chat")
+    assert request.body["options"] == {"temperature": 0, "num_predict": 5}
+    assert [client.is_closed for client in recorder.clients] == [True]
+
+
+def test_recorded_ollama_unreachable_server_exits_1_without_retry(
+    patched_providers: Register, google_registry: None
+) -> None:
+    recorder = _recorded_ollama(httpx2.ConnectError("[Errno 61] Connection refused"))
+
+    result = _invoke("ollama")
+
+    assert result.exit_code == 1
+    message = _last_message(result)
+    assert message.startswith("Error: LLMUnavailableError: Ollama server unreachable")
+    assert "INVIO_OLLAMA_BASE_URL" in message
+    assert "Reply with OK." not in result.stderr
+    assert len(recorder.requests) == 1
+
+
+def test_recorded_ollama_model_not_pulled_exits_1(
+    patched_providers: Register, google_registry: None
+) -> None:
+    recorder = _recorded_ollama("error_404_model")
+
+    result = _invoke("ollama")
+
+    assert result.exit_code == 1
+    assert _last_message(result).startswith("Error: LLMInvalidRequestError: ")
+    assert "try pulling it first" in _last_message(result)
+    assert len(recorder.requests) == 1
