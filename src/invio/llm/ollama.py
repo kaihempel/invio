@@ -8,10 +8,13 @@ only ``ollama_base_url`` and ``llm_timeout_seconds``; local models are priced at
 ``models.d/ollama.yaml``.
 
 Structured output sends the JSON Schema of the Pydantic model as ``format``. When the server
-rejects a schema-valued ``format`` with HTTP 400 (older Ollama versions or models without
-support), the same request is repeated in JSON mode (``format: "json"``); if that succeeds,
-the model is remembered and later structured calls go straight to JSON mode. Either way the
+rejects a schema-valued ``format`` with HTTP 400 whose ``error`` names the ``format`` (older
+Ollama versions or models without support), the same request is repeated in JSON mode
+(``format: "json"``); if that succeeds, the model is remembered and later structured calls go
+straight to JSON mode. Any other 400 is raised as it is. Either way the
 answer is validated (and repaired once) by :func:`~invio.llm.base.structured_with_repair`.
+An answer cut off at ``num_predict`` or the context limit (``done_reason: "length"``) raises
+:class:`~invio.llm.base.LLMUnavailableError` instead of returning partial text.
 
 The HTTP connect timeout is :data:`CONNECT_TIMEOUT_S` (5 s), the whole request is bounded by
 ``llm_timeout_seconds`` (:func:`~invio.llm.base.with_timeout`). A server that cannot be reached
@@ -46,7 +49,6 @@ from pydantic import BaseModel
 
 from invio.config.settings import Settings
 from invio.llm.base import (
-    LLMAuthError,
     LLMConfigError,
     LLMInvalidRequestError,
     LLMProvider,
@@ -57,11 +59,11 @@ from invio.llm.base import (
 )
 from invio.llm.factory import register_provider
 from invio.llm.http_retry import (
-    AUTH_STATUSES,
     Failure,
     RetryPolicy,
     bad_response_failure,
     classify_status,
+    classify_transport,
     describe,
     run_with_retries,
     sanitize_detail,
@@ -80,14 +82,22 @@ CONNECT_TIMEOUT_S = 5.0
 """Seconds to establish the connection; an unreachable server fails within this bound."""
 _CHAT_PATH = "/api/chat"
 _SCHEMA_REJECTED_STATUS = 400
+_NOT_FOUND_STATUS = 404
 _JSON_MODE = "json"
+_TRUNCATED = "length"
 # Errors raised before anything was sent: retrying cannot help.
 _UNSENDABLE = (httpx2.InvalidURL, httpx2.UnsupportedProtocol, httpx2.LocalProtocolError)
 # The server could not be reached at all: fail fast, do not retry.
 _UNREACHABLE = (httpx2.ConnectError, httpx2.ConnectTimeout)
+# Causes that mean the server answered with something the client cannot use.
+_BAD_RESPONSE = (httpx2.DecodingError, httpx2.TooManyRedirects, httpx2.StreamError)
 
 Format = dict[str, Any] | str | None
 """The ``format`` of a request: a JSON Schema, ``"json"`` (JSON mode) or ``None`` (free text)."""
+
+
+class _FormatRejectedError(LLMInvalidRequestError):
+    """The server rejected the ``format`` of the request (HTTP 400 naming ``format``)."""
 
 
 def _unavailable(message: str, model: str) -> LLMUnavailableError:
@@ -107,10 +117,13 @@ def _safe_detail(response: httpx2.Response) -> str:
 def _classify_status(response: httpx2.Response, model: str, now: Callable[[], datetime]) -> Failure:
     status = response.status_code
     detail = _safe_detail(response)
-    if status in AUTH_STATUSES:
-        # Ollama itself has no authentication; a proxy in front of it refused the request.
-        message = describe(f"{_LABEL} server refused access; check {_ENV_VAR}", model, status)
-        return Failure("auth", False, LLMAuthError(message, provider=PROVIDER, model=model), status)
+    if status == _SCHEMA_REJECTED_STATUS and "format" in detail.lower():
+        message = describe(f"{_LABEL} rejected the request", model, status, detail)
+        rejected = _FormatRejectedError(message, provider=PROVIDER, model=model, status=status)
+        return Failure("invalid_request", False, rejected, status)
+    if status == _NOT_FOUND_STATUS and not detail:
+        # Not Ollama's "model not found" answer: likely a wrong URL or proxy path.
+        detail = f"no such endpoint; check {_ENV_VAR}"
     return classify_status(
         status,
         label=_LABEL,
@@ -120,30 +133,31 @@ def _classify_status(response: httpx2.Response, model: str, now: Callable[[], da
         detail=detail,
         headers=response.headers,
         now=now,
+        # Ollama itself has no authentication; a proxy in front of it refused the request.
+        auth_summary=f"{_LABEL} server refused access; check {_ENV_VAR}",
     )
 
 
 def _classify(exc: Exception, model: str, now: Callable[[], datetime]) -> Failure | None:
     """Map an ``httpx2`` exception to a ``Failure``; ``None`` if not recognized."""
-    name = type(exc).__name__
     if isinstance(exc, httpx2.HTTPStatusError):
         return _classify_status(exc.response, model, now)
     if isinstance(exc, _UNREACHABLE):
+        name = type(exc).__name__
         message = describe(f"{_LABEL} server unreachable ({name}); check {_ENV_VAR}", model, None)
         return Failure("unreachable", False, _unavailable(message, model))
     if isinstance(exc, httpx2.TimeoutException):
         return timeout_failure(_LABEL, provider=PROVIDER, model=model)
-    if isinstance(exc, _UNSENDABLE):
-        message = describe(
-            f"{_LABEL} request could not be sent ({name}); check {_ENV_VAR}", model, None
+    if isinstance(exc, httpx2.HTTPError | httpx2.InvalidURL | httpx2.StreamError):
+        return classify_transport(
+            exc,
+            label=_LABEL,
+            provider=PROVIDER,
+            model=model,
+            unsendable=_UNSENDABLE,
+            bad_response=_BAD_RESPONSE,
+            unsendable_hint=f"check {_ENV_VAR}",
         )
-        return Failure("unsendable", False, _unavailable(message, model))
-    if isinstance(exc, httpx2.TransportError):
-        message = describe(f"{_LABEL} connection failed ({name})", model, None)
-        return Failure("connection", True, _unavailable(message, model))
-    if isinstance(exc, httpx2.HTTPError | httpx2.StreamError):
-        # Undecodable body, redirect loop or stream misuse.
-        return bad_response_failure(_LABEL, provider=PROVIDER, model=model, cause=f" ({name})")
     return None
 
 
@@ -152,8 +166,8 @@ def _token_count(document: dict[str, Any], key: str) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
 
 
-def _parse(response: httpx2.Response) -> tuple[str, Usage] | None:
-    """Return the answer text and usage, or ``None`` if the body is not a chat response."""
+def _parse(response: httpx2.Response) -> tuple[str, Usage, bool] | None:
+    """Return the answer text, usage and whether it was cut off; ``None`` if not a chat answer."""
     try:
         document = json.loads(response.content)
     except ValueError:
@@ -166,7 +180,7 @@ def _parse(response: httpx2.Response) -> tuple[str, Usage] | None:
     content = message.get("content")
     text = content if isinstance(content, str) else ""
     usage = Usage(_token_count(document, "prompt_eval_count"), _token_count(document, "eval_count"))
-    return text, usage
+    return text, usage, document.get("done_reason") == _TRUNCATED
 
 
 @register_provider(PROVIDER)
@@ -237,7 +251,11 @@ class OllamaProvider:
             raise bad_response_failure(
                 _LABEL, provider=PROVIDER, model=model, cause="", status=response.status_code
             ).error
-        text, usage = parsed
+        text, usage, truncated = parsed
+        if truncated:
+            raise _unavailable(
+                describe(f"{_LABEL} answer is incomplete: {_TRUNCATED}", model, None), model
+            )
         if not text:
             raise _unavailable(f"{_LABEL} returned no answer text (model {model})", model)
         return text, usage
@@ -298,40 +316,29 @@ class OllamaProvider:
         self, system: str, user: str, schema: dict[str, Any], *, model: str, temperature: float
     ) -> tuple[str, Usage]:
         """Request with the schema as ``format``; fall back to JSON mode if it is rejected."""
-        if model not in self._json_mode_models:
-            try:
-                return await self._request(
-                    system,
-                    user,
-                    model=model,
-                    temperature=temperature,
-                    max_tokens=None,
-                    response_format=schema,
-                )
-            except LLMInvalidRequestError as err:
-                if err.status != _SCHEMA_REJECTED_STATUS:
-                    raise
-            # Outside the handler, so the rejection is not kept as __context__.
-            result = await self._request(
+
+        async def request(response_format: Format) -> tuple[str, Usage]:
+            return await self._request(
                 system,
                 user,
                 model=model,
                 temperature=temperature,
                 max_tokens=None,
-                response_format=_JSON_MODE,
+                response_format=response_format,
             )
-            # Only now is it clear that the schema (not the request) was the problem.
-            self._json_mode_models.add(model)
-            logger.warning("llm.format_fallback", extra={"provider": PROVIDER, "model": model})
-            return result
-        return await self._request(
-            system,
-            user,
-            model=model,
-            temperature=temperature,
-            max_tokens=None,
-            response_format=_JSON_MODE,
-        )
+
+        if model in self._json_mode_models:
+            return await request(_JSON_MODE)
+        try:
+            return await request(schema)
+        except _FormatRejectedError:
+            pass
+        # Outside the handler, so the rejection is not kept as __context__.
+        result = await request(_JSON_MODE)
+        # Only now is it clear that the schema (not the request) was the problem.
+        self._json_mode_models.add(model)
+        logger.warning("llm.format_fallback", extra={"provider": PROVIDER, "model": model})
+        return result
 
     async def complete_structured[T: BaseModel](
         self, system: str, user: str, schema: type[T], *, model: str, temperature: float

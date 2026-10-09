@@ -11,19 +11,12 @@ from invio.llm.http_retry import RetryPolicy
 from invio.llm.ollama import OllamaProvider
 from tests import sdk_harness
 from tests.sdk_harness import HANG as HANG
-from tests.sdk_harness import RecordedRequest as RecordedRequest
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "ollama"
 BASE_URL = "http://ollama.test:11434"
 
 Reply = str | httpx2.Response | Exception | object
 """A fixture name, a response, an exception to raise, or :data:`HANG`."""
-
-
-def load_fixture(name: str) -> httpx2.Response:
-    """Build the recorded response ``tests/fixtures/ollama/<name>.json``."""
-    response: httpx2.Response = sdk_harness.load_fixture(httpx2, FIXTURE_DIR, name)
-    return response
 
 
 class Recorder(sdk_harness.Recorder):

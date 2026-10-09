@@ -566,13 +566,16 @@ models in `src/invio/llm/models.d/ollama.yaml` are `llama3.2:3b` (`fast`) and `q
 (`smart`); any other pulled model can be added there. All prices are 0, so the cost of every
 call is 0. The provider calls the native `POST /api/chat` endpoint (`stream: false`, the
 `temperature` and `max_tokens` as `num_predict` options) with plain `httpx2`. Structured requests
-send the JSON schema as `format`; a server that rejects a schema there (HTTP 400, older Ollama
-versions) gets the same request in JSON mode (`format: "json"`), and the model is remembered so
-later calls go straight to JSON mode. The answer is validated and repaired once as usual.
+send the JSON schema as `format`; a server that rejects a schema there (HTTP 400 naming
+`format`, older Ollama versions) gets the same request in JSON mode (`format: "json"`), and the
+model is remembered so later calls go straight to JSON mode. The answer is validated and
+repaired once as usual. An answer cut off at `max_tokens` or the context limit
+(`done_reason: "length"`) raises `LLMUnavailableError`.
 
 The connect timeout is 5 s: an unreachable server (connection refused, connect timeout, unknown
 host) raises `LLMUnavailableError` at once, without retrying, naming `INVIO_OLLAMA_BASE_URL`.
-A model that is not pulled gives a 404, raised as `LLMInvalidRequestError` with Ollama's message.
+A model that is not pulled gives a 404, raised as `LLMInvalidRequestError` with Ollama's message;
+a 404 without that message (a wrong URL or proxy path) names `INVIO_OLLAMA_BASE_URL` instead.
 Other connection failures, 429 and 5xx are retried like for the other providers. Ollama's own
 context length (`OLLAMA_CONTEXT_LENGTH` on the server, 4096 tokens by default) caps what a
 request may use; Ollama truncates longer prompts silently, so raise it on the server for long

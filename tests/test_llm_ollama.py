@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import socket
 import time
 import traceback
 from pathlib import Path
@@ -25,7 +26,7 @@ from invio.llm.base import (
     LLMUnavailableError,
     Usage,
 )
-from invio.llm.http_retry import RetryPolicy
+from invio.llm.http_retry import RetryPolicy, utc_now
 from invio.llm.ollama import CONNECT_TIMEOUT_S, OllamaProvider, _classify
 from invio.llm.registry import default_registry
 from tests.llm_helpers import Score, make_settings
@@ -195,6 +196,27 @@ async def test_empty_or_non_text_content_is_unavailable(content: Any) -> None:
     assert waits == []
 
 
+async def test_truncated_answer_is_unavailable_without_retry() -> None:
+    provider, recorder, waits = make_provider("truncated")
+
+    with pytest.raises(LLMUnavailableError, match="incomplete: length") as info:
+        await _complete(provider)
+
+    assert "cut o" not in str(info.value)
+    assert (info.value.provider, info.value.model) == ("ollama", MODEL)
+    assert len(recorder.requests) == 1
+    assert waits == []
+
+
+async def test_truncated_structured_answer_is_unavailable() -> None:
+    provider, recorder, _ = make_provider("truncated")
+
+    with pytest.raises(LLMUnavailableError, match="incomplete: length"):
+        await _structured(provider)
+
+    assert len(recorder.requests) == 1
+
+
 @pytest.mark.parametrize(
     "reply",
     [
@@ -331,7 +353,7 @@ async def test_json_mode_repair_stays_in_json_mode() -> None:
 
 
 async def test_400_in_json_mode_too_raises_and_is_not_remembered() -> None:
-    provider, recorder, _ = make_provider("error_400", "error_400", "structured_ok")
+    provider, recorder, _ = make_provider("error_400_format", "error_400", "structured_ok")
 
     with pytest.raises(LLMInvalidRequestError) as info:
         await _structured(provider)
@@ -343,14 +365,34 @@ async def test_400_in_json_mode_too_raises_and_is_not_remembered() -> None:
     assert formats == [Score.model_json_schema(), "json", Score.model_json_schema()]
 
 
-@pytest.mark.parametrize("fixture", ["error_404_model", "error_401"])
-async def test_other_rejections_do_not_fall_back(fixture: str) -> None:
-    provider, recorder, _ = make_provider(fixture)
+@pytest.mark.parametrize(
+    ("fixture", "error"),
+    [
+        ("error_400", LLMInvalidRequestError),
+        ("error_404_model", LLMInvalidRequestError),
+        ("error_401", LLMAuthError),
+    ],
+)
+async def test_other_rejections_do_not_fall_back(fixture: str, error: type[LLMError]) -> None:
+    provider, recorder, _ = make_provider(fixture, "structured_ok")
 
-    with pytest.raises(LLMError):
+    with pytest.raises(error):
         await _structured(provider)
 
     assert len(recorder.requests) == 1
+    await _structured(provider)
+    assert recorder.requests[1].body["format"] == Score.model_json_schema()
+
+
+async def test_server_error_before_the_schema_rejection_still_falls_back() -> None:
+    provider, recorder, waits = make_provider("error_500", "error_400_format", "structured_ok")
+
+    value, _ = await _structured(provider)
+
+    assert value == Score(score=0.8, reason="fits")
+    formats = [request.body["format"] for request in recorder.requests]
+    assert formats == [Score.model_json_schema(), Score.model_json_schema(), "json"]
+    assert waits == [1.0]
 
 
 # --- errors -------------------------------------------------------------------------------
@@ -382,9 +424,8 @@ async def test_unreachable_server_is_unavailable_at_once_without_retry(
 
 
 async def test_refused_connection_on_a_real_closed_port_fails_fast() -> None:
-    # A port that was just bound and released: nothing listens there.
-    import socket
-
+    # A port that was just bound and released: nothing listens there. Keeping it bound is not
+    # an option, as macOS then drops the connection (a connect timeout) instead of refusing it.
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
@@ -466,6 +507,17 @@ async def test_busy_server_is_a_retried_rate_limit() -> None:
     assert len(recorder.requests) == 4
 
 
+async def test_busy_server_honours_retry_after() -> None:
+    busy = httpx2.Response(429, headers={"Retry-After": "2"}, json={"error": "server busy"})
+    provider, recorder, waits = make_provider(busy, "chat_ok")
+
+    text, _ = await _complete(provider)
+
+    assert text == "Hello"
+    assert len(recorder.requests) == 2
+    assert waits == [2.0]
+
+
 async def test_dropped_connection_is_retried() -> None:
     provider, recorder, waits = make_provider(httpx2.ReadError("reset"), "chat_ok")
 
@@ -519,7 +571,7 @@ async def test_malformed_base_url_is_unavailable_without_retry() -> None:
     ],
 )
 def test_classify_other_httpx_errors(failure: Exception, kind: str) -> None:
-    result = _classify(failure, MODEL, lambda: None)  # type: ignore[arg-type,return-value]
+    result = _classify(failure, MODEL, utc_now)
 
     assert result is not None
     assert result.kind == kind
@@ -527,7 +579,7 @@ def test_classify_other_httpx_errors(failure: Exception, kind: str) -> None:
 
 
 def test_classify_other_exception_returns_none() -> None:
-    assert _classify(ValueError("x"), MODEL, lambda: None) is None  # type: ignore[arg-type,return-value]
+    assert _classify(ValueError("x"), MODEL, utc_now) is None
 
 
 async def test_error_message_is_bounded_and_free_of_the_response_body() -> None:
@@ -547,7 +599,10 @@ async def test_non_json_error_body_still_names_the_status() -> None:
     with pytest.raises(LLMInvalidRequestError) as info:
         await _complete(provider)
 
-    assert str(info.value) == f"Ollama rejected the request (HTTP 404, model {MODEL})"
+    assert str(info.value) == (
+        f"Ollama rejected the request (HTTP 404, model {MODEL}): "
+        "no such endpoint; check INVIO_OLLAMA_BASE_URL"
+    )
 
 
 @pytest.mark.parametrize(
