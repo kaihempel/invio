@@ -302,7 +302,7 @@ description: "Task list for the Google (Gemini) provider (issue #32)"
 
 **Independent Test**: `uv run pytest tests/test_llm_provider_contract.py -k google` passes.
 
-- [ ] T022 [US4] In `tests/test_llm_provider_contract.py`:
+- [X] T022 [US4] In `tests/test_llm_provider_contract.py`:
   - Add `GoogleHarness(ProviderHarness)` with `name = "google"` and `model = "gemini-3.5-flash-lite"`, mapping outcomes to fixtures: `TEXT: "text_ok"`, `STRUCTURED: "json_ok"`, `STRUCTURED_INVALID: "json_invalid"`, `AUTH: "error_401"`, `RATE_LIMIT: "error_429_bare"`, `UNAVAILABLE: "error_503"`, `INVALID_REQUEST: "error_400"`.
   - `build()` uses `google_helpers.make_provider(..., retry=NO_RETRIES)` and sets `self.requests_made`.
   - Add it to `HARNESSES` and to the module docstring list, and import `google_helpers`.
