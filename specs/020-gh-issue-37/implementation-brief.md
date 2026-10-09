@@ -66,6 +66,20 @@ Binding decisions that OVERRIDE tasks.md / contracts where they differ. Record e
 - **Layering test (T004)**: services/suggest.py must not import typer, invio.db, invio.graph, invio.cli, invio.pipeline,
   invio.sources.
 
+## Review follow-up (PR #73)
+- Caps are checked on the cleaned values only (model validator, field-named messages): empty, blank or duplicate
+  keywords from the model are dropped by `normalise` instead of costing the repair round.
+- The whole `suggest` session runs inside `_errors()`: Ctrl+C during a model call exits 1 with "aborted; nothing
+  saved".
+- Default model choice names providers that have a key but no registered models; `has_credentials` is gone,
+  `llm.base.api_key_env_var` is the single source of the env var name.
+- `config.job.clean_keywords` is shared by the suggestion and the wizard's keyword step (the wizard now also drops
+  duplicates and excludes that are includes, with a warning). `config.job.dump_yaml_data` renders `search_yaml`, and job
+  YAML writes multi-line strings as `|` blocks.
+- `format_llm_error(exc, *, provider=None, model=None)` no longer needs `ModelChoice` (no `cli.errors` → services
+  import) and is also used by `invio llm test`.
+- The sources hint is editable in the preview (`Suggested sources`); `Refine` is an explicit branch.
+
 ## Conventions
 mypy --strict with pydantic plugin, PEP 695 generics, `X | None`, `Final`, `__all__`, no `Any` except boundaries.
 One-line imperative docstrings; module docstrings state layering. Results → stdout, diagnostics → stderr. Exit codes

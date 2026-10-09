@@ -268,7 +268,11 @@ def create(
     ] = None,
     name: Annotated[str | None, typer.Option("--name", help="Job name.")] = None,
 ) -> None:
-    """Create a job with the interactive wizard, or from a YAML file."""
+    """Create a job with the interactive wizard, or from a YAML file.
+
+    The wizard asks for the schedule, notification, sources, keywords, description, summary
+    language (ISO 639-1, default en), LLM provider and models, and limits.
+    """
     with _errors():
         if from_file is None:
             _create_interactive(name)
@@ -549,15 +553,16 @@ def suggest_command(
     tally = _UsageTally()
     typer.echo(f"Asking {choice.provider_name}/{choice.model} …", err=True)
     try:
-        _suggest_session(
-            llm,
-            tally,
-            topic=topic,
-            language=language,
-            choice=choice,
-            registry=registry,
-            as_yaml=as_yaml,
-        )
+        with _errors():  # also Ctrl+C during a model call: "aborted; nothing saved"
+            _suggest_session(
+                llm,
+                tally,
+                topic=topic,
+                language=language,
+                choice=choice,
+                registry=registry,
+                as_yaml=as_yaml,
+            )
     finally:
         line = tally.summary(registry, choice.model)
         if line is not None:
@@ -580,7 +585,8 @@ def _suggest_session(
         )
     except LLMError as exc:
         tally.add_error(exc)
-        raise fail(format_llm_error(exc, choice), 1) from exc
+        error = format_llm_error(exc, provider=choice.provider_name, model=choice.model)
+        raise fail(error, 1) from exc
     tally.add(usage)
     if as_yaml or not _is_interactive():
         typer.echo(search_yaml(first), nl=False)
@@ -605,20 +611,19 @@ def _suggest_session(
         tally.add(used)
         return value
 
-    with _errors():
-        prompter = _make_prompter()
-        outcome = run_suggest_flow(prompter, ask, first=first, choice=choice, language=language)
-        match outcome:
-            case PrintYaml(suggestion):
-                typer.echo(search_yaml(suggestion), nl=False)
-            case Discard():
-                typer.echo("Nothing saved.", err=True)
-            case Create(suggestion):
-                _create_from_suggestion(
-                    prompter, suggestion, choice=choice, language=language, registry=registry
-                )
-            case _:
-                assert_never(outcome)
+    prompter = _make_prompter()
+    outcome = run_suggest_flow(prompter, ask, first=first, choice=choice, language=language)
+    match outcome:
+        case PrintYaml(suggestion):
+            typer.echo(search_yaml(suggestion), nl=False)
+        case Discard():
+            typer.echo("Nothing saved.", err=True)
+        case Create(suggestion):
+            _create_from_suggestion(
+                prompter, suggestion, choice=choice, language=language, registry=registry
+            )
+        case _:
+            assert_never(outcome)
 
 
 # --- run -------------------------------------------------------------------------------------

@@ -69,7 +69,9 @@ def _run(
 
 
 def test_format_llm_error_names_provider_model_class_and_message() -> None:
-    text = format_llm_error(LLMUnavailableError("down\x1b[31m\nagain"), CHOICE)
+    error = LLMUnavailableError("down\x1b[31m\nagain")
+
+    text = format_llm_error(error, provider="anthropic", model="claude-big")
 
     assert text == "Error: anthropic/claude-big: LLMUnavailableError: down again"
 
@@ -77,8 +79,14 @@ def test_format_llm_error_names_provider_model_class_and_message() -> None:
 def test_format_llm_error_of_an_invalid_answer() -> None:
     error = LLMInvalidOutputError("bad", errors="e", usage=Usage(1, 1))
 
-    assert format_llm_error(error, CHOICE).startswith(
+    assert format_llm_error(error, provider="anthropic", model="claude-big").startswith(
         "Error: anthropic/claude-big: LLMInvalidOutputError: "
+    )
+
+
+def test_format_llm_error_without_provider_and_model() -> None:
+    assert format_llm_error(LLMUnavailableError("down\x1b[31m")) == (
+        "Error: LLMUnavailableError: down"
     )
 
 
@@ -219,7 +227,13 @@ def test_a_failed_refinement_keeps_the_previous_suggestion() -> None:
 
 # --- edit ------------------------------------------------------------------------------------
 
-FIELDS = ["Keywords — any of", "Keywords — all of", "Keywords — exclude", "Description"]
+FIELDS = [
+    "Keywords — any of",
+    "Keywords — all of",
+    "Keywords — exclude",
+    "Description",
+    "Suggested sources",
+]
 
 
 def test_editing_a_keyword_list_prefills_the_comma_joined_value() -> None:
@@ -244,6 +258,28 @@ def test_editing_the_description_is_multiline_with_the_current_default() -> None
     assert result.suggestion.semantic_description == "Relevant: new"
     assert prompter.defaults["Description"] == DESCRIPTION
     assert prompter.multiline["Description"] is True
+
+
+def test_editing_the_sources_hint_is_multiline_with_the_current_default() -> None:
+    current = make_suggestion().suggested_sources_hint
+    result, prompter, _, _ = _run(
+        ["Edit a field", "Suggested sources", "Trade press\nAssociations", "Print YAML"]
+    )
+
+    assert isinstance(result, PrintYaml)
+    assert result.suggestion.suggested_sources_hint == "Trade press\nAssociations"
+    assert prompter.defaults["Suggested sources"] == current
+    assert prompter.multiline["Suggested sources"] is True
+
+
+def test_an_empty_sources_hint_is_rejected_inline_and_asked_again() -> None:
+    result, prompter, _, _ = _run(
+        ["Edit a field", "Suggested sources", CLEAR, "Trade press", "Print YAML"]
+    )
+
+    assert [e for e in prompter.errors if e[0] == "Suggested sources"]
+    assert isinstance(result, PrintYaml)
+    assert result.suggestion.suggested_sources_hint == "Trade press"
 
 
 def test_an_empty_description_is_rejected_inline_and_asked_again() -> None:

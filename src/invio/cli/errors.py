@@ -12,7 +12,6 @@ from invio.llm.base import LLMError, ModelRegistryError
 from invio.notify import DatabaseConfigError
 from invio.services.jobs import JobNotFoundError
 from invio.services.runs import RunNotFoundError
-from invio.services.suggest import ModelChoice
 from invio.textsafe import strip_control
 
 __all__ = ["fail", "format_llm_error", "mapped_errors"]
@@ -24,10 +23,15 @@ def fail(message: str, code: int) -> typer.Exit:
     return typer.Exit(code=code)
 
 
-def format_llm_error(exc: LLMError, choice: ModelChoice) -> str:
-    """Return ``Error: <provider>/<model>: <ErrorClass>: <message>`` (message made printable)."""
-    message = strip_control(str(exc))
-    return f"Error: {choice.provider_name}/{choice.model}: {type(exc).__name__}: {message}"
+def format_llm_error(
+    exc: LLMError, *, provider: str | None = None, model: str | None = None
+) -> str:
+    """Return ``Error: [<provider>/<model>: ]<ErrorClass>: <message>`` (message made printable).
+
+    The ``<provider>/<model>`` part is only written when both are given.
+    """
+    where = f"{provider}/{model}: " if provider is not None and model is not None else ""
+    return f"Error: {where}{type(exc).__name__}: {strip_control(str(exc))}"
 
 
 @contextlib.contextmanager

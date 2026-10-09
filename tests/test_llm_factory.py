@@ -79,21 +79,6 @@ def test_registered_providers_is_sorted_and_contains_the_shipped_ones() -> None:
     assert {"anthropic", "google", "mistral", "openai"} <= set(names)
 
 
-def test_has_credentials_true_with_a_key() -> None:
-    assert factory.has_credentials("anthropic", make_settings(anthropic_api_key="k")) is True
-
-
-@pytest.mark.parametrize("key", [None, "", "   "])
-def test_has_credentials_false_without_a_usable_key(key: str | None) -> None:
-    settings = make_settings() if key is None else make_settings(anthropic_api_key=key)
-
-    assert factory.has_credentials("anthropic", settings) is False
-
-
-def test_has_credentials_false_for_a_provider_without_key_setting() -> None:
-    assert factory.has_credentials("ollama", make_settings()) is False
-
-
 def test_unknown_role_lists_valid_roles(job_config: JobConfig, registry: Any) -> None:
     with pytest.raises(LLMConfigError) as info:
         resolve(job_config.llm, "medium", make_settings(), registry=registry)  # type: ignore[arg-type]

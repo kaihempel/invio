@@ -27,6 +27,7 @@ from invio.config.job import (
     RssSource,
     ScheduleConfig,
     Weekday,
+    clean_keywords,
     dump_yaml,
     known_timezones,
     validate_job,
@@ -357,19 +358,16 @@ def _step_sources(s: _Session) -> None:
             break
 
 
-def _split_keywords(text: str) -> list[str]:
-    return [item for item in (part.strip() for part in text.split(",")) if item]
-
-
 def _step_keywords(s: _Session) -> None:
     p = s.prompter
-    s.keywords = {
-        "any": _split_keywords(p.text(Q_KW_ANY, default=", ".join(s.keywords.get("any", [])))),
-        "all": _split_keywords(p.text(Q_KW_ALL, default=", ".join(s.keywords.get("all", [])))),
-        "exclude": _split_keywords(
-            p.text(Q_KW_EXCLUDE, default=", ".join(s.keywords.get("exclude", [])))
-        ),
-    }
+    answers = [
+        p.text(question, default=", ".join(s.keywords.get(key, [])))
+        for question, key in ((Q_KW_ANY, "any"), (Q_KW_ALL, "all"), (Q_KW_EXCLUDE, "exclude"))
+    ]
+    any_, all_, exclude = ([answer] for answer in answers)  # comma-joined: splitting is expected
+    s.keywords, notes = clean_keywords(any_, all_, exclude, note_splits=False)
+    for note in notes:
+        s.warn(note)
 
 
 def _step_description(s: _Session) -> None:

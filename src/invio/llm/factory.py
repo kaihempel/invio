@@ -18,15 +18,7 @@ from pydantic import BaseModel
 import invio.llm
 from invio.config.job import LLMConfig
 from invio.config.settings import Settings, get_settings
-from invio.llm.base import (
-    LLMAuthError,
-    LLMConfigError,
-    LLMError,
-    LLMInvalidOutputError,
-    LLMProvider,
-    Usage,
-    require_api_key,
-)
+from invio.llm.base import LLMConfigError, LLMError, LLMInvalidOutputError, LLMProvider, Usage
 from invio.llm.registry import ModelRegistry, default_registry
 
 logger = logging.getLogger("invio.llm")
@@ -91,15 +83,6 @@ def registered_providers() -> tuple[str, ...]:
     """Return the sorted names of all registered providers (after module discovery)."""
     _discover()
     return tuple(sorted(_REGISTRY))
-
-
-def has_credentials(name: str, settings: Settings) -> bool:
-    """Whether ``name`` has a usable API key; a provider without a key setting has none."""
-    try:
-        require_api_key(settings, name)
-    except (LLMAuthError, LLMConfigError):
-        return False
-    return True
 
 
 class _LoggedProvider:

@@ -5,16 +5,13 @@ Signatures are normative; bodies are left to implementation.
 ## `invio.services.suggest` (new)
 
 ```python
-MAX_TOPIC_CHARS: Final = 500
-MAX_KEYWORDS: Final = 30
-MAX_DESCRIPTION_CHARS: Final = 2000
-TEMPERATURE: Final = 0.3
+MAX_TOPIC_CHARS: Final = 500  # the only exported cap; the others are module-internal
 
 
 class SuggestionAnswer(BaseModel):  # LLM schema, extra="forbid", all fields required
-    keywords_any: list[_Keyword]
-    keywords_all: list[_Keyword]
-    keywords_exclude: list[_Keyword]
+    keywords_any: list[str]  # caps checked on the cleaned values in a model validator
+    keywords_all: list[str]
+    keywords_exclude: list[str]
     semantic_description: str
     suggested_sources_hint: str
 
@@ -84,7 +81,7 @@ def search_yaml(suggestion: SearchSuggestion) -> str: ...  # hint as "# " commen
 ```
 
 Imports allowed: `invio.config.*`, `invio.llm.base`, `invio.llm.registry`,
-`invio.llm.factory` (for `registered_providers`, `has_credentials`). Not allowed: `typer`,
+`invio.llm.factory` (for `registered_providers`). Not allowed: `typer`,
 `invio.db`, `invio.graph`, `invio.cli`.
 
 ## `invio.llm.registry` (changed)
@@ -97,8 +94,29 @@ class ModelRegistry:
 ## `invio.llm.factory` (changed)
 
 ```python
-def registered_providers() -> list[str]: ...  # sorted, after module discovery
-def has_credentials(name: str, settings: Settings) -> bool: ...
+def registered_providers() -> tuple[str, ...]: ...  # sorted, after module discovery
+```
+
+## `invio.llm.base` (changed)
+
+```python
+def api_key_env_var(provider: str) -> str: ...  # "INVIO_<PROVIDER>_API_KEY"
+```
+
+## `invio.config.job` (changed)
+
+```python
+def clean_keywords(
+    any_: Iterable[str], all_: Iterable[str], exclude: Iterable[str], *, note_splits: bool = True
+) -> tuple[dict[str, list[str]], list[str]]: ...  # split, strip, dedupe, drop include excludes
+def dump_yaml_data(data: Mapping[str, Any]) -> str: ...  # job file style, multi-line as "|"
+```
+
+## `invio.cli.errors` (changed)
+
+```python
+def format_llm_error(exc: LLMError, *, provider: str | None = None, model: str | None = None) -> str: ...
+# "Error: [<provider>/<model>: ]<ErrorClass>: <message>"; also used by `invio llm test`
 ```
 
 ## `invio.cli.suggest_flow` (new)
@@ -110,9 +128,6 @@ Ask = Callable[[str | None, SearchSuggestion | None], SearchSuggestion]  # (rema
 @dataclass(frozen=True) class PrintYaml: suggestion: SearchSuggestion
 @dataclass(frozen=True) class Discard:   pass
 FlowResult = Create | PrintYaml | Discard
-
-def format_llm_error(exc: LLMError, choice: ModelChoice) -> str: ...
-# "Error: <provider>/<model>: <ErrorClass>: <message>"
 
 def render_preview(s: SearchSuggestion, *, choice: ModelChoice, language: str) -> str: ...
 

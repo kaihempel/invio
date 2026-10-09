@@ -8,14 +8,15 @@ created through the existing wizard and `JobService.create`.
 The schema sent to the model for structured output and the first validation of its answer
 (Constitution I). Pydantic v2, `ConfigDict(extra="forbid", str_strip_whitespace=True)`, all
 fields required (strict-schema providers need every property required). The length and count
-rules below are implemented as `AfterValidator`s so they do not appear in the JSON schema sent
-to the provider (research R2).
+rules below are checked in a model validator on the **cleaned** values (after comma splitting
+and dropping empty and duplicate entries), so they do not appear in the JSON schema sent to the
+provider (research R2) and an entry the cleaning drops never costs a repair round.
 
-| Field | Type | Rules |
+| Field | Type | Rules (after cleaning) |
 |---|---|---|
-| `keywords_any` | `list[str]` | ≤ 30 items, each 1–100 chars after strip |
-| `keywords_all` | `list[str]` | ≤ 30 items, each 1–100 chars after strip; may be empty |
-| `keywords_exclude` | `list[str]` | ≤ 30 items, each 1–100 chars after strip |
+| `keywords_any` | `list[str]` | ≤ 30 items, each ≤ 100 chars |
+| `keywords_all` | `list[str]` | ≤ 30 items, each ≤ 100 chars; may be empty |
+| `keywords_exclude` | `list[str]` | ≤ 30 items, each ≤ 100 chars |
 | `semantic_description` | `str` | 1–2,000 chars after strip |
 | `suggested_sources_hint` | `str` | 1–1,000 chars after strip |
 
@@ -109,6 +110,8 @@ apply.
 - `_Session` (wizard): `language: str = "en"`, `sources_note: str | None = None`; `mapping()`
   adds `"language": self.language`.
 - `ModelRegistry`: `most_expensive(provider) -> ModelInfo | None`.
-- `invio.llm.factory`: `registered_providers() -> list[str]`,
-  `has_credentials(name, settings) -> bool`.
+- `invio.llm.factory`: `registered_providers() -> tuple[str, ...]`.
+- `invio.llm.base`: `api_key_env_var(provider) -> str`.
+- `invio.config.job`: `clean_keywords(...)` (shared by the suggestion and the wizard's keyword
+  step) and `dump_yaml_data(data)`; job YAML now writes multi-line strings as `|` blocks.
 - `JobConfig`, `SearchConfig`, `KeywordsConfig`: unchanged.

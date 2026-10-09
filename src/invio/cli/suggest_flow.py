@@ -48,7 +48,9 @@ F_ANY: Final = "Keywords — any of"
 F_ALL: Final = "Keywords — all of"
 F_EXCLUDE: Final = "Keywords — exclude"
 F_DESCRIPTION: Final = "Description"
-_FIELDS: Final = (F_ANY, F_ALL, F_EXCLUDE, F_DESCRIPTION)
+F_HINT: Final = "Suggested sources"
+_FIELDS: Final = (F_ANY, F_ALL, F_EXCLUDE, F_DESCRIPTION, F_HINT)
+_MULTILINE: Final = (F_DESCRIPTION, F_HINT)
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,7 +90,7 @@ def render_preview(s: SearchSuggestion, *, choice: ModelChoice, language: str) -
         f"  {F_EXCLUDE}:  {_joined(s.keywords_exclude)}",
         f"  {F_DESCRIPTION}:",
         *(f"    {line}" for line in s.semantic_description.splitlines()),
-        f"  Suggested sources:   {hint_lines[0]}",
+        f"  {F_HINT}:   {hint_lines[0]}",
         *(f"    {line}" for line in hint_lines[1:]),
     ]
     if s.warnings:
@@ -110,6 +112,8 @@ def _edited(current: SearchSuggestion, field: str, value: str) -> SearchSuggesti
     """Return ``current`` with ``field`` replaced by the entered ``value`` (may raise)."""
     if field == F_DESCRIPTION:
         return current.replace(semantic_description=value)
+    if field == F_HINT:
+        return current.replace(suggested_sources_hint=value)
     keywords = (value,)  # ``replace`` splits at commas and drops empty entries
     if field == F_ANY:
         return current.replace(keywords_any=keywords)
@@ -121,6 +125,8 @@ def _edited(current: SearchSuggestion, field: str, value: str) -> SearchSuggesti
 def _current_value(current: SearchSuggestion, field: str) -> str:
     if field == F_DESCRIPTION:
         return current.semantic_description
+    if field == F_HINT:
+        return current.suggested_sources_hint
     values = {
         F_ANY: current.keywords_any,
         F_ALL: current.keywords_all,
@@ -144,7 +150,7 @@ def _edit_field(prompter: Prompter, current: SearchSuggestion) -> SearchSuggesti
         field,
         default=_current_value(current, field),
         validate=validator,
-        multiline=field == F_DESCRIPTION,
+        multiline=field in _MULTILINE,
     )
     return _edited(current, field, value)
 
@@ -175,9 +181,12 @@ def run_suggest_flow(
             return Discard()
         if action == A_EDIT:
             current = _edit_field(prompter, current)
-            continue
-        remark = strip_control(prompter.text(Q_REMARK, validate=_validate_remark))
-        try:
-            current = ask(remark, current)
-        except LLMError as exc:
-            echo(format_llm_error(exc, choice), err=True)
+        elif action == A_REFINE:
+            remark = strip_control(prompter.text(Q_REMARK, validate=_validate_remark))
+            try:
+                current = ask(remark, current)
+            except LLMError as exc:
+                error = format_llm_error(exc, provider=choice.provider_name, model=choice.model)
+                echo(error, err=True)
+        else:
+            raise ValueError(f"unknown action {action!r}")

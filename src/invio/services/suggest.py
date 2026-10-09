@@ -10,33 +10,28 @@ call, its one repair round and the typed errors come from the provider layer.
 import json
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Annotated, Final, Self
+from typing import Final, Self
 
-import yaml
-from pydantic import AfterValidator, BaseModel, ConfigDict, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
 
-from invio.config.job import KeywordsConfig, SearchConfig
+from invio.config.job import KeywordsConfig, SearchConfig, clean_keywords, dump_yaml_data
 from invio.config.languages import language_name
-from invio.config.settings import ENV_PREFIX, Settings
+from invio.config.settings import Settings
 from invio.llm.base import (
     LLMAuthError,
     LLMConfigError,
     LLMInvalidOutputError,
     LLMProvider,
     Usage,
+    api_key_env_var,
     require_api_key,
 )
-from invio.llm.factory import has_credentials, registered_providers
+from invio.llm.factory import registered_providers
 from invio.llm.registry import ModelRegistry
 from invio.textsafe import neutralise_tags, strip_control
 
 __all__ = [
-    "MAX_DESCRIPTION_CHARS",
-    "MAX_HINT_CHARS",
-    "MAX_KEYWORDS",
-    "MAX_KEYWORD_CHARS",
     "MAX_TOPIC_CHARS",
-    "TEMPERATURE",
     "ModelChoice",
     "SearchSuggestion",
     "SuggestionAnswer",
@@ -86,36 +81,30 @@ Answer only with the requested JSON.\
 
 
 # --- the model's answer ----------------------------------------------------------------------
-# The caps are AfterValidators, not Field constraints: those would be emitted into the JSON
-# schema as maxItems / maxLength, which providers support to differing degrees (research R2).
+# The caps are checked in a model validator, not as Field constraints: those would be emitted
+# into the JSON schema as maxItems / maxLength, which providers support to differing degrees
+# (research R2). They apply to the cleaned values only, so an entry the cleaning drops (an empty
+# or a duplicate keyword) never costs a repair round.
 
 
-def _keyword(value: str) -> str:
-    if not 1 <= len(value) <= MAX_KEYWORD_CHARS:
-        raise ValueError(f"a keyword must have 1 to {MAX_KEYWORD_CHARS} characters")
-    return value
-
-
-def _keyword_list(values: list[str]) -> list[str]:
-    if len(values) > MAX_KEYWORDS:
-        raise ValueError(f"at most {MAX_KEYWORDS} keywords per list")
-    return values
-
-
-def _description(value: str) -> str:
-    if not 1 <= len(value) <= MAX_DESCRIPTION_CHARS:
-        raise ValueError(f"the description must have 1 to {MAX_DESCRIPTION_CHARS} characters")
-    return value
-
-
-def _hint(value: str) -> str:
-    if not 1 <= len(value) <= MAX_HINT_CHARS:
-        raise ValueError(f"the sources hint must have 1 to {MAX_HINT_CHARS} characters")
-    return value
-
-
-_Kw = Annotated[str, AfterValidator(_keyword)]
-_Keywords = Annotated[list[_Kw], AfterValidator(_keyword_list)]
+def _cap_problems(keywords: dict[str, list[str]], description: str, hint: str) -> list[str]:
+    """The cap violations of cleaned fields, each prefixed with the field name."""
+    problems: list[str] = []
+    for field, values in keywords.items():
+        if len(values) > MAX_KEYWORDS:
+            problems.append(f"{field}: at most {MAX_KEYWORDS} keywords per list")
+        if any(len(keyword) > MAX_KEYWORD_CHARS for keyword in values):
+            problems.append(f"{field}: a keyword must have at most {MAX_KEYWORD_CHARS} characters")
+    if not 1 <= len(description) <= MAX_DESCRIPTION_CHARS:
+        problems.append(
+            f"semantic_description: the description must have 1 to {MAX_DESCRIPTION_CHARS} "
+            "characters"
+        )
+    if not 1 <= len(hint) <= MAX_HINT_CHARS:
+        problems.append(
+            f"suggested_sources_hint: the sources hint must have 1 to {MAX_HINT_CHARS} characters"
+        )
+    return problems
 
 
 class SuggestionAnswer(BaseModel):
@@ -123,15 +112,15 @@ class SuggestionAnswer(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
 
-    keywords_any: _Keywords
-    keywords_all: _Keywords
-    keywords_exclude: _Keywords
-    semantic_description: Annotated[str, AfterValidator(_description)]
-    suggested_sources_hint: Annotated[str, AfterValidator(_hint)]
+    keywords_any: list[str]
+    keywords_all: list[str]
+    keywords_exclude: list[str]
+    semantic_description: str
+    suggested_sources_hint: str
 
     @model_validator(mode="after")
     def _survives_normalisation(self) -> Self:
-        """Reject what ``normalise`` would reject, so the provider's repair round applies.
+        """Enforce the caps and reject what ``normalise`` would reject (repair round applies).
 
         Not part of the JSON schema. ``normalise`` is idempotent, so checking the cleaned fields
         here equals checking the result of ``normalise``.
@@ -143,12 +132,10 @@ class SuggestionAnswer(BaseModel):
             self.semantic_description,
             self.suggested_sources_hint,
         )
-        for values in (any_, all_, exclude):
-            _keyword_list(values)
-            for keyword in values:
-                _keyword(keyword)
-        _description(description)
-        _hint(hint)
+        keywords = {"keywords_any": any_, "keywords_all": all_, "keywords_exclude": exclude}
+        problems = _cap_problems(keywords, description, hint)
+        if problems:
+            raise ValueError("; ".join(problems))
         try:
             SearchConfig(
                 keywords=KeywordsConfig(any=any_, all=all_, exclude=exclude),
@@ -230,22 +217,6 @@ class SearchSuggestion:
         )
 
 
-def _clean_keywords(values: Sequence[str], warnings: list[str]) -> list[str]:
-    """Strip, split at commas (editing is comma-joined), drop empty ones and duplicates."""
-    result: list[str] = []
-    seen: set[str] = set()
-    for raw in values:
-        cleaned = strip_control(raw)
-        parts = [part.strip() for part in cleaned.split(",")]
-        if len(parts) > 1:
-            warnings.append(f"'{cleaned}' split at commas into separate keywords")
-        for part in parts:
-            if part and part.casefold() not in seen:
-                seen.add(part.casefold())
-                result.append(part)
-    return result
-
-
 def _clean_all(
     keywords_any: Sequence[str],
     keywords_all: Sequence[str],
@@ -254,16 +225,12 @@ def _clean_all(
     hint: str,
 ) -> tuple[list[str], list[str], list[str], str, str, list[str]]:
     """Clean all five fields (see ``normalise``); idempotent. The last item is the warnings."""
-    warnings: list[str] = []
-    any_ = _clean_keywords(keywords_any, warnings)
-    all_ = _clean_keywords(keywords_all, warnings)
-    exclude: list[str] = []
-    included = {kw.casefold() for kw in (*any_, *all_)}
-    for kw in _clean_keywords(keywords_exclude, warnings):
-        if kw.casefold() in included:
-            warnings.append(f"'{kw}' removed from exclude: it is also an include keyword")
-        else:
-            exclude.append(kw)
+    lists, warnings = clean_keywords(
+        map(strip_control, keywords_any),
+        map(strip_control, keywords_all),
+        map(strip_control, keywords_exclude),
+    )
+    any_, all_, exclude = lists["any"], lists["all"], lists["exclude"]
     if not any_:
         warnings.append("no 'any' keywords")
     if not exclude:
@@ -359,24 +326,29 @@ class ModelChoice:
     model: str
 
 
-def _env_var(provider: str) -> str:
-    return f"{ENV_PREFIX}{provider.upper()}_API_KEY"
-
-
 def _choose_default(settings: Settings, registry: ModelRegistry) -> ModelChoice:
-    checked: list[str] = []
+    without_key: list[str] = []
+    without_models: list[str] = []
     for name in registered_providers():
-        if f"{name}_api_key" not in Settings.model_fields:
+        try:
+            require_api_key(settings, name)
+        except LLMConfigError:  # a provider without an API key setting
             continue
-        checked.append(_env_var(name))
-        if not has_credentials(name, settings):
+        except LLMAuthError:
+            without_key.append(api_key_env_var(name))
             continue
         best = registry.most_expensive(name)
         if best is not None:
             return ModelChoice(name, best.model_id)
+        without_models.append(name)
+    problems: list[str] = []
+    if without_models:
+        problems.append(f"no models registered for: {', '.join(without_models)}")
+    if without_key:
+        problems.append(f"set one of: {', '.join(without_key)}")
     raise LLMAuthError(
         "no LLM provider is usable (it needs an API key and registered models); "
-        f"set one of: {', '.join(checked)}"
+        + "; ".join(problems)
     )
 
 
@@ -460,18 +432,6 @@ async def refine(
 # --- YAML ------------------------------------------------------------------------------------
 
 
-class _Dumper(yaml.SafeDumper):
-    """``SafeDumper`` that writes multi-line strings as readable block scalars."""
-
-
-def _represent_str(dumper: yaml.SafeDumper, data: str) -> yaml.ScalarNode:
-    style = "|" if "\n" in data else None
-    return dumper.represent_scalar("tag:yaml.org,2002:str", data, style=style)
-
-
-_Dumper.add_representer(str, _represent_str)
-
-
 def search_yaml(suggestion: SearchSuggestion) -> str:
     """Return the ``search:`` block for a job file, the sources hint first as ``#`` comments."""
     hint = strip_control(suggestion.suggested_sources_hint, multiline=True).splitlines()
@@ -487,5 +447,4 @@ def search_yaml(suggestion: SearchSuggestion) -> str:
             "semantic_description": suggestion.semantic_description,
         }
     }
-    body = yaml.dump(block, Dumper=_Dumper, sort_keys=False, allow_unicode=True)
-    return "\n".join(comments) + "\n" + body
+    return "\n".join(comments) + "\n" + dump_yaml_data(block)

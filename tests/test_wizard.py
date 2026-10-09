@@ -266,6 +266,16 @@ def test_keywords_blank_items_dropped_and_empty_allowed() -> None:
     assert (kw.any, kw.all, kw.exclude) == (["a", "b"], [], [])
 
 
+def test_keywords_drop_duplicates_and_excludes_that_are_includes_with_a_warning() -> None:
+    result, _, out = run(script(keywords=["Heat Pump, heat pump, boiler", "", "BOILER, spam"]))
+
+    assert result is not None
+    kw = result[1].search.keywords
+    assert (kw.any, kw.all, kw.exclude) == (["Heat Pump", "boiler"], [], ["spam"])
+    assert "'BOILER' removed from exclude: it is also an include keyword" in out.err
+    assert "split at commas" not in out.err  # comma-joined input is expected here
+
+
 def test_empty_description_is_rejected() -> None:
     answers = script(description="  ")
     answers.insert(answers.index("  ") + 1, "now valid")

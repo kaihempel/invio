@@ -779,6 +779,27 @@ def test_ctrl_c_or_eof_in_the_preview_saves_nothing(
     assert suggest_cli.job_names() == []
 
 
+@pytest.mark.parametrize("as_yaml", [False, True], ids=["interactive", "yaml"])
+def test_ctrl_c_during_the_first_model_call_saves_nothing(
+    suggest_cli: SuggestCli, as_yaml: bool
+) -> None:
+    """Ctrl+C while waiting for the first answer: exit 1 with the abort message, no traceback."""
+
+    async def interrupted(*_args: Any, **_kwargs: Any) -> Any:
+        raise KeyboardInterrupt
+
+    suggest_cli.script()
+    suggest_cli.cli.monkeypatch.setattr(job_module, "suggest", interrupted)
+    suggest_cli.cli.forbid_prompts()
+
+    result = suggest_cli.invoke("heat pumps", *(["--yaml"] if as_yaml else []))
+
+    assert result.exit_code == 1
+    assert "aborted; nothing saved" in result.stderr
+    assert result.stdout == ""
+    assert suggest_cli.job_names() == []
+
+
 def test_the_wizard_offers_the_suggestion_language_and_provider_as_defaults(
     suggest_cli: SuggestCli,
 ) -> None:

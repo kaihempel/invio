@@ -61,7 +61,7 @@ then `? What next?` with the choices, in this order:
 |---|---|
 | `Create job` | Starts the job wizard with keywords, description, language, provider and smart model prefilled; the sources hint is shown at the sources step. The job is saved only after the wizard's `Save this job?` is confirmed. |
 | `Refine` | `? How should it change?` (non-empty) → new model call with topic, current suggestion (incl. edits) and remark → new preview. On failure: `Error: <provider>/<model>: <ErrorClass>: <message>` on stderr, previous preview again. |
-| `Edit a field` | `? Which field?` (`Keywords — any of`, `Keywords — all of`, `Keywords — exclude`, `Description`) → text prompt with the current value as default (lists comma-separated, description multi-line); deleting the text clears a keyword list; invalid input (e.g. an empty description) is rejected inline and asked again → new preview. |
+| `Edit a field` | `? Which field?` (`Keywords — any of`, `Keywords — all of`, `Keywords — exclude`, `Description`, `Suggested sources`) → text prompt with the current value as default (lists comma-separated, description and sources hint multi-line); deleting the text clears a keyword list; invalid input (e.g. an empty description) is rejected inline and asked again → new preview. |
 | `Print YAML` | Prints the YAML block of the non-interactive mode to stdout, exit 0. |
 | `Discard` | Prints `Nothing saved.` to stderr, exit 0. |
 

@@ -14,6 +14,7 @@ from invio.llm.base import (
     LLMUnavailableError,
     ModelRegistryError,
     Usage,
+    api_key_env_var,
     require_api_key,
     with_timeout,
 )
@@ -151,6 +152,12 @@ def test_require_api_key_returns_key_without_leaking_it() -> None:
 
     assert require_api_key(settings, "mistral") == SECRET
     assert SECRET not in repr(settings)
+
+
+def test_api_key_env_var_is_the_one_require_api_key_names() -> None:
+    assert api_key_env_var("mistral") == "INVIO_MISTRAL_API_KEY"
+    with pytest.raises(LLMAuthError, match=api_key_env_var("mistral")):
+        require_api_key(make_settings(), "mistral")
 
 
 def test_require_api_key_unknown_provider_is_config_error() -> None:

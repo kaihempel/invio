@@ -23,7 +23,9 @@ from invio.config.job import (
     WebSource,
     YoutubeChannelSource,
     YoutubePlaylistSource,
+    clean_keywords,
     dump_yaml,
+    dump_yaml_data,
     job_json_schema,
     load_yaml,
     loads_yaml,
@@ -277,6 +279,51 @@ def test_dump_unicode_unescaped(job_data: dict[str, Any]) -> None:
     job_data["notification"]["subject"] = "Grüße"
 
     assert "Grüße" in dump_yaml(JobConfig.model_validate(job_data))
+
+
+def test_dump_writes_a_multi_line_string_as_a_block_scalar(job_data: dict[str, Any]) -> None:
+    data = copy.deepcopy(job_data)
+    data["search"]["semantic_description"] = "Relevant: a.\nNot relevant: b."
+
+    text = dump_yaml(JobConfig.model_validate(data))
+
+    assert "semantic_description: |-\n    Relevant: a.\n    Not relevant: b.\n" in text
+    assert loads_yaml(text).search.semantic_description == "Relevant: a.\nNot relevant: b."
+
+
+def test_dump_yaml_data_keeps_the_given_key_order() -> None:
+    assert dump_yaml_data({"b": 1, "a": "x\ny"}) == "b: 1\na: |-\n  x\n  y\n"
+
+
+# --- clean_keywords --------------------------------------------------------------------------
+
+
+def test_clean_keywords_splits_strips_and_drops_empty_and_duplicate_entries() -> None:
+    lists, notes = clean_keywords(["a, b", " A ", "", ","], ["c"], [])
+
+    assert lists == {"any": ["a", "b"], "all": ["c"], "exclude": []}
+    assert notes == [
+        "'a, b' split at commas into separate keywords",
+        "',' split at commas into separate keywords",
+    ]
+
+
+def test_clean_keywords_drops_excludes_that_are_includes() -> None:
+    lists, notes = clean_keywords(["a"], ["B"], ["b", "A", "c"], note_splits=False)
+
+    assert lists["exclude"] == ["c"]
+    assert notes == [
+        "'b' removed from exclude: it is also an include keyword",
+        "'A' removed from exclude: it is also an include keyword",
+    ]
+
+
+def test_clean_keywords_is_idempotent() -> None:
+    lists, _ = clean_keywords(["x, y", "Y"], [], ["x", "z"])
+
+    again, notes = clean_keywords(lists["any"], lists["all"], lists["exclude"])
+
+    assert again == lists and notes == []
 
 
 def test_dump_time_quoted(job_data: dict[str, Any]) -> None:

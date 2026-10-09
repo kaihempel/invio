@@ -58,12 +58,10 @@ def test_answer_accepts_a_valid_mapping() -> None:
     "overrides",
     [
         {"extra": 1},
-        {"keywords_any": ["x"] * 31},
-        {"keywords_all": ["x"] * 31},
-        {"keywords_exclude": ["x"] * 31},
+        {"keywords_any": [f"x{i}" for i in range(31)]},
+        {"keywords_all": [f"x{i}" for i in range(31)]},
+        {"keywords_exclude": [f"x{i}" for i in range(31)]},
         {"keywords_any": ["x" * 101]},
-        {"keywords_any": [""]},
-        {"keywords_any": ["   "]},
         {"semantic_description": ""},
         {"semantic_description": "   "},
         {"semantic_description": "x" * 2001},
@@ -74,6 +72,23 @@ def test_answer_accepts_a_valid_mapping() -> None:
 def test_answer_rejects_violations(overrides: dict[str, Any]) -> None:
     with pytest.raises(ValidationError):
         SuggestionAnswer.model_validate(answer_data(**overrides))
+
+
+def test_answer_accepts_entries_that_cleaning_drops() -> None:
+    """Empty, blank and duplicate keywords are dropped by ``normalise``, not repaired."""
+    answer = SuggestionAnswer.model_validate(
+        answer_data(keywords_any=["", "   ", ",", "a", *(["A"] * 40)])
+    )
+
+    assert normalise(answer).keywords_any == ("a",)
+
+
+def test_answer_checks_the_caps_after_comma_splitting() -> None:
+    long_joined = ", ".join(f"k{i:03}" for i in range(25))  # > 100 characters, 25 keywords
+
+    answer = SuggestionAnswer.model_validate(answer_data(keywords_any=[long_joined]))
+
+    assert len(normalise(answer).keywords_any) == 25
 
 
 @pytest.mark.parametrize("missing", list(answer_data()))
@@ -394,6 +409,19 @@ def test_no_provider_with_a_key_names_the_checked_env_vars(tmp_path: Path) -> No
 
     message = str(raised.value)
     assert "INVIO_ANTHROPIC_API_KEY" in message and "INVIO_OPENAI_API_KEY" in message
+
+
+def test_default_names_a_provider_that_has_a_key_but_no_models(tmp_path: Path) -> None:
+    """A set key is not reported as missing; the provider is named as lacking models."""
+    settings = make_settings(mistral_api_key="m")
+
+    with pytest.raises(LLMAuthError) as raised:
+        choose_model(settings, _registry(tmp_path), provider=None, model=None)
+
+    message = str(raised.value)
+    assert "no models registered for: mistral" in message
+    assert "INVIO_MISTRAL_API_KEY" not in message
+    assert "INVIO_OPENAI_API_KEY" in message
 
 
 def test_given_provider_with_a_key_but_no_models_is_a_config_error(tmp_path: Path) -> None:

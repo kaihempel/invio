@@ -179,12 +179,17 @@ async def with_timeout[R](
         ) from None
 
 
+def api_key_env_var(provider: str) -> str:
+    """Return the environment variable of ``provider``'s API key (``INVIO_<PROVIDER>_API_KEY``)."""
+    return f"{ENV_PREFIX}{provider.upper()}_API_KEY"
+
+
 def require_api_key(settings: Settings, provider: str) -> str:
     """Return the API key of ``provider`` or raise :class:`LLMAuthError` naming the env var."""
     name = f"{provider}_api_key"
     if name not in get_args(SecretName):
         raise LLMConfigError(f"LLM provider '{provider}' has no API key setting")
-    env_var = f"{ENV_PREFIX}{name.upper()}"
+    env_var = api_key_env_var(provider)
     try:
         key = settings.require_secret(cast(SecretName, name))
     except MissingSettingError:
