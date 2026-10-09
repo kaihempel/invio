@@ -1,0 +1,26 @@
+# Anthropic models, USD per 1,000,000 tokens (standard, non-batch prices).
+# Order matters to the tests: first = fast role, second = smart role.
+# Only models that accept a forced `tool_choice` and `temperature` may be listed: structured
+# output forces one tool and the pipeline always sends a temperature (spec Clarifications).
+# `max_output_tokens` is required for every anthropic model: structured calls request it.
+# Verified on 2026-10-09 from
+#   https://platform.claude.com/docs/en/models/haiku-4-5/overview
+#   https://platform.claude.com/docs/en/models/sonnet-4-6/overview
+#   https://platform.claude.com/docs/en/about-claude/pricing
+# Both models are legacy. claude-haiku-4-5-20251001 is retired not sooner than 2026-10-15,
+# claude-sonnet-4-6 not sooner than 2027-02-17: re-check before relying on them past then.
+# Sonnet 4.6 is priced at the standard rate across its full 1,000,000-token context window.
+---
+schema_version: 1
+provider: anthropic
+models:
+  claude-haiku-4-5-20251001:
+    input_price_per_mtok: 1.00
+    output_price_per_mtok: 5.00
+    context_window: 200000
+    max_output_tokens: 64000
+  claude-sonnet-4-6:
+    input_price_per_mtok: 3.00
+    output_price_per_mtok: 15.00
+    context_window: 1000000
+    max_output_tokens: 128000

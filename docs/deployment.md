@@ -78,7 +78,7 @@ Required (validated first; a failure names the variable and nothing on the host 
 | `invio_db_password` | non-empty, single line |
 | `invio_smtp_host`, `invio_smtp_from` | non-empty |
 | `invio_http_contact` | non-empty |
-| `invio_llm_api_keys` | mapping provider to key, at least one non-empty; providers `mistral`, `openai`, `anthropic`, `google` (written as `INVIO_<PROVIDER>_API_KEY`; jobs can use `mistral` and `openai`, the others have no provider implementation yet) |
+| `invio_llm_api_keys` | mapping provider to key, at least one non-empty; providers `mistral`, `openai`, `anthropic`, `google` (written as `INVIO_<PROVIDER>_API_KEY`; jobs can use `mistral`, `openai` and `anthropic`, `google` has no provider implementation yet) |
 | `invio_db_admin_user`, `invio_db_admin_password` | only when `invio_mariadb_manage_server` is `false` and `invio_db_host` is not `localhost` |
 
 Optional (defaults in `defaults/main.yml`):
@@ -227,7 +227,7 @@ To update only the configuration (for example rotate a secret) without touching 
 the playbook with `--tags invio:config`. Oneshot services read the file on every start, so no
 restart is needed.
 
-To check an LLM provider key (`mistral` or `openai`) after deploying or rotating it, send one
+To check an LLM provider key (`mistral`, `openai` or `anthropic`) after deploying or rotating it, send one
 tiny request as `invio` with the same env file. It prints `ok provider=... model=...` and exits
 0; exit 1 means the provider rejected or failed the call (`Error: LLMAuthError: ...` for a bad
 key), exit 2 a configuration problem such as a missing `INVIO_OPENAI_API_KEY`:

@@ -29,10 +29,16 @@ _MAX_TEMPERATURE = 2.0
 
 
 class RegisteredProvider(LLMProvider, Protocol):
-    """A provider class that can be built from settings (reads its key and the timeout)."""
+    """A provider class that can be built from settings (reads its key and the timeout).
+
+    :func:`get_provider` passes the model ``registry`` it prices calls with, so a provider that
+    reads model limits uses the same entries; providers that need none ignore it.
+    """
 
     @classmethod
-    def from_settings(cls, settings: Settings) -> Self: ...
+    def from_settings(
+        cls, settings: Settings, *, registry: ModelRegistry | None = None
+    ) -> Self: ...
 
 
 _REGISTRY: dict[str, type[RegisteredProvider]] = {}
@@ -171,10 +177,11 @@ def get_provider(
     if cls is None:
         registered = ", ".join(sorted(_REGISTRY)) or "none"
         raise LLMConfigError(f"unknown LLM provider '{name}'; registered: {registered}")
-    provider = cls.from_settings(settings if settings is not None else get_settings())
-    return _LoggedProvider(
-        provider, name=name, registry=registry if registry is not None else default_registry()
+    models = registry if registry is not None else default_registry()
+    provider = cls.from_settings(
+        settings if settings is not None else get_settings(), registry=models
     )
+    return _LoggedProvider(provider, name=name, registry=models)
 
 
 def resolve(

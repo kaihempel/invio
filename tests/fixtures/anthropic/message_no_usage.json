@@ -1,0 +1,20 @@
+{
+  "status": 200,
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": {
+    "id": "msg_00000000000000000000000000",
+    "type": "message",
+    "role": "assistant",
+    "model": "claude-haiku-4-5-20251001",
+    "content": [
+      {
+        "type": "text",
+        "text": "Hello"
+      }
+    ],
+    "stop_reason": "end_turn",
+    "stop_sequence": null
+  }
+}

@@ -11,6 +11,7 @@ models:                    # mapping, may be empty
     input_price_per_mtok: <number >= 0>    # USD per 1,000,000 input tokens
     output_price_per_mtok: <number >= 0>   # USD per 1,000,000 output tokens
     context_window: <integer > 0>          # tokens
+    max_output_tokens: <integer > 0>       # optional; tokens; required for anthropic models
 ```
 
 Files are parsed strictly: unknown keys, missing fields, invalid values, a `provider` that

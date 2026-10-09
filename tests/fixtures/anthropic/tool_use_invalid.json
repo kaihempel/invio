@@ -1,0 +1,29 @@
+{
+  "status": 200,
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": {
+    "id": "msg_00000000000000000000000000",
+    "type": "message",
+    "role": "assistant",
+    "model": "claude-haiku-4-5-20251001",
+    "content": [
+      {
+        "type": "tool_use",
+        "id": "toolu_00000000000000000000",
+        "name": "Score",
+        "input": {
+          "score": 7,
+          "reason": "ANSWER-SENTINEL"
+        }
+      }
+    ],
+    "stop_reason": "tool_use",
+    "stop_sequence": null,
+    "usage": {
+      "input_tokens": 12,
+      "output_tokens": 3
+    }
+  }
+}

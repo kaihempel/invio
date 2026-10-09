@@ -484,6 +484,25 @@ empty or cut-off (incomplete) answers raise `LLMUnavailableError`. Structured re
 strict JSON schema (closed objects, every property required). OpenAI rejects output limits
 below 16 tokens, so smaller `max_tokens` values are sent as 16.
 
+### Anthropic
+
+Set `INVIO_ANTHROPIC_API_KEY` (see `.env.example`) and name `provider: anthropic` in a job's
+`llm` section. The shipped models are listed in `src/invio/llm/models.d/anthropic.yaml`
+(`claude-haiku-4-5-20251001` for `fast`, `claude-sonnet-4-6` for `smart`). Only models that
+accept both a forced tool choice and a `temperature` are listed, because structured output
+forces one tool call and the pipeline always sends a temperature; newer Claude models reject
+one of the two. Both listed models are legacy, so check the retirement dates in the YAML header.
+The provider uses the official `anthropic` SDK on the Messages API; every call is one stateless
+request. Structured requests declare the schema as a single tool and force it, with the model's
+registered `max_output_tokens` (every `anthropic` registry entry must define it, or building
+the provider fails with `LLMConfigError`). Retries, typed errors, messages and the `llm.retry`
+log line are the same as for Mistral and OpenAI (shared code in `invio.llm.http_retry`);
+overloaded (529) answers are retried like other 5xx ones, and exhausted credit (402, or the
+legacy 400 about the credit balance) raises `LLMQuotaError` without retrying. Refused, empty or
+cut-off (`max_tokens`) answers raise `LLMUnavailableError`. Only the `x-api-key` credential is
+sent, to `https://api.anthropic.com`: `ANTHROPIC_AUTH_TOKEN` and `ANTHROPIC_BASE_URL` are
+ignored.
+
 ### Common provider notes
 
 The HTTP client is created per event loop. Call `await provider.aclose()` before the loop ends
@@ -494,6 +513,7 @@ Check a provider setup with one tiny request:
 ```
 invio llm test mistral [--model MODEL]
 invio llm test openai [--model MODEL]
+invio llm test anthropic [--model MODEL]
 ```
 
 It prints `ok provider=... model=... input_tokens=... output_tokens=... duration_ms=...` and
@@ -503,8 +523,8 @@ model is the provider's cheapest registered one.
 
 The test suite never touches the network. Optional live tests (plain and structured call)
 use the real API of each provider whose key is set (`INVIO_MISTRAL_API_KEY`,
-`INVIO_OPENAI_API_KEY`): `uv run pytest -m live`. Without a `-m` expression that names `live`,
-they are skipped. Every provider must pass the shared contract suite
+`INVIO_OPENAI_API_KEY`, `INVIO_ANTHROPIC_API_KEY`): `uv run pytest -m live`. Without a `-m`
+expression that names `live`, they are skipped. Every provider must pass the shared contract suite
 `tests/test_llm_provider_contract.py`; a new provider adds one harness there.
 
 Models and prices live in `src/invio/llm/models.d/<provider>.yaml` (USD per 1M tokens):
@@ -517,6 +537,7 @@ models:
     input_price_per_mtok: 0.5
     output_price_per_mtok: 1.5
     context_window: 128000
+    max_output_tokens: 8192   # optional; required for anthropic models
 ```
 
 `default_registry().cost(model, usage)` returns the cost as a `Decimal` with 6 decimals (or

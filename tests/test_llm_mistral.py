@@ -262,7 +262,7 @@ def test_previous_client_of_a_closed_loop_is_dropped_without_error() -> None:
 
     assert recorder.clients_created == 3
     # Only the client of the last loop is still referenced; the others were released.
-    assert [client for _, client in provider._clients.values()] == [recorder.clients[-1]]
+    assert [client for _, client in provider._clients.entries.values()] == [recorder.clients[-1]]
 
 
 async def test_aclose_closes_the_client_of_the_running_loop() -> None:
@@ -273,7 +273,7 @@ async def test_aclose_closes_the_client_of_the_running_loop() -> None:
     await provider.aclose()  # a second close is a no-op
 
     assert recorder.clients[0].is_closed
-    assert provider._clients == {}
+    assert provider._clients.entries == {}
     await _complete(provider)
     assert recorder.clients_created == 2
     await provider.aclose()

@@ -1101,7 +1101,7 @@ async def test_sdk_retries_are_disabled_and_timeout_has_a_margin() -> None:
     provider, _, _ = make_provider("response_ok", timeout_seconds=10.0)
     await _complete(provider)
 
-    sdk_client, _ = next(iter(provider._clients.values()))
+    sdk_client, _ = next(iter(provider._clients.entries.values()))
 
     assert sdk_client.max_retries == 0
     assert sdk_client.timeout == 15.0

@@ -269,7 +269,7 @@ def patched_providers(monkeypatch: pytest.MonkeyPatch) -> Callable[[str, Any], N
     def register(name: str, provider: Any) -> None:
         class _Registered:
             @classmethod
-            def from_settings(cls, settings: Any) -> Any:
+            def from_settings(cls, settings: Any, *, registry: Any = None) -> Any:
                 return provider
 
         factory.register_provider(name)(_Registered)

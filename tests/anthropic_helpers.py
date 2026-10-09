@@ -1,4 +1,4 @@
-"""Offline HTTP harness for the Mistral provider tests (``httpx2``; see ``tests.sdk_harness``)."""
+"""Offline HTTP harness for the Anthropic provider tests (``httpx2``; see ``tests.sdk_harness``)."""
 
 from collections.abc import Awaitable, Callable
 from datetime import datetime
@@ -7,20 +7,23 @@ from typing import Any
 
 import httpx2
 
-from invio.llm.mistral import MistralProvider, RetryPolicy
+from invio.llm.anthropic import AnthropicProvider
+from invio.llm.http_retry import RetryPolicy
+from invio.llm.registry import ModelRegistry, default_registry
 from tests import sdk_harness
 from tests.sdk_harness import HANG as HANG
 from tests.sdk_harness import RecordedRequest as RecordedRequest
 
-FIXTURE_DIR = Path(__file__).parent / "fixtures" / "mistral"
-API_KEY = "sk-test-SECRET123"
+FIXTURE_DIR = Path(__file__).parent / "fixtures" / "anthropic"
+API_KEY = "sk-ant-test-SECRET123"
+BASE_URL = "https://api.anthropic.test"
 
 Reply = str | httpx2.Response | Exception | object
 """A fixture name, a response, an exception to raise, or :data:`HANG`."""
 
 
 def load_fixture(name: str) -> httpx2.Response:
-    """Build the recorded response ``tests/fixtures/mistral/<name>.json``."""
+    """Build the recorded response ``tests/fixtures/anthropic/<name>.json``."""
     response: httpx2.Response = sdk_harness.load_fixture(httpx2, FIXTURE_DIR, name)
     return response
 
@@ -31,22 +34,23 @@ class Recorder(sdk_harness.Recorder):
 
 
 def recording_options(recorder: Recorder) -> tuple[dict[str, Any], list[float]]:
-    """``MistralProvider`` keyword arguments for offline tests and the list of requested waits."""
-    return sdk_harness.recording_options(recorder)
+    """``AnthropicProvider`` keyword arguments for offline tests and the list of waits."""
+    return sdk_harness.recording_options(recorder, base_url=BASE_URL)
 
 
 def make_provider(
     *replies: Reply,
     retry: RetryPolicy | None = None,
     timeout_seconds: float = 60.0,
+    registry: ModelRegistry | None = None,
     uniform: Callable[[float, float], float] | None = None,
     sleep: Callable[[float], Awaitable[None]] | None = None,
     now: Callable[[], datetime] | None = None,
-) -> tuple[MistralProvider, Recorder, list[float]]:
+) -> tuple[AnthropicProvider, Recorder, list[float]]:
     """Build a provider on a :class:`Recorder`; the list receives the requested waits."""
     recorder = Recorder(replies)
     provider, waits = sdk_harness.build_provider(
-        MistralProvider,
+        AnthropicProvider,
         API_KEY,
         recorder,
         retry=retry,
@@ -54,5 +58,7 @@ def make_provider(
         uniform=uniform,
         sleep=sleep,
         now=now,
+        base_url=BASE_URL,
+        registry=registry if registry is not None else default_registry(),
     )
     return provider, recorder, waits

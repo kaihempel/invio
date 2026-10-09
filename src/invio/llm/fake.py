@@ -15,6 +15,7 @@ from pydantic import BaseModel
 
 from invio.config.settings import Settings
 from invio.llm.base import LLMError, LLMProvider, Usage, structured_with_repair, with_timeout
+from invio.llm.registry import ModelRegistry
 
 DEFAULT_USAGE = Usage(10, 5)
 
@@ -65,8 +66,8 @@ class FakeProvider:
         self.requests: list[FakeRequest] = []
 
     @classmethod
-    def from_settings(cls, settings: Settings) -> Self:
-        """Build a fake with an empty script (for registry/factory tests)."""
+    def from_settings(cls, settings: Settings, *, registry: ModelRegistry | None = None) -> Self:
+        """Build a fake with an empty script (for registry/factory tests); ignores ``registry``."""
         return cls([], timeout_seconds=settings.llm_timeout_seconds)
 
     async def _play(self) -> tuple[str, Usage]:

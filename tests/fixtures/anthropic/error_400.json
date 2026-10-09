@@ -1,0 +1,13 @@
+{
+  "status": 400,
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": {
+    "type": "error",
+    "error": {
+      "type": "invalid_request_error",
+      "message": "max_tokens: 99999 > 64000, which is the maximum allowed"
+    }
+  }
+}

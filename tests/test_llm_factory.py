@@ -113,7 +113,7 @@ def test_registry_error_wins_over_missing_key(
 ) -> None:
     class Keyed:
         @classmethod
-        def from_settings(cls, settings: Settings) -> Self:
+        def from_settings(cls, settings: Settings, *, registry: Any = None) -> Self:
             require_api_key(settings, "mistral")
             return cls()
 
@@ -156,9 +156,9 @@ def test_resolve_uses_default_registry_and_settings_when_omitted(
 
 class _KeyedProvider(FakeProvider):
     @classmethod
-    def from_settings(cls, settings: Settings) -> Self:
+    def from_settings(cls, settings: Settings, *, registry: Any = None) -> Self:
         require_api_key(settings, "mistral")
-        return super().from_settings(settings)
+        return super().from_settings(settings, registry=registry)
 
 
 def test_missing_key_surfaces_at_get_provider(patched_providers: Register) -> None:
@@ -295,7 +295,7 @@ ACME_MODULE = textwrap.dedent(
     @register_provider("acme")
     class AcmeProvider:
         @classmethod
-        def from_settings(cls, settings: object) -> Self:
+        def from_settings(cls, settings: object, *, registry: object = None) -> Self:
             return cls()
 
         async def complete(self, system, user, *, model, temperature, max_tokens):
@@ -491,3 +491,39 @@ def test_openai_without_key_names_the_setting() -> None:
 
     assert "'openai'" in str(info.value)
     assert "INVIO_OPENAI_API_KEY" in str(info.value)
+
+
+# --- Anthropic provider (issue #31, US4) -------------------------------------------------
+
+
+def test_anthropic_resolves_from_its_module_and_registry_file_only(
+    job_data: dict[str, Any],
+) -> None:
+    """SC-001 for Anthropic: ``anthropic.py`` + ``models.d/anthropic.yaml``, no ``factory.py``."""
+    from invio.llm.anthropic import AnthropicProvider
+
+    package = Path(invio.llm.__file__).parent
+    assert (package / "anthropic.py").is_file()
+    assert (package / "models.d" / "anthropic.yaml").is_file()
+    assert "anthropic" not in Path(factory.__file__).read_text(encoding="utf-8").lower()
+    default_registry.cache_clear()
+    first, second = (info.model_id for info in default_registry().models_for("anthropic"))
+    job_data["llm"] = {"provider": "anthropic", "models": {"fast": first, "smart": second}}
+    llm = JobConfig.model_validate(job_data).llm
+    settings = make_settings(anthropic_api_key="sk-ant-test-SECRET123")
+
+    provider = get_provider("anthropic", settings)
+    resolved, model = resolve(llm, "smart", settings)
+
+    assert factory._REGISTRY["anthropic"] is AnthropicProvider
+    assert provider is not None
+    assert resolved is not None
+    assert model == second
+
+
+def test_anthropic_without_key_names_the_setting() -> None:
+    with pytest.raises(LLMAuthError) as info:
+        get_provider("anthropic", make_settings())
+
+    assert "'anthropic'" in str(info.value)
+    assert "INVIO_ANTHROPIC_API_KEY" in str(info.value)
