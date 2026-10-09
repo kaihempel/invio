@@ -2,7 +2,8 @@
 
 The suite runs once per provider harness: :class:`FakeProvider` (scripted), ``MistralProvider``
 (recorded HTTP via ``tests/mistral_helpers.py``) and ``OpenAIProvider`` (recorded HTTP via
-``tests/openai_helpers.py``). A harness maps the abstract :class:`Outcome` of each request to
+``tests/openai_helpers.py``) and ``AnthropicProvider`` (recorded HTTP via
+``tests/anthropic_helpers.py``). A harness maps the abstract :class:`Outcome` of each request to
 whatever its provider needs (a scripted step or a recorded fixture). Retries are disabled so
 every error outcome costs exactly one request; retry behaviour itself is covered by the
 provider-specific test modules.
@@ -29,7 +30,7 @@ from invio.llm.base import (
 )
 from invio.llm.fake import FakeProvider, FakeReply, FakeStep
 from invio.llm.http_retry import RetryPolicy
-from tests import mistral_helpers, openai_helpers
+from tests import anthropic_helpers, mistral_helpers, openai_helpers
 from tests.llm_helpers import Score
 
 SYSTEM = "You rate things."
@@ -137,7 +138,34 @@ class OpenAIHarness(ProviderHarness):
         return provider
 
 
-HARNESSES: tuple[type[ProviderHarness], ...] = (FakeHarness, MistralHarness, OpenAIHarness)
+class AnthropicHarness(ProviderHarness):
+    name = "anthropic"
+    model = "claude-haiku-4-5-20251001"
+
+    _FIXTURES: ClassVar[dict[Outcome, str]] = {
+        Outcome.TEXT: "message_ok",
+        Outcome.STRUCTURED: "tool_use_ok",
+        Outcome.STRUCTURED_INVALID: "tool_use_invalid",
+        Outcome.AUTH: "error_401",
+        Outcome.RATE_LIMIT: "error_429",
+        Outcome.UNAVAILABLE: "error_529",
+        Outcome.INVALID_REQUEST: "error_400",
+    }
+
+    def build(self, *outcomes: Outcome) -> LLMProvider:
+        provider, recorder, _ = anthropic_helpers.make_provider(
+            *(self._FIXTURES[outcome] for outcome in outcomes), retry=NO_RETRIES
+        )
+        self.requests_made = lambda: len(recorder.requests)
+        return provider
+
+
+HARNESSES: tuple[type[ProviderHarness], ...] = (
+    FakeHarness,
+    MistralHarness,
+    OpenAIHarness,
+    AnthropicHarness,
+)
 
 
 class TestProviderContract:

@@ -201,7 +201,7 @@ description: "Task list for the Anthropic (Claude) provider (issue #31)"
 
 *(US4 comes before US3: both are P2, US4 needs the harness from T005, and US3 only adds tests for an already-generic command.)*
 
-- [ ] T016 [US4] In `tests/test_llm_provider_contract.py`, add an `AnthropicHarness(ProviderHarness)` (`name = "anthropic"`, `model = "claude-haiku-4-5-20251001"`) to `HARNESSES`, mapping each `Outcome` to a fixture:
+- [x] T016 [US4] In `tests/test_llm_provider_contract.py`, add an `AnthropicHarness(ProviderHarness)` (`name = "anthropic"`, `model = "claude-haiku-4-5-20251001"`) to `HARNESSES`, mapping each `Outcome` to a fixture:
   - `TEXT` → `message_ok`
   - `STRUCTURED` → `tool_use_ok`
   - `STRUCTURED_INVALID` → `tool_use_invalid`
@@ -211,7 +211,7 @@ description: "Task list for the Anthropic (Claude) provider (issue #31)"
   - `INVALID_REQUEST` → `error_400`
 
   Build it with `RetryPolicy(max_retries=0)` via `tests/anthropic_helpers.py`, and update the module docstring.
-- [ ] T017 [P] [US4] In `tests/test_llm_factory.py`, add a test that real discovery makes `get_provider("anthropic", settings)` resolvable without editing `factory.py`, and that a missing key raises `LLMAuthError` naming `INVIO_ANTHROPIC_API_KEY`.
+- [x] T017 [P] [US4] In `tests/test_llm_factory.py`, add a test that real discovery makes `get_provider("anthropic", settings)` resolvable without editing `factory.py`, and that a missing key raises `LLMAuthError` naming `INVIO_ANTHROPIC_API_KEY`.
 
 ---
 
