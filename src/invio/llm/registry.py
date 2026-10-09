@@ -6,7 +6,9 @@ Registry files are versioned (``schema_version: 1``) and parsed strictly; every 
 carry the optional ``max_output_tokens`` (the model's largest answer size); providers that need
 it, such as Anthropic, check for it when they are built. The optional ``thinking_level``,
 ``thinking_allowance_tokens`` and ``keep_default_temperature`` fields describe how a provider
-must call a thinking model (Google requires the first two); other providers ignore them.
+must call a thinking model (Google requires the first two). They are accepted only in the files
+of the providers in :data:`THINKING_PROVIDERS`, and ``thinking_allowance_tokens`` only together
+with ``thinking_level``, so a misplaced field fails loudly instead of being ignored.
 """
 
 import functools
@@ -34,6 +36,9 @@ from invio.llm.base import LLMConfigError, ModelRegistryError, Usage
 _PRICE_UNIT = Decimal(1_000_000)
 
 ThinkingLevel = Literal["minimal", "low", "medium", "high"]
+# Providers that read the thinking fields; in any other registry file they are an error.
+THINKING_PROVIDERS = frozenset({"google"})
+_THINKING_FIELDS = ("thinking_level", "thinking_allowance_tokens", "keep_default_temperature")
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,7 +149,23 @@ def _parse_file(path: Path) -> _RegistryFile:
         raise ModelRegistryError(
             f"{path}: provider '{parsed.provider}' does not match file name '{path.stem}'"
         )
+    for model_id, entry in parsed.models.items():
+        _check_thinking_fields(path, parsed.provider, model_id, entry)
     return parsed
+
+
+def _check_thinking_fields(path: Path, provider: str, model_id: str, entry: _ModelEntry) -> None:
+    if provider not in THINKING_PROVIDERS:
+        misplaced = [field for field in _THINKING_FIELDS if field in entry.model_fields_set]
+        if misplaced:
+            raise ModelRegistryError(
+                f"{path}: models.{model_id}: {', '.join(misplaced)} not supported for "
+                f"provider '{provider}'"
+            )
+    if entry.thinking_allowance_tokens is not None and entry.thinking_level is None:
+        raise ModelRegistryError(
+            f"{path}: models.{model_id}: thinking_allowance_tokens requires thinking_level"
+        )
 
 
 def load_registry(dirs: Sequence[Path] | None = None) -> ModelRegistry:

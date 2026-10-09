@@ -180,11 +180,13 @@ def classify_status(
     detail: str,
     headers: Mapping[str, str],
     now: Callable[[], datetime],
+    wait_hint: float | None = None,
 ) -> Failure:
     """Classify an HTTP error status the same way for every provider.
 
     401/403 are authentication failures naming ``env_var``; 429 is a retryable rate limit that
-    honours ``Retry-After``; 5xx are retryable server errors; other 4xx are rejected requests;
+    honours ``Retry-After``, or ``wait_hint`` (a provider-specific wait in seconds that takes
+    precedence) when given; 5xx are retryable server errors; other 4xx are rejected requests;
     anything else is an unexpected response. Provider-specific cases (an exhausted quota) are
     checked by the caller first. ``detail`` must already be sanitized (:func:`sanitize_detail`).
     """
@@ -192,7 +194,7 @@ def classify_status(
         message = describe(f"{label} rejected the API key; check {env_var}", model, status)
         return Failure("auth", False, LLMAuthError(message, provider=provider, model=model), status)
     if status == _RATE_LIMIT_STATUS:
-        wait = retry_after(headers, now)
+        wait = wait_hint if wait_hint is not None else retry_after(headers, now)
         message = describe(f"{label} rate limit exceeded", model, status, detail)
         finite_wait = wait if wait is not None and math.isfinite(wait) else None
         limited = LLMRateLimitError(

@@ -1,6 +1,5 @@
 # Google (Gemini) models, USD per 1,000,000 tokens (paid tier, standard, non-batch prices).
-# The tests expect gemini-3.5-flash-lite as the fast role and gemini-3.8-flash as the smart
-# role (the registry orders models by id, so the order in this file carries no meaning).
+# The registry orders models by id, so the order in this file carries no meaning.
 # Every google entry must define `thinking_level` and `thinking_allowance_tokens`: every request
 # sends the level, and free-text calls add the allowance to the caller's max_tokens, because
 # thinking tokens count against the output limit.
@@ -12,7 +11,8 @@
 #   https://ai.google.dev/gemini-api/docs/pricing
 #   https://ai.google.dev/gemini-api/docs/thinking
 #   https://ai.google.dev/gemini-api/docs/gemini-3
-# gemini-3.8-flash costs 1.50 input / 7.50 output from 2027-01-01: update this file then.
+# gemini-3.8-flash costs 1.50 input / 7.50 output from 2027-01-01: update this file then
+# (tests/test_llm_registry.py fails from that date until it is updated).
 # gemini-3.8-flash does not accept the `minimal` thinking level, hence `low`.
 ---
 schema_version: 1

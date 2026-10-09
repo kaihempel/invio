@@ -18,4 +18,7 @@ models:                    # mapping, may be empty
 ```
 
 Files are parsed strictly: unknown keys, missing fields, invalid values, a `provider` that
-differs from the file name and a model id defined in two files are all errors.
+differs from the file name and a model id defined in two files are all errors. The thinking
+fields (`thinking_level`, `thinking_allowance_tokens`, `keep_default_temperature`) are only
+accepted for providers that read them (currently `google`), and `thinking_allowance_tokens`
+requires `thinking_level`.

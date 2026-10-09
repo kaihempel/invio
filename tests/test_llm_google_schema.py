@@ -257,3 +257,40 @@ def test_one_of_next_to_any_of_keeps_both_alternatives() -> None:
     schema = gemini_schema({"anyOf": [{"type": "string"}], "oneOf": [{"type": "integer"}]})
 
     assert schema == {"anyOf": [{"type": "string"}]}
+
+
+def test_single_branch_all_of_is_merged_into_its_node() -> None:
+    schema = gemini_schema(
+        {
+            "type": "object",
+            "properties": {
+                "a": {"allOf": [{"$ref": "#/$defs/Inner"}], "description": "outer"},
+            },
+            "$defs": {
+                "Inner": {"type": "string", "description": "inner", "enum": ["x"]},
+            },
+        }
+    )
+
+    assert schema["properties"]["a"] == {"type": "string", "description": "outer", "enum": ["x"]}
+
+
+@pytest.mark.parametrize("all_of", [[{"type": "string"}, {"maxItems": 1}], [], {"type": "string"}])
+def test_all_of_that_cannot_be_merged_raises_config_error(all_of: object) -> None:
+    with pytest.raises(LLMConfigError, match="allOf"):
+        gemini_schema({"type": "object", "properties": {"a": {"allOf": all_of}}})
+
+
+@pytest.mark.parametrize(
+    "keyword",
+    ["not", "if", "then", "else", "patternProperties", "propertyNames", "dependentSchemas"],
+)
+def test_keywords_that_would_widen_the_schema_raise_config_error(keyword: str) -> None:
+    with pytest.raises(LLMConfigError, match=keyword):
+        gemini_schema({"type": "object", "properties": {"a": {keyword: {}}}})
+
+
+def test_widening_keywords_as_property_names_are_allowed() -> None:
+    schema = gemini_schema({"type": "object", "properties": {"not": {"type": "string"}}})
+
+    assert schema["properties"] == {"not": {"type": "string"}}

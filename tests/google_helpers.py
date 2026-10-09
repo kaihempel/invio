@@ -13,7 +13,6 @@ from invio.llm.http_retry import RetryPolicy
 from invio.llm.registry import ModelRegistry, default_registry
 from tests import sdk_harness
 from tests.sdk_harness import HANG as HANG
-from tests.sdk_harness import RecordedRequest as RecordedRequest
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "google"
 API_KEY = "AIza-test-SECRET123"
@@ -34,12 +33,6 @@ class Nested(BaseModel):
     main: Tag
     others: list[Tag]
     backup: Tag
-
-
-def load_fixture(name: str) -> httpx.Response:
-    """Build the recorded response ``tests/fixtures/google/<name>.json``."""
-    response: httpx.Response = sdk_harness.load_fixture(httpx, FIXTURE_DIR, name)
-    return response
 
 
 class Recorder(sdk_harness.Recorder):

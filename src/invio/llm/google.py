@@ -18,8 +18,11 @@ model maximum applies. A model flagged ``keep_default_temperature`` gets no temp
 Google recommends for Gemini 3.
 
 Schema conversion: the service accepts a subset of JSON Schema. :func:`gemini_schema` inlines
-local ``$ref``/``$defs`` and drops the keywords outside that subset; the original Pydantic model
-still validates the answer, so dropped constraints are enforced locally.
+local ``$ref``/``$defs`` and drops the value constraints outside that subset (``pattern``,
+``minLength``, ...); the original Pydantic model still validates the answer, so dropped
+constraints are enforced locally. Structural keywords whose loss would widen the schema
+(``not``, ``if``/``then``/``else``, a multi-branch ``allOf``, ...) raise
+:class:`~invio.llm.base.LLMConfigError` instead of being dropped.
 
 All retrying is done by the shared loop in :mod:`invio.llm.http_retry` (the SDK retries only
 when ``retry_options`` is set, which it is not); this module maps SDK and ``httpx`` exceptions to
@@ -44,8 +47,8 @@ the ``x-goog-api-key`` header. There is one SDK client per running event loop
 
 import asyncio
 import copy
-import dataclasses
 import json
+import logging
 import math
 import random
 import re
@@ -66,7 +69,6 @@ from invio.llm.base import (
     LLMInvalidOutputError,
     LLMProvider,
     LLMQuotaError,
-    LLMRateLimitError,
     LLMUnavailableError,
     Usage,
     require_api_key,
@@ -88,6 +90,8 @@ from invio.llm.http_retry import (
 )
 from invio.llm.loop_clients import LoopClients
 from invio.llm.registry import ModelInfo, ModelRegistry
+
+logger = logging.getLogger("invio.llm")
 
 PROVIDER = "google"
 _LABEL = "Google"
@@ -115,6 +119,17 @@ _SCHEMA_KEYWORDS = (
     "anyOf",
 )
 _SCHEMA_LISTS = ("prefixItems", "anyOf")
+# Keywords whose constraint the service cannot express and that cannot be dropped without
+# widening the schema; a schema using one of them raises LLMConfigError.
+_UNEXPRESSIBLE = (
+    "not",
+    "if",
+    "then",
+    "else",
+    "patternProperties",
+    "propertyNames",
+    "dependentSchemas",
+)
 _BAD_REQUEST = 400
 _RATE_LIMITED = 429
 # Finish reasons that mean a complete answer (or none was reported).
@@ -157,6 +172,20 @@ def _inline(node: Any, defs: dict[str, Any], stack: tuple[str, ...]) -> Any:
                 f"schema {name} is recursive; Google structured output cannot express it"
             )
         out = _inline(defs[name], defs, (*stack, name))
+    unexpressible = [key for key in _UNEXPRESSIBLE if key in node]
+    if unexpressible:
+        raise LLMConfigError(
+            f"schema uses {', '.join(unexpressible)}; Google structured output cannot express it"
+        )
+    all_of = node.get("allOf")
+    if all_of is not None:
+        if not isinstance(all_of, list) or len(all_of) != 1:
+            raise LLMConfigError(
+                "schema combines several allOf branches; Google structured output cannot express it"
+            )
+        # A single branch (Pydantic wraps a referenced model this way) is merged into the node;
+        # the node's own keywords win.
+        out.update(_inline(all_of[0], defs, stack))
     for key in _SCHEMA_KEYWORDS:
         if key not in node:
             continue
@@ -182,9 +211,12 @@ def gemini_schema(schema: dict[str, Any]) -> dict[str, Any]:
     """Return a service-compatible copy of a Pydantic JSON schema; ``schema`` is not changed.
 
     Local ``#/$defs/<Name>`` references are replaced by copies of their definitions (``$defs`` is
-    dropped), ``oneOf`` becomes ``anyOf``, ``const`` a one-value ``enum``, and only the keywords
-    the service documents are kept. A recursive schema or a
-    reference that is not local raises :class:`~invio.llm.base.LLMConfigError`.
+    dropped), ``oneOf`` becomes ``anyOf``, ``const`` a one-value ``enum``, a single-branch
+    ``allOf`` is merged into its node, and only the keywords the service documents are kept.
+    A recursive schema, a reference that is not local, a multi-branch ``allOf`` and a keyword
+    that cannot be dropped without widening the schema (``not``, ``if``/``then``/``else``,
+    ``patternProperties``, ``propertyNames``, ``dependentSchemas``) raise
+    :class:`~invio.llm.base.LLMConfigError`.
     """
     defs = schema.get("$defs", {})
     converted: dict[str, Any] = _inline(schema, defs if isinstance(defs, dict) else {}, ())
@@ -251,6 +283,8 @@ def _answer(
         raise _blocked(summary, "", model, usage)
     if reason is not None and reason not in _COMPLETE:
         # MAX_TOKENS and every reason that is not a policy stop (OTHER, future members, ...).
+        # Not retried: OTHER does not say whether the cause is transient, and an identical
+        # request is likely to stop the same way, so a retry would only repeat the cost.
         raise _unavailable(describe(f"Google answer is incomplete: {reason}", model, None), model)
     parts = candidate.content.parts if candidate and candidate.content else None
     text = "".join(part.text for part in parts or [] if part.text and not part.thought)
@@ -331,7 +365,7 @@ def _classify_status(exc: errors.APIError, model: str, now: Callable[[], datetim
         quota = LLMQuotaError(message, provider=PROVIDER, model=model)
         return Failure("quota", False, quota, status)
     response = exc.response
-    failure = classify_status(
+    return classify_status(
         status,
         label=_LABEL,
         env_var=_ENV_VAR,
@@ -340,15 +374,9 @@ def _classify_status(exc: errors.APIError, model: str, now: Callable[[], datetim
         detail=_safe_detail(exc),
         headers=response.headers if isinstance(response, httpx.Response) else {},
         now=now,
+        # RetryInfo is more precise than Retry-After: it wins.
+        wait_hint=_retry_delay(details),
     )
-    delay = _retry_delay(details)
-    if failure.kind != "rate_limit" or delay is None:
-        return failure
-    # RetryInfo is more precise than Retry-After: it wins.
-    limited = LLMRateLimitError(
-        str(failure.error), provider=PROVIDER, model=model, retry_after=delay
-    )
-    return dataclasses.replace(failure, error=limited, retry_after=delay)
 
 
 def _classify(exc: Exception, model: str, now: Callable[[], datetime]) -> Failure | None:
@@ -466,7 +494,12 @@ class GoogleProvider:
         )
         if system:
             config.system_instruction = system
-        if not info.keep_default_temperature:
+        if info.keep_default_temperature:
+            logger.debug(
+                "llm.temperature_ignored",
+                extra={"provider": PROVIDER, "model": info.model_id, "temperature": temperature},
+            )
+        else:
             config.temperature = temperature
         if max_output_tokens is not None:
             config.max_output_tokens = max_output_tokens

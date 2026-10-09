@@ -3,6 +3,7 @@
 import os
 import re
 import sys
+from datetime import date
 from decimal import Decimal
 from pathlib import Path
 
@@ -454,7 +455,7 @@ def _entry_with(tmp_path: Path, field: str, raw: str) -> Path:
 def test_thinking_fields_are_accepted_and_exposed(tmp_path: Path) -> None:
     models_dir = write_registry(
         tmp_path,
-        "p",
+        "google",
         {
             "m": {
                 **ENTRY,
@@ -496,6 +497,36 @@ def test_existing_registry_files_load_without_thinking_fields() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    ("field", "raw"),
+    [
+        ("thinking_level", "low"),
+        ("thinking_allowance_tokens", "5"),
+        ("keep_default_temperature", "false"),
+    ],
+)
+def test_thinking_fields_are_rejected_for_other_providers(
+    tmp_path: Path, field: str, raw: str
+) -> None:
+    models_dir = _entry_with(tmp_path, field, raw)
+
+    with pytest.raises(
+        ModelRegistryError, match=rf"p\.yaml: models\.m: {field} not supported for provider 'p'"
+    ):
+        load_registry([models_dir])
+
+
+def test_thinking_allowance_without_level_is_rejected(tmp_path: Path) -> None:
+    models_dir = write_registry(
+        tmp_path, "google", {"m": {**ENTRY, "thinking_allowance_tokens": 10}}
+    )
+
+    with pytest.raises(
+        ModelRegistryError, match=r"google\.yaml: models\.m: thinking_allowance_tokens requires"
+    ):
+        load_registry([models_dir])
+
+
 @pytest.mark.parametrize("raw", ["off", "none", "1", "'LOW'", "true"])
 def test_unknown_thinking_level_is_rejected(tmp_path: Path, raw: str) -> None:
     models_dir = _entry_with(tmp_path, "thinking_level", raw)
@@ -529,3 +560,15 @@ def test_every_google_model_defines_thinking_and_keeps_the_default_temperature()
         info.thinking_allowance_tokens and info.thinking_allowance_tokens > 0 for info in models
     )
     assert all(info.keep_default_temperature is True for info in models)
+
+
+def test_gemini_flash_price_is_updated_once_the_announced_change_applies() -> None:
+    # Google raises gemini-3.8-flash to 1.50 / 7.50 per MTok on 2027-01-01 (see google.yaml).
+    info = default_registry().get("gemini-3.8-flash")
+
+    assert info is not None
+    if date.today() >= date(2027, 1, 1):
+        prices = (info.input_price_per_mtok, info.output_price_per_mtok)
+        assert prices == (Decimal("1.50"), Decimal("7.50")), (
+            "update the gemini-3.8-flash prices in models.d/google.yaml"
+        )

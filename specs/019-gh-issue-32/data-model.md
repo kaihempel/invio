@@ -16,7 +16,9 @@
 
 Rules:
 - `schema_version` stays `1`, and files without the new fields parse exactly as before.
-- Other providers ignore the new fields.
+- The new fields are accepted only in `google.yaml` (`THINKING_PROVIDERS`); in another
+  provider's file they are a `ModelRegistryError`. `thinking_allowance_tokens` without
+  `thinking_level` is a `ModelRegistryError` too.
 - `GoogleProvider` checks, when it is built, that every `google` entry has `thinking_level` and
   `thinking_allowance_tokens`. A missing field is an `LLMConfigError` that names the models.
 

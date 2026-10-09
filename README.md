@@ -516,8 +516,10 @@ request. Gemini 3 models always think, so every `google` registry entry must def
 building the provider fails with `LLMConfigError`. Thinking tokens are billed and reported as
 output tokens. With `keep_default_temperature: true` (both shipped models) the request sends no
 temperature, as Google recommends for Gemini 3, so answers are not deterministic. Structured
-requests send a converted JSON schema (`$defs` inlined, unsupported keywords dropped; the Pydantic
-model still validates the answer, with one repair attempt). A blocked prompt or an answer the
+requests send a converted JSON schema (`$defs` inlined, unsupported value constraints dropped; the
+Pydantic model still validates the answer, with one repair attempt). A schema using a keyword
+whose loss would widen it (`not`, `if`/`then`/`else`, a multi-branch `allOf`, ...) raises
+`LLMConfigError` before any request. A blocked prompt or an answer the
 service stopped for a policy reason (safety, recitation, ...) raises `LLMInvalidOutputError`
 naming the reason, without retry or repair; cut-off (`MAX_TOKENS`) and empty answers raise
 `LLMUnavailableError`. Retries, typed errors and the `llm.retry` log line are the shared ones

@@ -158,6 +158,19 @@ async def test_temperature_is_omitted_only_for_flagged_models(
     assert plain["temperature"] == 0.0
 
 
+async def test_ignored_temperature_is_logged_at_debug_level(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    provider, _, _ = make_provider("text_ok")
+
+    with caplog.at_level(logging.DEBUG, logger="invio.llm"):
+        await _complete(provider, MODEL)
+
+    [record] = [r for r in caplog.records if r.getMessage() == "llm.temperature_ignored"]
+    assert record.levelno == logging.DEBUG
+    assert (record.provider, record.model, record.temperature) == ("google", MODEL, 0.0)
+
+
 # --- structured ------------------------------------------------------------------------------
 
 
@@ -277,12 +290,11 @@ def test_from_settings_without_key_names_the_env_var() -> None:
         GoogleProvider.from_settings(make_settings())
 
 
-@pytest.mark.parametrize("missing", ["thinking_level", "thinking_allowance_tokens"])
+@pytest.mark.parametrize("fields", [{}, {"thinking_level": "low"}])
 def test_registry_entry_without_thinking_fields_is_a_config_error(
-    tmp_path: Path, missing: str
+    tmp_path: Path, fields: dict[str, object]
 ) -> None:
-    fields: dict[str, object] = {"thinking_level": "low", "thinking_allowance_tokens": 10}
-    del fields[missing]
+    # An allowance without a level is already rejected when the registry is loaded.
     registry = _registry(tmp_path, broken=fields)
 
     with pytest.raises(
