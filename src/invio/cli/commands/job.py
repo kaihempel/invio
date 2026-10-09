@@ -41,7 +41,6 @@ from invio.config.settings import get_settings
 from invio.domain import RunStatus
 from invio.llm.base import ModelRegistryError
 from invio.llm.registry import ModelRegistry, default_registry
-from invio.notify import DatabaseConfigError
 from invio.pipeline import RunDeps
 from invio.pipeline.deps import default_deps
 from invio.pipeline.run import JobBusyError, JobDisabledError, RunResult, run_job_by_name
@@ -402,8 +401,6 @@ def _run_errors() -> Iterator[None]:
     try:
         with mapped_errors(config_exit=1):
             yield
-    except (DatabaseConfigError, ModelRegistryError) as exc:
-        raise fail(f"Configuration error: {exc}", 1) from exc
     except ValidationError as exc:
         raise fail(f"Configuration error: {settings_error(exc)}", 1) from exc
     except KeyboardInterrupt as exc:

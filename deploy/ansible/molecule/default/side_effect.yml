@@ -162,8 +162,18 @@
         quiet: true
 
     # --- A running service delays the update (US6 scenario 3, quickstart #24) ------------------
+    # The slow service writes its own end time: when the role starts the timer again, a missed
+    # quarter-hour trigger (Persistent=true) can start the service at once, and systemd then clears
+    # ExecMainExitTimestamp. Only the first run writes the file.
     - name: Update while a slow service runs
+      vars:
+        invio_wait_end_file: /var/lib/invio/molecule-wait-end
       block:
+        - name: Forget the end time of an earlier slow run
+          ansible.builtin.file:
+            path: "{{ invio_wait_end_file }}"
+            state: absent
+
         - name: Make the run-due service slow
           ansible.builtin.include_tasks: tasks/runtime-dropin.yml
           vars:
@@ -171,7 +181,7 @@
             invio_dropin_content: |
               [Service]
               ExecStart=
-              ExecStart=/bin/sleep 90
+              ExecStart=/bin/sh -c 'sleep 90; [ -e {{ invio_wait_end_file }} ] || date +%%s > {{ invio_wait_end_file }}'
 
         - name: Start the slow service without waiting
           ansible.builtin.command:
@@ -204,13 +214,7 @@
 
         - name: Read when the service ended
           ansible.builtin.command:
-            argv: [systemctl, show, -p, ExecMainExitTimestamp, --value, invio-run-due.service]
-          register: invio_wait_service_exit
-          changed_when: false
-
-        - name: Convert the end of the service to epoch seconds
-          ansible.builtin.command:
-            argv: [date, -d, "{{ invio_wait_service_exit.stdout }}", +%s]
+            argv: [cat, "{{ invio_wait_end_file }}"]
           register: invio_wait_service_epoch
           changed_when: false
 
@@ -233,6 +237,11 @@
           ansible.builtin.include_tasks: tasks/runtime-dropin.yml
           vars:
             invio_dropin_name: 60-sleep.conf
+
+        - name: Remove the recorded end time
+          ansible.builtin.file:
+            path: "{{ invio_wait_end_file }}"
+            state: absent
 
     - name: Converge the commit under test again after the wait test
       ansible.builtin.include_role:

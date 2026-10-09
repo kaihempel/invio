@@ -7,12 +7,25 @@ errors surface immediately, and never commit or roll back (see ``session_scope``
 import builtins
 from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from enum import Enum
 from typing import Any, Final
 
-from sqlalchemy import ColumnElement, Select, and_, case, exists, func, insert, or_, select, update
+from sqlalchemy import (
+    ColumnElement,
+    Date,
+    Select,
+    SQLColumnExpression,
+    and_,
+    case,
+    exists,
+    func,
+    insert,
+    or_,
+    select,
+    update,
+)
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -35,6 +48,7 @@ __all__ = [
     "JobRepository",
     "NotificationRepository",
     "RunRepository",
+    "UsageBucket",
     "UsageRepository",
     "UsageTotals",
 ]
@@ -743,6 +757,19 @@ class UsageTotals:
     cost_usd: Decimal
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class UsageBucket:
+    """Summed usage of one job, provider and model; per UTC ``day``, or ``None`` for all days."""
+
+    job_name: str
+    provider: str
+    model: str
+    day: date | None
+    calls: int
+    input_tokens: int
+    output_tokens: int
+
+
 class UsageRepository:
     """Access to the ``llm_usage`` table."""
 
@@ -799,3 +826,54 @@ class UsageRepository:
             output_tokens=int(tokens_out),
             cost_usd=Decimal(str(cost)).quantize(COST_PRECISION),
         )
+
+    def grouped(
+        self,
+        *,
+        job_id: int | None = None,
+        since: datetime | None = None,
+        by_day: bool = False,
+    ) -> builtins.list[UsageBucket]:
+        """Sum usage per (job name, provider, model), and per UTC day if ``by_day``.
+
+        ``job_id`` keeps one job's rows, ``since`` the rows created at or after it. The database
+        groups in every case: ``created_at`` is stored as naive UTC, so ``DATE()`` (SQLite and
+        MariaDB alike) is the UTC day. Ordered by the grouping fields.
+        """
+        conditions: builtins.list[ColumnElement[bool]] = []
+        if job_id is not None:
+            conditions.append(LlmUsage.job_id == job_id)
+        if since is not None:
+            conditions.append(LlmUsage.created_at >= since)
+        keys: builtins.list[SQLColumnExpression[Any]] = [
+            Job.name,
+            LlmUsage.provider,
+            LlmUsage.model,
+        ]
+        if by_day:
+            keys.append(func.date(LlmUsage.created_at, type_=Date))
+        stmt = (
+            select(
+                *keys,
+                func.count(LlmUsage.id),
+                func.coalesce(func.sum(LlmUsage.input_tokens), 0),
+                func.coalesce(func.sum(LlmUsage.output_tokens), 0),
+            )
+            .join(Job, Job.id == LlmUsage.job_id)
+            .where(*conditions)
+            .group_by(*keys)
+            .order_by(*keys)
+        )
+        # int(): MariaDB returns Decimal sums.
+        return [
+            UsageBucket(
+                job_name=row[0],
+                provider=row[1],
+                model=row[2],
+                day=row[3] if by_day else None,
+                calls=int(row[-3]),
+                input_tokens=int(row[-2]),
+                output_tokens=int(row[-1]),
+            )
+            for row in self._session.execute(stmt)
+        ]

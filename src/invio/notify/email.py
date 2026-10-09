@@ -20,13 +20,7 @@ from invio.config.job import JobConfig
 from invio.config.settings import Settings
 from invio.db.models import Job, Notification
 from invio.db.repositories import DigestRepository, NotificationRepository, RunRepository
-from invio.db.session import (
-    check_database_url,
-    create_db_engine,
-    scrub_database_url,
-    session_scope,
-)
-from invio.db.session import session_factory as build_session_factory
+from invio.db.session import checked_session_factory, scrub_database_url, session_scope
 from invio.db.types import utcnow
 from invio.domain import NotificationStatus, RunStatus
 from invio.log import run_context, run_id_var
@@ -591,7 +585,7 @@ def open_session_factory(settings: Settings) -> sessionmaker[Session]:
     the database through this package (the CLI must not import ``invio.db``).
     """
     raw = settings.require_secret("database_url")
-    return build_session_factory(create_db_engine(check_database_url(raw)))
+    return checked_session_factory(raw)
 
 
 def scrub_error(text: str, settings: Settings) -> str:

@@ -20,8 +20,6 @@ from invio.cli.run_output import DASH, format_time
 from invio.cli.runtime import settings_error
 from invio.config.settings import get_settings
 from invio.domain import RunStatus
-from invio.llm.base import ModelRegistryError
-from invio.notify import DatabaseConfigError
 from invio.pipeline import healthcheck
 from invio.pipeline.due import DueOutcome, DueReport, run_due
 from invio.textsafe import strip_control
@@ -59,8 +57,6 @@ def _due_errors() -> Iterator[None]:
     try:
         with mapped_errors(config_exit=2):
             yield
-    except (DatabaseConfigError, ModelRegistryError) as exc:
-        raise fail(f"Configuration error: {exc}", 2) from exc
     except ValidationError as exc:
         raise fail(f"Configuration error: {settings_error(exc)}", 2) from exc
     except KeyboardInterrupt as exc:

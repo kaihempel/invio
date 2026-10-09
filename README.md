@@ -428,7 +428,8 @@ the job name is never read from the file. Ctrl+C prints `aborted; nothing saved`
 
 Exit codes: `0` success (including a no-op enable/disable and an unchanged edit); `1` not found,
 already exists, invalid name, aborted, declined preview or delete, aborted edit; `2` invalid job
-file or stored config, missing setting, or an interactive command without a terminal.
+file or stored config, missing or unusable setting (database URL, model registry), or an
+interactive command without a terminal.
 
 ## LLM layer
 
@@ -672,6 +673,26 @@ appears as a `notify` entry with its counts. The list is written by
 `finalize` into `runs.stats["errors"]`, so it survives later retries and dry runs. A run from
 before this feature has no such list: `show` says "item errors are not available for this run".
 
+#### Usage and cost: `invio usage`
+
+```
+invio usage [--job NAME] [--since YYYY-MM-DD] [--by provider|model|job|day] [--json]
+```
+
+Sums the `llm_usage` rows (one per LLM call) into one row per group (`--by`, default `model`:
+`provider/model`; `day` is the UTC day) with calls, input and output tokens and cost, plus a
+`Total` row; `No usage.` when nothing matches. `--job` keeps one job's rows (an unknown job
+exits 1), `--since` the rows from that day 00:00 UTC on. The cost is computed from the current
+model registry (`models.d/*.yaml`) on the summed tokens per group and model, not from the stored
+`cost_usd`; each group's cost is rounded to 6 decimals, so totals under different `--by` can
+differ by a few millionths of a dollar. A model the registry does not price (for its provider)
+is never counted as zero: its tokens count, the cost shows as `≥ $X` (or `unknown` when nothing in the group is priced), and a
+warning naming each such model goes to stderr. `--json` prints one JSON document on stdout
+(`by`, `job`, `since`, `groups`, `total`, `unpriced_models`; costs are exact decimal strings or
+`null`, with `cost_complete` and `unpriced_models` per group). Exit codes: `0` success, `1`
+unknown job or database error, `2` invalid option, a missing or unusable `INVIO_DATABASE_URL` or
+an unreadable model registry.
+
 Known limitations: the lock has no heartbeat, so a run longer than `INVIO_RUN_LOCK_SECONDS` can
 be overtaken by another one; a source type without an adapter would be
 skipped with a `source.unsupported` log line (every type has one now); video items use the text of their page until #29.
@@ -797,12 +818,14 @@ hand, the update procedure and the troubleshooting notes are in
 ```
 src/invio/
   cli/          Typer app (main.py) and auto-discovered commands/ (db.py, job.py, notify.py,
-                run.py); wizard.py, prompts.py (prompt seam), source_check.py, editor.py,
-                progress.py (live/plain run progress), run_output.py (pure formatters)
+                run.py, usage.py); wizard.py, prompts.py (prompt seam), source_check.py,
+                editor.py, progress.py (live/plain run progress), run_output.py and
+                usage_output.py (pure formatters)
   config/       settings, job.py (job file models + YAML load/save)
   domain.py     shared records, status enums, url_hash (stdlib only)
   db/           models, engine/session helpers, repositories.py, migrations/ (Alembic)
-  services/     jobs.py (JobService: job CRUD, YAML import/export), runs.py (run history)
+  services/     jobs.py (JobService: job CRUD, YAML import/export), runs.py (run history),
+                usage.py (usage and cost report)
   graph/        LangGraph research graph: state, ports, stages, build; nodes/ (LLM stages)
   pipeline/     run orchestration (run_job) and the production wiring of the graph's ports
   textsafe.py   strips control characters / ANSI from untrusted text (leaf)
