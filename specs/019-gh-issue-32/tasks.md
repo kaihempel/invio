@@ -332,12 +332,12 @@ description: "Task list for the Google (Gemini) provider (issue #32)"
 
 ## Phase 7: Polish & cross-cutting
 
-- [ ] T025 [P] Create `tests/test_llm_google_live.py`, modelled on `tests/test_llm_anthropic_live.py`:
+- [X] T025 [P] Create `tests/test_llm_google_live.py`, modelled on `tests/test_llm_anthropic_live.py`:
   - It is marked `live` and captures `INVIO_GOOGLE_API_KEY` at import, skipping without it.
   - (a) Connectivity check on the cheapest model with `max_tokens=5`, `temperature=0`: the text is non-empty and `input_tokens > 0`.
   - (b) `complete_structured` with `RelevanceResult` on the cheapest model.
   - (c) `complete_structured` with `ItemSummary` on `gemini-3.8-flash`, which proves the converted schemas are accepted.
-- [ ] T026 [P] Update the docs:
+- [X] T026 [P] Update the docs:
   - `README.md`: a Google section next to the Anthropic one at `README.md:489`, covering:
     - `INVIO_GOOGLE_API_KEY` and `provider: google`;
     - the shipped models in `models.d/google.yaml`;
@@ -350,7 +350,7 @@ description: "Task list for the Google (Gemini) provider (issue #32)"
   - `docs/deployment.md:81`: replace "`google` has no provider implementation yet" with "jobs can use `mistral`, `openai`, `anthropic` and `google`".
   - `docs/deployment.md:230`: add `google` to the `llm test` provider list.
   - `.env.example`: make sure `INVIO_GOOGLE_API_KEY` is present.
-- [ ] T027 Run the CI gates locally: `uv run ruff check .`, `uv run ruff format --check .`, `uv run mypy`, and `uv run pytest` (coverage `fail_under = 95` must hold). Then run the offline steps of `specs/019-gh-issue-32/quickstart.md`. Fix any issue in the files touched by this feature.
+- [X] T027 Run the CI gates locally: `uv run ruff check .`, `uv run ruff format --check .`, `uv run mypy`, and `uv run pytest` (coverage `fail_under = 95` must hold). Then run the offline steps of `specs/019-gh-issue-32/quickstart.md`. Fix any issue in the files touched by this feature.
 - [ ] T028 Confirm the PR description, filed on branch `gh-issue-32` and referencing #32:
   - justifies the new runtime dependency `google-genai` and its transitive packages (`google-auth`, `requests`, `tenacity`, `websockets`);
   - notes the `gemini-3.8-flash` price change on 2027-01-01;

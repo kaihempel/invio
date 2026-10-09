@@ -14,6 +14,8 @@ Modules:
 * ``openai``: the OpenAI provider (official SDK, Responses API, shared retry loop).
 * ``anthropic``: the Anthropic provider (official SDK, Messages API, forced tool for structured
   output, shared retry loop).
+* ``google``: the Google provider (official SDK, ``generateContent``, converted JSON schema for
+  structured output, shared retry loop).
 * ``models.d/``: one registry file per provider.
 
 This module deliberately imports nothing: provider discovery imports every module of the
