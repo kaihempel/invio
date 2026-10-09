@@ -318,13 +318,13 @@ description: "Task list for the Google (Gemini) provider (issue #32)"
 
 **Independent Test**: CLI runs against recorded responses give exit 0, 1 and 2 with the documented stdout and stderr.
 
-- [ ] T023 [P] [US3] Extend `tests/test_cli_llm.py`, modelled on the existing Anthropic CLI tests (patch `GoogleProvider` construction to use `google_helpers.make_provider` or a recorded `client_factory`):
+- [X] T023 [P] [US3] Extend `tests/test_cli_llm.py`, modelled on the existing Anthropic CLI tests (patch `GoogleProvider` construction to use `google_helpers.make_provider` or a recorded `client_factory`):
   - **Success.** `invio llm test google` with `INVIO_GOOGLE_API_KEY` set and `text_ok` exits 0, and stdout starts with `ok provider=google model=gemini-3.5-flash-lite input_tokens=12 output_tokens=3`. The recorded request has `maxOutputTokens == 5 + 1024` and no temperature.
   - **`--model`.** `--model gemini-3.8-flash` uses that model and `maxOutputTokens == 5 + 4096`.
   - **Missing key.** It exits 2 with `Configuration error` naming `INVIO_GOOGLE_API_KEY`, and no request is made.
   - **Unknown model.** `--model gpt-x` exits 2.
   - **Provider failures.** `error_401` exits 1 with `Error: LLMAuthError` on stderr. Three times `error_503` exits 1 with `LLMUnavailableError`. `blocked_prompt` exits 1 with `LLMInvalidOutputError`. stdout is empty, and stderr does not contain the key.
-- [ ] T024 [US3] Run `uv run pytest tests/test_cli_llm.py tests/test_llm_factory.py`. Fix any existing test that assumes `google` is unregistered or lists the registered providers, for example `"registered: ..."` strings in tests that do not patch the provider table and the `fallback_provider: google` job tests. Change only the expectation, not `src/invio/cli/commands/llm.py` (FR-014).
+- [X] T024 [US3] Run `uv run pytest tests/test_cli_llm.py tests/test_llm_factory.py`. Fix any existing test that assumes `google` is unregistered or lists the registered providers, for example `"registered: ..."` strings in tests that do not patch the provider table and the `fallback_provider: google` job tests. Change only the expectation, not `src/invio/cli/commands/llm.py` (FR-014).
 
 **Checkpoint**: CLI behaviour matches [contracts/cli-llm-test.md](contracts/cli-llm-test.md).
 
