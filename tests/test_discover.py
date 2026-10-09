@@ -591,6 +591,28 @@ async def test_discover_checks_at_most_five_robots_sitemaps(youtube: YoutubeSour
     assert report.skipped == ("2 more robots.txt sitemaps (limit 5)",)
 
 
+async def test_discover_robots_sitemaps_already_found_do_not_use_up_the_limit(
+    youtube: YoutubeSource,
+) -> None:
+    site = Site()
+    site.add("/", fixture("page_plain.html"))
+    # The probed /sitemap.xml and a repeated line come first; neither takes one of the 5 places.
+    lines = ["example.com/sitemap.xml", "example.com/map-1.xml", "EXAMPLE.com/map-1.xml"]
+    lines += [f"example.com/map-{i}.xml" for i in range(2, 6)]
+    robots = "User-agent: *\n" + "".join(f"Sitemap: https://{line}\n" for line in lines)
+    site.add("/robots.txt", robots, TEXT)
+    site.add("/sitemap.xml", fixture("sitemap_urlset.xml"), XML)
+    for i in range(1, 6):
+        site.add(f"/map-{i}.xml", fixture("sitemap_urlset.xml"), XML)
+
+    report = await run(site, youtube)
+
+    robots_found = [f for f in report.sources if f.origin is FindingOrigin.ROBOTS]
+    assert len(robots_found) == 5
+    assert report.skipped == ()
+    assert site.paths().count("/sitemap.xml") == 1
+
+
 async def test_discover_classifies_a_sitemap_served_at_a_feed_path(
     youtube: YoutubeSource,
 ) -> None:
@@ -915,6 +937,19 @@ async def test_discover_ignores_youtube_links_that_are_no_channel_or_playlist(
 
     assert report.sources == ()
     assert extract.urls == []
+
+
+async def test_discover_an_unexpected_error_rejects_only_that_finding() -> None:
+    adapter = YoutubeSource(extract=ScriptedExtractor())
+    adapter.close()  # describe() now raises RuntimeError, which is no FetchError
+    site = feed_site()
+    page = fixture("page_rss_link.html").decode()
+    site.add("/", page.replace("</body>", '<a href="https://www.youtube.com/@closed">x</a></body>'))
+
+    report = await run(site, adapter)
+
+    assert urls(report) == ["https://example.com/blog/feed.xml"]
+    assert reasons(report)["@closed"] == "unreadable"
 
 
 async def test_discover_does_not_offer_failing_or_empty_youtube_listings() -> None:

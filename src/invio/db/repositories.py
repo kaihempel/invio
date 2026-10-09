@@ -85,9 +85,12 @@ class JobRepository:
     def __init__(self, session: Session) -> None:
         self._session = session
 
-    def get_by_name(self, name: str) -> Job | None:
-        """Return the job called ``name`` or ``None``."""
-        return self._session.scalars(select(Job).where(Job.name == name)).one_or_none()
+    def get_by_name(self, name: str, *, for_update: bool = False) -> Job | None:
+        """Return the job called ``name`` or ``None``; ``for_update`` locks the row."""
+        stmt = select(Job).where(Job.name == name)
+        if for_update:
+            stmt = stmt.with_for_update()
+        return self._session.scalars(stmt).one_or_none()
 
     def get(self, job_id: int) -> Job | None:
         """Return the job with ``job_id`` or ``None``."""

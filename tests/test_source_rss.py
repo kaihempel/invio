@@ -525,10 +525,11 @@ def test_entry_date_is_defensive(entry: dict[str, object], expected: datetime | 
 # --- describe_feed -----------------------------------------------------------------------------
 
 DISCOVERY = Path(__file__).parent / "fixtures" / "discovery"
+FEED_URL = "https://e.com/feed"
 
 
 def test_describe_rss_fixture() -> None:
-    summary = describe_feed((DISCOVERY / "feed_rss.xml").read_bytes())
+    summary = describe_feed((DISCOVERY / "feed_rss.xml").read_bytes(), base_url=FEED_URL)
 
     assert summary == FeedSummary(
         title="Example Blog", entry_count=3, newest=datetime(2026, 10, 1, 8, 0, tzinfo=UTC)
@@ -536,7 +537,7 @@ def test_describe_rss_fixture() -> None:
 
 
 def test_describe_atom_fixture_uses_published_else_updated() -> None:
-    summary = describe_feed((DISCOVERY / "feed_atom.xml").read_bytes())
+    summary = describe_feed((DISCOVERY / "feed_atom.xml").read_bytes(), base_url=FEED_URL)
 
     assert summary == FeedSummary(
         title="Example Atom", entry_count=2, newest=datetime(2026, 10, 2, 10, 0, tzinfo=UTC)
@@ -544,13 +545,13 @@ def test_describe_atom_fixture_uses_published_else_updated() -> None:
 
 
 def test_describe_empty_but_well_formed_feed() -> None:
-    summary = describe_feed((DISCOVERY / "feed_empty.xml").read_bytes())
+    summary = describe_feed((DISCOVERY / "feed_empty.xml").read_bytes(), base_url=FEED_URL)
 
     assert summary == FeedSummary(title="Empty Blog", entry_count=0, newest=None)
 
 
 def test_describe_entries_without_dates_have_no_newest() -> None:
-    summary = describe_feed(rss("<title>A</title><link>https://e.com/a</link>"))
+    summary = describe_feed(rss("<title>A</title><link>https://e.com/a</link>"), base_url=FEED_URL)
 
     assert summary == FeedSummary(title="T", entry_count=1, newest=None)
 
@@ -558,7 +559,7 @@ def test_describe_entries_without_dates_have_no_newest() -> None:
 def test_describe_truncated_feed_with_entries_is_still_a_feed() -> None:
     content = rss("<title>A</title><link>https://e.com/a</link>").removesuffix(b"</channel></rss>")
 
-    summary = describe_feed(content)
+    summary = describe_feed(content, base_url=FEED_URL)
 
     assert summary is not None
     assert summary.entry_count == 1
@@ -573,7 +574,7 @@ def test_describe_truncated_feed_with_entries_is_still_a_feed() -> None:
     ],
 )
 def test_describe_rejects_what_is_not_a_feed(content: bytes) -> None:
-    assert describe_feed(content) is None
+    assert describe_feed(content, base_url=FEED_URL) is None
 
 
 def test_describe_title_html_is_stripped_and_collapsed() -> None:
@@ -583,7 +584,7 @@ def test_describe_title_html_is_stripped_and_collapsed() -> None:
         b"<link>https://e.com/</link><description>d</description></channel></rss>"
     )
 
-    summary = describe_feed(content)
+    summary = describe_feed(content, base_url=FEED_URL)
 
     assert summary is not None
     assert summary.title == "Big News & More"
@@ -596,7 +597,7 @@ def test_describe_plain_text_atom_title_keeps_angle_brackets() -> None:
         b"<updated>2026-01-01T00:00:00Z</updated></feed>"
     )
 
-    summary = describe_feed(content)
+    summary = describe_feed(content, base_url=FEED_URL)
 
     assert summary is not None
     assert summary.title == "a <b> c"
@@ -605,7 +606,9 @@ def test_describe_plain_text_atom_title_keeps_angle_brackets() -> None:
 def test_describe_missing_title_is_none() -> None:
     content = b'<?xml version="1.0"?><rss version="2.0"><channel><link>https://e.com/</link></channel></rss>'
 
-    assert describe_feed(content) == FeedSummary(title=None, entry_count=0, newest=None)
+    summary = describe_feed(content, base_url=FEED_URL)
+
+    assert summary == FeedSummary(title=None, entry_count=0, newest=None)
 
 
 def test_describe_truncated_feed_needs_an_entry_link_that_resolves() -> None:
@@ -613,5 +616,20 @@ def test_describe_truncated_feed_needs_an_entry_link_that_resolves() -> None:
     relative = rss("<title>A</title><link>/a</link>").removesuffix(truncated)
     unusable = rss("<title>A</title><link>mailto:me@e.com</link>").removesuffix(truncated)
 
-    assert describe_feed(relative, base_url="https://e.com/feed") is not None
-    assert describe_feed(unusable, base_url="https://e.com/feed") is None
+    assert describe_feed(relative, base_url=FEED_URL) is not None
+    assert describe_feed(unusable, base_url=FEED_URL) is None
+
+
+def test_describe_counts_and_dates_only_entries_with_a_usable_link() -> None:
+    content = rss(
+        "<title>A</title><link>https://e.com/a</link>"
+        "<pubDate>Thu, 01 Oct 2026 08:00:00 GMT</pubDate>",
+        "<title>B</title><link>mailto:me@e.com</link>"
+        "<pubDate>Fri, 02 Oct 2026 08:00:00 GMT</pubDate>",
+    )
+
+    summary = describe_feed(content, base_url=FEED_URL)
+
+    assert summary == FeedSummary(
+        title="T", entry_count=1, newest=datetime(2026, 10, 1, 8, 0, tzinfo=UTC)
+    )

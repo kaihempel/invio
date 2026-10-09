@@ -11,8 +11,7 @@ seams.
 import asyncio
 import sys
 from collections.abc import AsyncIterator
-from contextlib import AbstractAsyncContextManager, asynccontextmanager
-from datetime import datetime
+from contextlib import asynccontextmanager
 from typing import Annotated
 
 import typer
@@ -60,7 +59,8 @@ def _is_interactive() -> bool:
 
 
 @asynccontextmanager
-async def _open_deps() -> AsyncIterator[tuple[SafeHttpClient, YoutubeSource]]:
+async def _discovery_deps() -> AsyncIterator[tuple[SafeHttpClient, YoutubeSource]]:
+    """The production HTTP client and YouTube adapter, closed on exit; tests replace this."""
     settings = get_settings()
     youtube = YoutubeSource.from_settings(settings)
     try:
@@ -68,11 +68,6 @@ async def _open_deps() -> AsyncIterator[tuple[SafeHttpClient, YoutubeSource]]:
             yield client, youtube
     finally:
         youtube.close()
-
-
-def _discovery_deps() -> AbstractAsyncContextManager[tuple[SafeHttpClient, YoutubeSource]]:
-    """The production HTTP client and YouTube adapter, closed on exit; tests replace this."""
-    return _open_deps()
 
 
 # --- discover --------------------------------------------------------------------------------
@@ -107,14 +102,14 @@ def discover_sources(
         raise typer.BadParameter(str(exc), param_hint="URL") from exc
     if pick is not None and add_to is None:
         raise typer.BadParameter("--pick needs --add-to", param_hint="--pick")
-    service = _load_job(add_to) if add_to is not None else None
+    job = (_load_job(add_to), add_to) if add_to is not None else None
     with mapped_errors(config_exit=2):
         report = asyncio.run(_discover(target))
     _print_report(report)
     if not report.sources:
         raise fail(f"No source found for {_shown(target.url)} (checked: {_CHECKED}).", 1)
-    if service is not None and add_to is not None:
-        _add(service, add_to, report.sources, pick)
+    if job is not None:
+        _add(*job, report.sources, pick)
 
 
 def _load_job(name: str) -> JobService:
@@ -234,11 +229,7 @@ def _summary(found: DiscoveredSource) -> str:
 def _newest(found: DiscoveredSource) -> str:
     if found.entry_count == 0:
         return "no entries"
-    return _date(found.newest) if found.newest is not None else "unknown"
-
-
-def _date(moment: datetime) -> str:
-    return moment.date().isoformat()
+    return found.newest.date().isoformat() if found.newest is not None else "unknown"
 
 
 def _snippet(found: DiscoveredSource) -> str:

@@ -52,6 +52,7 @@ from invio.config.settings import Settings
 from invio.domain import Candidate, url_hash
 from invio.sources.errors import FetchError
 from invio.sources.freshness import age_cutoff, clamp_or_expire
+from invio.sources.text import collapse
 
 __all__ = ["Extractor", "ListingSummary", "YoutubeSource"]
 
@@ -182,9 +183,8 @@ class YoutubeSource:
         network or HTTP-level failure, an unusable result or an unreadable cookies file.
         Raises :class:`RuntimeError` after :meth:`close`.
         """
-        locator = _Locator.from_config(config)
-        url = locator.listing_url()
-        info = await self._extract_info(locator, config.max_items)
+        url = _Locator.from_config(config).listing_url()
+        info = await self._extract_info(url, config.max_items)
         videos = _videos(_entries(info, url))
         now = self._now()
         cutoff = age_cutoff(now, config.max_age_days)
@@ -214,18 +214,16 @@ class YoutubeSource:
         Same extraction, limits and errors as :meth:`fetch`, but only ``_DESCRIBE_ITEMS`` entries
         are listed. Raises :class:`RuntimeError` after :meth:`close`.
         """
-        locator = _Locator.from_config(config)
-        url = locator.listing_url()
-        info = await self._extract_info(locator, _DESCRIBE_ITEMS)
+        url = _Locator.from_config(config).listing_url()
+        info = await self._extract_info(url, _DESCRIBE_ITEMS)
         videos = _videos(_entries(info, url))
         dates = [video.published for video in videos if video.published is not None]
         return ListingSummary(_listing_title(info), len(videos), max(dates, default=None))
 
-    async def _extract_info(self, locator: _Locator, max_items: int) -> object:
-        """Run the extractor for ``locator`` on the worker pool under the hard timeout."""
+    async def _extract_info(self, url: str, max_items: int) -> object:
+        """Run the extractor for the listing ``url`` on the worker pool under the hard timeout."""
         if self._closed:
             raise RuntimeError("YoutubeSource is closed")
-        url = locator.listing_url()
         self._check_cookies(url)
         options = self._options(max_items)
         loop = asyncio.get_running_loop()
@@ -278,7 +276,7 @@ def _listing_title(info: object) -> str | None:
         return None
     for key in ("title", "channel", "uploader"):
         value = info.get(key)
-        if isinstance(value, str) and (text := " ".join(value.split())):
+        if isinstance(value, str) and (text := collapse(value)):
             return text
     return None
 

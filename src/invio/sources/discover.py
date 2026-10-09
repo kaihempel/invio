@@ -14,11 +14,12 @@ failure as a :class:`Rejection`.
 """
 
 import asyncio
+import logging
 import re
 from dataclasses import dataclass
 from datetime import datetime
 from enum import IntEnum
-from typing import Final, Literal
+from typing import Final, Literal, cast
 from urllib.parse import SplitResult, urlsplit
 
 from pydantic import ValidationError
@@ -35,6 +36,7 @@ from invio.config.job import (
 )
 from invio.sources.errors import FetchError
 from invio.sources.http import FetchResult, SafeHttpClient
+from invio.sources.identity import source_identity
 from invio.sources.rss import describe_feed
 from invio.sources.sitemap import describe_sitemap
 from invio.sources.text import collapse, parse_html
@@ -62,6 +64,8 @@ __all__ = [
     "is_comment_feed",
     "parse_target",
 ]
+
+_log = logging.getLogger("invio.sources.discover")
 
 MAX_ANNOUNCED_FEEDS: Final = 20
 MAX_YOUTUBE_LINKS: Final = 20
@@ -240,6 +244,7 @@ class _Discovery:
         self._client = client
         self._youtube = youtube  # validates YouTube findings
         self._skipped: list[str] = []
+        self._seen: set[tuple[str, str]] = set()  # keys of the start page and kept findings
 
     async def run(self) -> DiscoveryReport:
         direct = _youtube_finding(self._target.url, FindingOrigin.DIRECT, 0)
@@ -247,14 +252,16 @@ class _Discovery:
             return self._report(await self._validate_all([direct]), None)
         page = await self._read_start_page()
         base = self._target.rebased(page.final_url) if page.final_url else self._target
-        findings = self._announced(page)
-        findings += self._probes(base)
-        findings += await self._robots(base)
-        findings += self._linked(page)
-        fetched = {("feed_or_sitemap", canonical_url(self._target.url))}
-        if page.final_url is not None:
-            fetched.add(("feed_or_sitemap", canonical_url(page.final_url)))
-        outcomes = await self._validate_all(_unique(findings, fetched))
+        for fetched in (self._target.url, page.final_url):
+            if fetched is not None:
+                self._seen.add(("feed_or_sitemap", canonical_url(fetched)))
+        # In rank order, so the first (best-ranked) of duplicate findings stays.
+        findings = self._take(self._announced(page), MAX_ANNOUNCED_FEEDS, "announced feeds")
+        findings += self._take(self._probes(base))
+        robots = await self._robots(base)
+        findings += self._take(robots, MAX_ROBOTS_SITEMAPS, "robots.txt sitemaps")
+        findings += self._take(self._linked(page), MAX_YOUTUBE_LINKS, "YouTube links")
+        outcomes = await self._validate_all(findings)
         return self._report(outcomes, page, direct=page.direct)
 
     async def _validate_all(self, findings: list[_Finding]) -> list[DiscoveredSource | Rejection]:
@@ -301,20 +308,20 @@ class _Discovery:
         if page.tree is None or page.final_url is None:
             return []
         base = html_base_url(page.tree, page.final_url)
-        found: dict[str, _Finding] = {}
+        found: list[_Finding] = []
         for node in page.tree.css("link[href]"):
             attributes = node.attributes
             if "alternate" not in (attributes.get("rel") or "").lower().split():
                 continue
             kind = (attributes.get("type") or "").partition(";")[0].strip().lower()
             url = http_url_or_none(attributes.get("href") or "", base)
-            if kind not in _FEED_LINK_TYPES or url is None or url in found:
+            if kind not in _FEED_LINK_TYPES or url is None:
                 continue
             title = collapse(attributes.get("title") or "") or None
-            found[url] = _Finding(
-                "feed_or_sitemap", url, FindingOrigin.ANNOUNCED, len(found), title
+            found.append(
+                _Finding("feed_or_sitemap", url, FindingOrigin.ANNOUNCED, len(found), title)
             )
-        return self._capped(list(found.values()), MAX_ANNOUNCED_FEEDS, "announced feeds")
+        return found
 
     @staticmethod
     def _probes(base: DiscoveryTarget) -> list[_Finding]:
@@ -329,59 +336,67 @@ class _Discovery:
     async def _robots(self, base: DiscoveryTarget) -> list[_Finding]:
         """The sitemaps robots.txt announces, in file order."""
         announced = await self._client.robots_sitemaps(base.root)
-        urls = dict.fromkeys(u for raw in announced if (u := http_url_or_none(raw, base.root)))
-        findings = [
+        urls = (url for raw in announced if (url := http_url_or_none(raw, base.root)))
+        return [
             _Finding("feed_or_sitemap", url, FindingOrigin.ROBOTS, position)
             for position, url in enumerate(urls)
         ]
-        return self._capped(findings, MAX_ROBOTS_SITEMAPS, "robots.txt sitemaps")
 
     def _linked(self, page: _StartPage) -> list[_Finding]:
         """YouTube channels and playlists the page links to (``a`` and ``link`` elements)."""
         if page.tree is None or page.final_url is None:
             return []
         base = html_base_url(page.tree, page.final_url)
-        found: dict[tuple[str, str], _Finding] = {}
+        found: list[_Finding] = []
         for node in page.tree.css("a[href], link[href]"):
             url = http_url_or_none(node.attributes.get("href") or "", base)
             finding = _youtube_finding(url, FindingOrigin.LINKED, len(found)) if url else None
             if finding is not None:
-                found.setdefault(_key(finding), finding)
-        return self._capped(list(found.values()), MAX_YOUTUBE_LINKS, "YouTube links")
+                found.append(finding)
+        return found
 
-    def _capped(self, findings: list[_Finding], limit: int, what: str) -> list[_Finding]:
-        if len(findings) > limit:
-            self._skipped.append(f"{len(findings) - limit} more {what} (limit {limit})")
-        return findings[:limit]
+    def _take(
+        self, findings: list[_Finding], limit: int | None = None, what: str = ""
+    ) -> list[_Finding]:
+        """The findings not seen before, at most ``limit``; the rest is reported as skipped.
+
+        Duplicates are dropped before the limit applies, so they never use up a place.
+        """
+        fresh: dict[tuple[str, str], _Finding] = {}
+        for finding in findings:
+            key = _key(finding)
+            if key not in self._seen:
+                fresh.setdefault(key, finding)
+        kept = list(fresh.items())
+        if limit is not None and len(kept) > limit:
+            self._skipped.append(f"{len(kept) - limit} more {what} (limit {limit})")
+            kept = kept[:limit]
+        self._seen.update(key for key, _ in kept)
+        return [finding for _, finding in kept]
 
     # --- validation ----------------------------------------------------------------------------
 
     async def _validate(self, finding: _Finding) -> DiscoveredSource | Rejection:
-        if finding.kind != "feed_or_sitemap":
-            return await self._validate_youtube(finding)
+        """Fetch and classify ``finding``; any failure rejects this finding only."""
         try:
-            result = await self._get(finding.locator)
+            if finding.kind != "feed_or_sitemap":
+                return await self._validate_youtube(finding)
+            return await self._validate_location(finding)
         except FetchError as error:
-            return _rejection(finding.locator, error)
-        try:
-            found = await self._classify(
-                result, finding.origin, finding.position, finding.hint_title
-            )
-        except Exception:  # a hostile body must not end the run (e.g. RecursionError)
-            return Rejection(_shown(finding.locator), _UNREADABLE)
+            return Rejection(_shown_locator(finding), str(error.reason), error.status)
+        except Exception as exc:  # e.g. a hostile body (RecursionError) or a closed adapter
+            _log.warning("source.discover_failed", extra={"error": type(exc).__name__})
+            return Rejection(_shown_locator(finding), _UNREADABLE)
+
+    async def _validate_location(self, finding: _Finding) -> DiscoveredSource | Rejection:
+        result = await self._get(finding.locator)
+        found = await self._classify(result, finding.origin, finding.position, finding.hint_title)
         return found if found is not None else Rejection(_shown(finding.locator), _NOT_A_SOURCE)
 
     async def _validate_youtube(self, finding: _Finding) -> DiscoveredSource | Rejection:
-        """Ask the YouTube adapter for the listing; an unreadable or empty one is not offered."""
-        source: YoutubeChannelSource | YoutubePlaylistSource
-        if finding.kind == "youtube_channel":
-            source = YoutubeChannelSource(type="youtube_channel", channel_id=finding.locator)
-        else:
-            source = YoutubePlaylistSource(type="youtube_playlist", playlist_id=finding.locator)
-        try:
-            summary = await self._youtube.describe(source)
-        except FetchError as error:
-            return Rejection(finding.locator, str(error.reason), error.status)
+        """Ask the YouTube adapter for the listing; an empty one is not offered."""
+        source = _youtube_source(finding)
+        summary = await self._youtube.describe(source)
         if summary.entry_count == 0:
             return Rejection(finding.locator, "empty_listing")
         return DiscoveredSource(
@@ -397,9 +412,8 @@ class _Discovery:
         )
 
     async def _get(self, url: str) -> FetchResult:
-        result = await self._client.get(url, conditional=False)
-        assert isinstance(result, FetchResult)  # an unconditional fetch is never "not modified"
-        return result
+        # An unconditional fetch is never "not modified".
+        return cast(FetchResult, await self._client.get(url, conditional=False))
 
     async def _classify(
         self,
@@ -477,6 +491,12 @@ def _youtube_finding(url: str, origin: FindingOrigin, position: int) -> _Finding
         return None
 
 
+def _youtube_source(finding: _Finding) -> YoutubeChannelSource | YoutubePlaylistSource:
+    if finding.kind == "youtube_channel":
+        return YoutubeChannelSource(type="youtube_channel", channel_id=finding.locator)
+    return YoutubePlaylistSource(type="youtube_playlist", playlist_id=finding.locator)
+
+
 def _youtube_url(finding: _Finding) -> str:
     """A canonical address for a YouTube finding (identity for merging, not fetched)."""
     if finding.kind == "youtube_playlist":
@@ -487,32 +507,18 @@ def _youtube_url(finding: _Finding) -> str:
 
 
 def _key(finding: _Finding) -> tuple[str, str]:
-    """What makes two findings the same: canonical URL, or the type and id of a YouTube source."""
+    """What makes two findings the same: canonical URL, or the identity of a YouTube source."""
     if finding.kind == "feed_or_sitemap":
         return finding.kind, canonical_url(finding.locator)
-    return finding.kind, finding.locator.lower() if finding.locator.startswith(
-        "@"
-    ) else finding.locator
-
-
-def _unique(findings: list[_Finding], fetched: set[tuple[str, str]]) -> list[_Finding]:
-    """Drop findings that are already known; the first (lowest rank) one stays."""
-    seen = set(fetched)
-    kept: list[_Finding] = []
-    for finding in sorted(findings, key=lambda f: (f.origin, f.position)):
-        key = _key(finding)
-        if key not in seen:
-            seen.add(key)
-            kept.append(finding)
-    return kept
+    return source_identity(_youtube_source(finding))
 
 
 def _merge(found: list[DiscoveredSource]) -> list[DiscoveredSource]:
-    """Keep the best-ranked of the sources with the same type and final URL; comments last."""
+    """Keep the best-ranked of the sources with the same identity; comments last."""
     seen: set[tuple[str, str]] = set()
     kept: list[DiscoveredSource] = []
     for item in sorted(found, key=lambda f: (f.origin, f.position)):
-        key = (item.source.type, canonical_url(item.final_url))
+        key = source_identity(item.source)
         if key not in seen:
             seen.add(key)
             kept.append(item)
@@ -522,6 +528,11 @@ def _merge(found: list[DiscoveredSource]) -> list[DiscoveredSource]:
 def _shown(url: str) -> str:
     """``url`` as it may be shown: no credentials, no query string."""
     return without_query(redact_url(url))
+
+
+def _shown_locator(finding: _Finding) -> str:
+    """A URL as it may be shown; a YouTube locator (an id or handle) as it is."""
+    return _shown(finding.locator) if finding.kind == "feed_or_sitemap" else finding.locator
 
 
 def _rejection(url: str, error: FetchError) -> Rejection:

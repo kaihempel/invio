@@ -162,7 +162,7 @@ def test_create_race_integrity_error(
     job_service: JobService, job_data: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     job_service.create("ai-news", job_data)
-    monkeypatch.setattr(JobRepository, "get_by_name", lambda self, name: None)
+    monkeypatch.setattr(JobRepository, "get_by_name", lambda self, name, **_: None)
     with pytest.raises(JobExistsError) as info:
         job_service.create("ai-news", job_data)
     assert info.value.name == "ai-news"
@@ -698,7 +698,7 @@ def test_create_race_leaves_existing_job_unchanged(
     fake_clock.advance(timedelta(days=1))
     other = {**job_data, "schedule": {**job_data["schedule"], "time": "01:00"}}
     with monkeypatch.context() as m:
-        m.setattr(JobRepository, "get_by_name", lambda self, name: None)
+        m.setattr(JobRepository, "get_by_name", lambda self, name, **_: None)
         with pytest.raises(JobExistsError) as info:
             job_service.create("ai-news", other)
     # FR-020: the storage error is only the chained cause, never the raised type.

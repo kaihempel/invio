@@ -436,6 +436,21 @@ def test_cli_add_to_interactive_select_picks_one(add_cli: AddCli) -> None:
 
 
 @db
+def test_cli_add_to_interactive_asks_even_for_a_single_candidate(add_cli: AddCli) -> None:
+    one_feed(add_cli.site)
+    before = add_cli.service.stored_config(JOB)
+    prompter = add_cli.answers("Cancel")
+
+    result = add_cli.invoke(["--add-to", JOB])
+
+    assert result.exit_code == 0, result.output
+    assert f"Nothing added to job '{JOB}'." in result.stdout
+    [choices] = prompter.choices.values()
+    assert choices == [f"[1] rss {FEED_A}", "Cancel"]
+    assert add_cli.service.stored_config(JOB) == before
+
+
+@db
 def test_cli_add_to_interactive_cancel_changes_nothing(add_cli: AddCli) -> None:
     two_feeds(add_cli.site)
     before = add_cli.service.stored_config(JOB)

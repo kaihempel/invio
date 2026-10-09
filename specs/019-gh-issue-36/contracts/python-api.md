@@ -39,7 +39,7 @@ class FeedSummary:
     entry_count: int
     newest: datetime | None
 
-def describe_feed(content: bytes, *, base_url: str | None = None) -> FeedSummary | None: ...
+def describe_feed(content: bytes, *, base_url: str) -> FeedSummary | None: ...
     # None unless feedparser recognises a feed version and a broken parse still has an entry
     # whose link resolves against base_url (same rule as RssFeedSource.fetch); an empty
     # well-formed feed is a FeedSummary(…, 0, None).
@@ -99,7 +99,8 @@ class SourceExistsError(Exception):
 
 class JobService:
     def append_source(self, name: str, source: SourceConfig) -> JobRecord: ...
-        # One unit of work. Raises JobNotFoundError, StoredJobConfigError, SourceExistsError,
+        # One unit of work; the job row is locked (SELECT … FOR UPDATE) for the read-modify-write.
+        # Raises JobNotFoundError, StoredJobConfigError, SourceExistsError,
         # JobConfigError (config invalid after appending; nothing written).
 ```
 

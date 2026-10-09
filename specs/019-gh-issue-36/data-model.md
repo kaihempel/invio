@@ -51,7 +51,7 @@ A validated finding; what the operator sees and may add.
 |---|---|---|
 | `source` | `SourceConfig` (`RssSource \| SitemapSource \| YoutubeChannelSource \| YoutubePlaylistSource`) | built with required fields only; always passes the job model |
 | `title` | `str \| None` | feed title, YouTube listing title; `None` for sitemaps |
-| `entry_count` | `int` | feed entries, sitemap URLs/child sitemaps, videos seen (YouTube: up to 5) |
+| `entry_count` | `int` | feed entries with a usable link, sitemap URLs/child sitemaps, videos seen (YouTube: up to 5) |
 | `newest` | `datetime \| None` | aware UTC; `None` → printed "unknown" (or "no entries" when `entry_count == 0`) |
 | `sitemap_index` | `bool` | `True` for a `sitemapindex` |
 | `is_comment_feed` | `bool` | rule in research R8; only for `rss` |

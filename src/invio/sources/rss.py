@@ -103,33 +103,25 @@ class RssFeedSource:
         return kept
 
 
-def describe_feed(content: bytes, *, base_url: str | None = None) -> FeedSummary | None:
+def describe_feed(content: bytes, *, base_url: str) -> FeedSummary | None:
     """Summarise ``content`` if it is a feed, else ``None``.
 
     The same rule as :meth:`RssFeedSource.fetch`: feedparser must recognise a feed format, and
-    a parse error is tolerated only while at least one entry survived. A well-formed feed
-    without entries is a feed (``entry_count`` 0, no newest date). The newest date is the
-    latest ``published`` (else ``updated``) of the entries. Pass the feed's ``base_url`` (its
-    final URL) so that "usable" means an entry link that resolves to an http(s) URL, as in
-    ``fetch``; without it any non-blank link counts.
+    a parse error is tolerated only while at least one usable entry survived. Like ``fetch``,
+    only entries whose link resolves against ``base_url`` (the feed's final URL) to an http(s)
+    URL count. A well-formed feed without such entries is a feed (``entry_count`` 0, no newest
+    date). The newest date is the latest ``published`` (else ``updated``) of those entries.
     """
     feed = _parse(content)
-    linked = any(_has_link(entry, base_url) for entry in feed.entries)
-    if not _is_usable(feed, has_entries=linked):
+    linked = [entry for entry in feed.entries if _entry_url(entry, base_url=base_url)]
+    if not _is_usable(feed, has_entries=bool(linked)):
         return None
-    dates = [date for entry in feed.entries if (date := _entry_date(entry)) is not None]
+    dates = [date for entry in linked if (date := _entry_date(entry)) is not None]
     return FeedSummary(
         title=feed.title or None,
-        entry_count=len(feed.entries),
+        entry_count=len(linked),
         newest=max(dates, default=None),
     )
-
-
-def _has_link(entry: Mapping[str, Any], base_url: str | None) -> bool:
-    if base_url is not None:
-        return _entry_url(entry, base_url=base_url) is not None
-    link = entry.get("link")
-    return isinstance(link, str) and bool(link.strip())
 
 
 def _is_usable(feed: _ParsedFeed, *, has_entries: bool) -> bool:

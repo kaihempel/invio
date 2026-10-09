@@ -23,11 +23,8 @@ from invio.config.job import (
     JobConfigError,
     ScheduleConfig,
     SourceConfig,
-    YoutubeChannelSource,
     dump_yaml,
     load_yaml,
-    parse_youtube_channel,
-    parse_youtube_playlist,
     validate_job,
     write_yaml,
 )
@@ -38,7 +35,7 @@ from invio.db.session import checked_session_factory, session_scope
 from invio.db.types import utcnow
 from invio.domain import RunStatus
 from invio.scheduling.next_run import compute_next_run
-from invio.sources.urls import canonical_url
+from invio.sources.identity import source_identity
 
 __all__ = [
     "MAX_NAME_LENGTH",
@@ -178,18 +175,8 @@ def _record(job: Job, config: JobConfig | None = None) -> JobRecord:
     )
 
 
-def _source_identity(source: SourceConfig) -> tuple[str, str]:
-    """``(type, locator)`` by which two sources of a job count as the same source."""
-    if isinstance(source, YoutubeChannelSource):
-        kind, token = parse_youtube_channel(source.channel_id)
-        return source.type, f"{kind}:{token.lower() if kind == 'handle' else token}"
-    if source.type == "youtube_playlist":
-        return source.type, parse_youtube_playlist(source.playlist_id)
-    return source.type, canonical_url(str(source.url))
-
-
-def _require(repo: JobRepository, name: str) -> Job:
-    job = repo.get_by_name(name)
+def _require(repo: JobRepository, name: str, *, for_update: bool = False) -> Job:
+    job = repo.get_by_name(name, for_update=for_update)
     if job is None:
         raise JobNotFoundError(name)
     return job
@@ -334,15 +321,17 @@ class JobService:
     def append_source(self, name: str, source: SourceConfig) -> JobRecord:
         """Append ``source`` to the job's sources and save the re-validated job.
 
+        The job row is locked for the read-modify-write (``SELECT … FOR UPDATE`` where the
+        database supports it), so a concurrent change cannot be lost.
         Raises ``JobNotFoundError``, ``StoredJobConfigError`` (the stored job is invalid),
         ``SourceExistsError`` (same type and locator already present) or ``JobConfigError``
         (the result is invalid); nothing is written in any of these cases.
         """
         with session_scope(self._session_factory) as session:
-            job = _require(JobRepository(session), name)
+            job = _require(JobRepository(session), name, for_update=True)
             current = _record(job).config
-            identity = _source_identity(source)
-            if any(_source_identity(existing) == identity for existing in current.sources):
+            identity = source_identity(source)
+            if any(source_identity(existing) == identity for existing in current.sources):
                 raise SourceExistsError(name, source.type)
             data = current.model_dump(mode="json")
             data["sources"] = [
