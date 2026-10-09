@@ -417,7 +417,8 @@ Record repositories for runs, items, digests, notifications and LLM usage live i
 | `export NAME [-o PATH]` | Write the YAML to stdout or atomically to a file |
 | `import FILE [--name NAME] [--replace]` | Store a job file under `--name` or the file stem |
 
-The wizard asks for schedule, recipients, sources, keywords, description, LLM and limits, rejects
+The wizard asks for schedule, recipients, sources, keywords, description, summary language
+(`Summary language (ISO 639-1 code)`, default `en`), LLM and limits, rejects
 invalid answers inline and shows the YAML before saving. Source URLs are checked for reachability
 (and, for RSS, for a feed document); a failed check is only a warning you can override. A model
 that is not registered for the chosen provider is accepted after a warning: runs fail until
@@ -430,6 +431,60 @@ Exit codes: `0` success (including a no-op enable/disable and an unchanged edit)
 already exists, invalid name, aborted, declined preview or delete, aborted edit; `2` invalid job
 file or stored config, missing or unusable setting (database URL, model registry), or an
 interactive command without a terminal.
+
+### Drafting a search: `invio job suggest`
+
+```bash
+invio job suggest TOPIC [--language CODE] [--provider NAME] [--model ID] [--yaml]
+```
+
+Asks a capable model to draft the `search:` part of a job for `TOPIC` (1-500 characters):
+`keywords.any` with synonyms and English and German variants, `keywords.all`, concrete
+`keywords.exclude` entries for typical noise, a `semantic_description` with a "Relevant:" and a
+"Not relevant:" part, and a hint where to find sources. The answer is validated against the job's
+own search model (one repair attempt, then an error), duplicates are dropped and an exclusion that
+is also an include keyword is removed with a warning.
+
+| Option | Default |
+|---|---|
+| `--language CODE` | `en`: ISO 639-1 code of the description language (stored lower-case) |
+| `--provider NAME` | the first registered provider (alphabetical) that has an API key and registered models |
+| `--model ID` | the provider's most expensive registered model (input + output price; ties: lowest id). With `--model` alone, the provider is the one the registry lists it under |
+| `--yaml` | off: print the YAML once and ask nothing |
+
+With a terminal the command shows a preview and asks `What next?`: **Create job** (starts the
+`job create` wizard with keywords, description, language, provider and smart model prefilled and
+shows the sources hint at the sources step; the job is saved only after the wizard's `Save this
+job?`), **Refine** (a remark; the model gets the topic, the current suggestion including your edits
+and the remark; a failed call keeps the previous suggestion), **Edit a field** (one keyword list or
+the description, prefilled with the current value; clearing a keyword list empties it), **Print
+YAML** or **Discard**. With `--yaml`, or without a terminal, one model call is made and this block
+is printed to stdout (the sources hint is a comment, so it can be pasted into a job file):
+
+```yaml
+# Suggested sources: trade portals, industry associations
+search:
+  keywords:
+    any:
+    - Wärmepumpe
+    - heat pump
+    all: []
+    exclude:
+    - Stellenangebot
+  semantic_description: |-
+    Relevant: ...
+    Not relevant: ...
+```
+
+Nothing is stored and nothing is written to the database unless you create a job. Calls are logged like
+all LLM calls (`llm.call` on stderr); a final stderr line sums the session:
+`suggestions used N requests, X in / Y out tokens, ~$Z`. The topic and your remarks are treated as
+data, never as instructions.
+
+Exit codes: `0` YAML printed, job created or discarded; `1` the model call failed (provider error,
+or an invalid answer after the repair), aborted (`aborted; nothing saved`) or the wizard's save
+declined (`job not created`); `2` empty or over-long topic, unknown language, unknown provider,
+missing API key, unregistered model or provider without models, unreadable model registry.
 
 ### Finding sources: `invio source discover`
 

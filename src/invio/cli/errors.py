@@ -8,18 +8,26 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from invio.config.job import JobConfigError
 from invio.config.settings import MissingSettingError
-from invio.llm.base import ModelRegistryError
+from invio.llm.base import LLMError, ModelRegistryError
 from invio.notify import DatabaseConfigError
 from invio.services.jobs import JobNotFoundError
 from invio.services.runs import RunNotFoundError
+from invio.services.suggest import ModelChoice
+from invio.textsafe import strip_control
 
-__all__ = ["fail", "mapped_errors"]
+__all__ = ["fail", "format_llm_error", "mapped_errors"]
 
 
 def fail(message: str, code: int) -> typer.Exit:
     """Print ``message`` to stderr and return the ``Exit`` to raise (``raise fail(...)``)."""
     typer.echo(message, err=True)
     return typer.Exit(code=code)
+
+
+def format_llm_error(exc: LLMError, choice: ModelChoice) -> str:
+    """Return ``Error: <provider>/<model>: <ErrorClass>: <message>`` (message made printable)."""
+    message = strip_control(str(exc))
+    return f"Error: {choice.provider_name}/{choice.model}: {type(exc).__name__}: {message}"
 
 
 @contextlib.contextmanager

@@ -277,6 +277,7 @@ class _InterruptAt(FakePrompter):
         w.Q_FEED_URL,
         w.Q_KW_ALL,
         w.Q_DESC,
+        w.Q_LANGUAGE,
         w.Q_SMART,
         w.Q_KEEP_LIMITS,
         w.Q_SAVE,

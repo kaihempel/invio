@@ -4,9 +4,11 @@ A leaf module: it imports nothing from ``invio``.
 """
 
 import re
+from collections.abc import Iterable
+from functools import lru_cache
 from typing import Final
 
-__all__ = ["strip_control"]
+__all__ = ["neutralise_tags", "strip_control"]
 
 # An ANSI escape sequence, removed whole so no stray "[31m" is left behind: CSI, and the string
 # sequences OSC, DCS, SOS, PM and APC up to their terminator (BEL or ST). An unterminated string
@@ -42,3 +44,26 @@ def strip_control(text: str, *, limit: int | None = None, multiline: bool = Fals
     cleaned = _CONTROL.sub(" ", text)
     cleaned = " ".join(cleaned.split())
     return cleaned if limit is None else cleaned[:limit]
+
+
+_OPEN: Final = chr(0x2039)  # single left angle quote, replaces "<" in neutralised tags
+_CLOSE: Final = chr(0x203A)  # single right angle quote, replaces ">" in neutralised tags
+
+
+@lru_cache(maxsize=32)
+def _tag_pattern(tags: tuple[str, ...]) -> re.Pattern[str]:
+    # Any opening or closing tag, also with attributes, spaces around the slash or trailing text,
+    # and also unterminated (no ">"), which a template's own tag would complete. Each whitespace
+    # run has its own anchor ("<" or "/"): two adjacent runs would backtrack quadratically.
+    names = "|".join(re.escape(tag) for tag in tags)
+    return re.compile(rf"<\s*(?:/\s*)?(?:{names})\b[^<>]*>?", re.IGNORECASE)
+
+
+def neutralise_tags(text: str, tags: Iterable[str]) -> str:
+    """Swap the angle brackets of the delimiter ``tags`` for single angle quotes (U+2039, U+203A).
+
+    The text stays readable, but it can no longer open or close one of the tags. Other tags are
+    left alone. Length-preserving and idempotent.
+    """
+    pattern = _tag_pattern(tuple(tags))
+    return pattern.sub(lambda m: m[0].replace("<", _OPEN).replace(">", _CLOSE), text)

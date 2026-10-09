@@ -22,22 +22,37 @@ from invio.services.jobs import JobService
 from tests.conftest import FakeClock
 
 
+class _Clear:
+    """Type of the :data:`CLEAR` sentinel."""
+
+    def __repr__(self) -> str:
+        return "CLEAR"
+
+
+CLEAR = _Clear()
+"""An answer to ``text`` / ``autocomplete`` that returns ``""`` even if there is a default.
+
+Simulates an operator who deletes the prefilled text (``""`` itself means "keep the default").
+"""
+
+
 class FakePrompter:
     """Scripted :class:`~invio.cli.prompts.Prompter`.
 
-    An empty string answers with the default (the validator still runs on it). Select and
-    autocomplete answers must be one of the choices. Running out of answers raises
-    ``WizardAborted`` (simulates Ctrl+C).
+    An empty string answers with the default (the validator still runs on it); :data:`CLEAR`
+    answers with ``""`` instead. Select and autocomplete answers must be one of the choices.
+    Running out of answers raises ``WizardAborted`` (simulates Ctrl+C).
     """
 
-    def __init__(self, answers: Iterable[str | bool]) -> None:
+    def __init__(self, answers: Iterable[str | bool | _Clear]) -> None:
         self._answers = iter(answers)
         self.asked: list[str] = []
         self.errors: list[tuple[str, str]] = []
         self.choices: dict[str, list[str]] = {}
         self.defaults: dict[str, object] = {}
+        self.multiline: dict[str, bool] = {}
 
-    def _next(self) -> str | bool:
+    def _next(self) -> str | bool | _Clear:
         try:
             return next(self._answers)
         except StopIteration:
@@ -47,8 +62,11 @@ class FakePrompter:
         self.asked.append(message)
         while True:
             answer = self._next()
-            assert isinstance(answer, str), f"{message!r}: expected str, got {answer!r}"
-            value = default if answer == "" else answer
+            if isinstance(answer, _Clear):
+                value = ""
+            else:
+                assert isinstance(answer, str), f"{message!r}: expected str, got {answer!r}"
+                value = default if answer == "" else answer
             result = True if validate is None else validate(value)
             if result is True:
                 return value
@@ -63,6 +81,7 @@ class FakePrompter:
         multiline: bool = False,
     ) -> str:
         self.defaults[message] = default
+        self.multiline[message] = multiline
         return self._ask(message, default, validate)
 
     def select(self, message: str, choices: Sequence[str], *, default: str | None = None) -> str:

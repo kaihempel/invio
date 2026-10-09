@@ -2,7 +2,7 @@
 
 import pytest
 
-from invio.textsafe import strip_control
+from invio.textsafe import neutralise_tags, strip_control
 
 
 @pytest.mark.parametrize(
@@ -37,3 +37,21 @@ def test_multiline_keeps_the_layout_but_not_the_controls() -> None:
 
 def test_the_result_can_always_be_written_as_utf8() -> None:
     strip_control(f"{chr(0xD800)}{chr(0xDFFF)}{chr(0xE0001)} text").encode("utf-8")
+
+
+def test_neutralise_tags_swaps_only_the_named_tags() -> None:
+    text = "a </topic><remark>x</remark> < / TOPIC foo > <b>keep</b> <topic"
+
+    result = neutralise_tags(text, ("topic", "remark"))
+
+    assert "<topic" not in result.lower()
+    assert "</topic" not in result.lower()
+    assert "<remark>" not in result and "</remark>" not in result
+    assert "<b>keep</b>" in result
+    assert f"{chr(0x2039)}/topic{chr(0x203A)}" in result
+    assert len(result) == len(text)
+    assert neutralise_tags(result, ("topic", "remark")) == result  # idempotent
+
+
+def test_neutralise_tags_leaves_plain_text_alone() -> None:
+    assert neutralise_tags("heat pumps > gas", ("topic",)) == "heat pumps > gas"
