@@ -557,6 +557,46 @@ quota raises `LLMQuotaError` without retrying. Only the Gemini Developer API is 
 key as the `x-goog-api-key` header: `GOOGLE_API_KEY`, `GEMINI_API_KEY`, `GOOGLE_GEMINI_BASE_URL`
 and `GOOGLE_GENAI_USE_VERTEXAI` are ignored.
 
+### Ollama
+
+Local models run cost-free through an [Ollama](https://ollama.com) server: name
+`provider: ollama` in a job's `llm` section. No API key is needed; the server URL is
+`INVIO_OLLAMA_BASE_URL` (default `http://localhost:11434`, see `.env.example`). The example
+models in `src/invio/llm/models.d/ollama.yaml` are `llama3.2:3b` (`fast`) and `qwen2.5:14b`
+(`smart`); any other pulled model can be added there. All prices are 0, so the cost of every
+call is 0. The provider calls the native `POST /api/chat` endpoint (`stream: false`, the
+`temperature` and `max_tokens` as `num_predict` options) with plain `httpx2`. Structured requests
+send the JSON schema as `format`; a server that rejects a schema there (HTTP 400 naming
+`format`, older Ollama versions) gets the same request in JSON mode (`format: "json"`), and the
+model is remembered so later calls go straight to JSON mode. The answer is validated and
+repaired once as usual. An answer cut off at `max_tokens` or the context limit
+(`done_reason: "length"`) raises `LLMUnavailableError`.
+
+The connect timeout is 5 s: an unreachable server (connection refused, connect timeout, unknown
+host) raises `LLMUnavailableError` at once, without retrying, naming `INVIO_OLLAMA_BASE_URL`.
+A model that is not pulled gives a 404, raised as `LLMInvalidRequestError` with Ollama's message;
+a 404 without that message (a wrong URL or proxy path) names `INVIO_OLLAMA_BASE_URL` instead.
+Other connection failures, 429 and 5xx are retried like for the other providers. Ollama's own
+context length (`OLLAMA_CONTEXT_LENGTH` on the server, 4096 tokens by default) caps what a
+request may use; Ollama truncates longer prompts silently, so raise it on the server for long
+articles.
+
+Manual test against a local Ollama:
+
+```
+ollama serve                              # or the desktop app; listens on localhost:11434
+ollama pull llama3.2:3b                   # and qwen2.5:14b for the smart role
+export INVIO_OLLAMA_BASE_URL=http://localhost:11434   # only if not the default
+uv run invio llm test ollama              # ok provider=ollama model=llama3.2:3b ...
+uv run invio llm test ollama --model qwen2.5:14b
+uv run pytest -m live tests/test_llm_ollama_live.py   # plain and structured call
+```
+
+The live tests use the fast registry model (override with `INVIO_OLLAMA_LIVE_MODEL`) and are
+skipped when no server answers at `INVIO_OLLAMA_BASE_URL`. Stopping the server and running
+`invio llm test ollama` again shows the quick failure (`Error: LLMUnavailableError: Ollama server
+unreachable ...`, exit 1).
+
 ### Common provider notes
 
 The HTTP client is created per event loop. Call `await provider.aclose()` before the loop ends
@@ -569,6 +609,7 @@ invio llm test mistral [--model MODEL]
 invio llm test openai [--model MODEL]
 invio llm test anthropic [--model MODEL]
 invio llm test google [--model MODEL]
+invio llm test ollama [--model MODEL]
 ```
 
 It prints `ok provider=... model=... input_tokens=... output_tokens=... duration_ms=...` and
@@ -578,7 +619,8 @@ model is the provider's cheapest registered one.
 
 The test suite never touches the network. Optional live tests (plain and structured call)
 use the real API of each provider whose key is set (`INVIO_MISTRAL_API_KEY`,
-`INVIO_OPENAI_API_KEY`, `INVIO_ANTHROPIC_API_KEY`, `INVIO_GOOGLE_API_KEY`): `uv run pytest -m live`. Without a `-m`
+`INVIO_OPENAI_API_KEY`, `INVIO_ANTHROPIC_API_KEY`, `INVIO_GOOGLE_API_KEY`) and a local Ollama
+server if one answers (see Ollama above): `uv run pytest -m live`. Without a `-m`
 expression that names `live`, they are skipped. Every provider must pass the shared contract suite
 `tests/test_llm_provider_contract.py`; a new provider adds one harness there.
 
@@ -604,7 +646,7 @@ records requests (replies, `FakeDelay`, or `LLMError` instances).
 
 To add a provider, create one module `src/invio/llm/<name>.py` whose class is decorated with
 `@register_provider("<name>")` and has a `from_settings(settings)` classmethod (use
-`require_api_key` and `settings.llm_timeout_seconds`; wrap each request in `with_timeout` and
+`require_api_key` for a hosted API and `settings.llm_timeout_seconds`; wrap each request in `with_timeout` and
 use `structured_with_repair`), plus one `models.d/<name>.yaml` file. Modules are discovered
 automatically; no shared file changes. A provider beyond the five in the job schema also needs
 the `LLMProvider` enum in `invio.config.job` extended.

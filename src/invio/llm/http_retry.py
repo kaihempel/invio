@@ -152,16 +152,19 @@ def classify_transport(
     model: str,
     unsendable: tuple[type[BaseException], ...],
     bad_response: tuple[type[BaseException], ...],
+    unsendable_hint: str = "",
 ) -> Failure:
     """Classify a connection-level failure by the transport exception that caused it.
 
     ``unsendable`` failures happened before anything was sent and ``bad_response`` ones mean the
     server answered with something the client cannot use: retrying helps neither. Every other
-    cause is a retryable connection failure.
+    cause is a retryable connection failure. ``unsendable_hint`` (e.g. which setting to check) is
+    appended to the message of an unsendable request.
     """
     name = type(cause).__name__
     if isinstance(cause, unsendable):
-        message = describe(f"{label} request could not be sent ({name})", model, None)
+        hint = f"; {unsendable_hint}" if unsendable_hint else ""
+        message = describe(f"{label} request could not be sent ({name}){hint}", model, None)
         error = LLMUnavailableError(message, provider=provider, model=model)
         return Failure("unsendable", False, error)
     if isinstance(cause, bad_response):
@@ -181,17 +184,20 @@ def classify_status(
     headers: Mapping[str, str],
     now: Callable[[], datetime],
     wait_hint: float | None = None,
+    auth_summary: str | None = None,
 ) -> Failure:
     """Classify an HTTP error status the same way for every provider.
 
-    401/403 are authentication failures naming ``env_var``; 429 is a retryable rate limit that
+    401/403 are authentication failures naming ``env_var`` (``auth_summary`` replaces the default
+    "rejected the API key" summary for providers without one); 429 is a retryable rate limit that
     honours ``Retry-After``, or ``wait_hint`` (a provider-specific wait in seconds that takes
     precedence) when given; 5xx are retryable server errors; other 4xx are rejected requests;
     anything else is an unexpected response. Provider-specific cases (an exhausted quota) are
     checked by the caller first. ``detail`` must already be sanitized (:func:`sanitize_detail`).
     """
     if status in AUTH_STATUSES:
-        message = describe(f"{label} rejected the API key; check {env_var}", model, status)
+        summary = auth_summary or f"{label} rejected the API key; check {env_var}"
+        message = describe(summary, model, status)
         return Failure("auth", False, LLMAuthError(message, provider=provider, model=model), status)
     if status == _RATE_LIMIT_STATUS:
         wait = wait_hint if wait_hint is not None else retry_after(headers, now)

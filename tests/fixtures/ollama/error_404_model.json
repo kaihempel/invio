@@ -1,0 +1,9 @@
+{
+  "status": 404,
+  "headers": {
+    "content-type": "application/json; charset=utf-8"
+  },
+  "body": {
+    "error": "model \"llama3.2:3b\" not found, try pulling it first"
+  }
+}

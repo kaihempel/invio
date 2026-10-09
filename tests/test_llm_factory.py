@@ -366,9 +366,13 @@ OLLAMA_MODULE = ACME_MODULE.replace('"acme"', '"ollama"').replace("acme says hi"
 
 
 async def test_new_provider_module_resolves_by_role_without_shared_edits(
-    provider_package: Path, job_data: dict[str, Any]
+    provider_package: Path, job_data: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """SC-001: one module + one registry file make a job's roles resolvable and priced."""
+    # Every provider name the job schema accepts now has a real module; hide the real
+    # ``ollama`` module so the stand-in (first on ``__path__``) is imported in its place.
+    monkeypatch.delitem(sys.modules, "invio.llm.ollama", raising=False)
+    monkeypatch.delattr(invio.llm, "ollama", raising=False)
     (provider_package / "ollama.py").write_text(OLLAMA_MODULE, encoding="utf-8")
     entry: dict[str, object] = {
         "input_price_per_mtok": 0,
@@ -555,3 +559,32 @@ def test_google_resolves_from_its_module_and_registry_file_only(
     assert provider is not None
     assert resolved is not None
     assert model == second
+
+
+# --- Ollama provider (issue #33) -----------------------------------------------------------
+
+
+def test_ollama_resolves_from_its_module_and_registry_file_only(
+    job_data: dict[str, Any],
+) -> None:
+    """SC-001 for Ollama: ``ollama.py`` + ``models.d/ollama.yaml``, no ``factory.py``."""
+    from invio.llm.ollama import OllamaProvider
+
+    package = Path(invio.llm.__file__).parent
+    assert (package / "ollama.py").is_file()
+    assert (package / "models.d" / "ollama.yaml").is_file()
+    assert "ollama" not in Path(factory.__file__).read_text(encoding="utf-8").lower()
+    default_registry.cache_clear()
+    first, second = (info.model_id for info in default_registry().models_for("ollama"))
+    job_data["llm"] = {"provider": "ollama", "models": {"fast": first, "smart": second}}
+    llm = JobConfig.model_validate(job_data).llm
+    settings = make_settings()  # no API key: Ollama needs none
+
+    provider = get_provider("ollama", settings)
+    resolved, model = resolve(llm, "fast", settings)
+
+    assert factory._REGISTRY["ollama"] is OllamaProvider
+    assert provider is not None
+    assert resolved is not None
+    assert model == first
+    assert default_registry().cost(model, Usage(1_000_000, 1_000_000)) == 0

@@ -1,0 +1,9 @@
+{
+  "status": 500,
+  "headers": {
+    "content-type": "application/json; charset=utf-8"
+  },
+  "body": {
+    "error": "llama runner process has terminated: exit status 2"
+  }
+}

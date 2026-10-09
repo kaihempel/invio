@@ -1,0 +1,19 @@
+# Local models served by Ollama (ollama.com/library tags), USD per 1,000,000 tokens.
+# They run on your own hardware, so every price is 0 and the cost estimate of a call is 0.
+# Order matters to the tests: first = fast role, second = smart role.
+# Pull a model before use (`ollama pull <tag>`); any other pulled model can be added here.
+# Checked on 2026-10-09: context windows from the ollama.com/library model pages
+# (llama3.2:3b 128k, qwen2.5:14b 32k). The server's own context length (OLLAMA_CONTEXT_LENGTH,
+# 4096 tokens by default) caps what a request may use; Ollama truncates longer prompts.
+---
+schema_version: 1
+provider: ollama
+models:
+  llama3.2:3b:
+    input_price_per_mtok: 0
+    output_price_per_mtok: 0
+    context_window: 131072
+  qwen2.5:14b:
+    input_price_per_mtok: 0
+    output_price_per_mtok: 0
+    context_window: 32768

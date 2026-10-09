@@ -5,11 +5,12 @@ from datetime import UTC, datetime
 
 import pytest
 
-from invio.llm.base import LLMError, LLMRateLimitError, LLMUnavailableError
+from invio.llm.base import LLMAuthError, LLMError, LLMRateLimitError, LLMUnavailableError
 from invio.llm.http_retry import (
     Failure,
     RetryPolicy,
     classify_status,
+    classify_transport,
     describe,
     retry_after,
     run_with_retries,
@@ -54,6 +55,54 @@ def test_classify_status_rate_limit_prefers_the_wait_hint(
     assert failure.retry_after == expected
     assert isinstance(failure.error, LLMRateLimitError)
     assert failure.error.retry_after == expected
+
+
+@pytest.mark.parametrize(
+    ("summary", "expected"),
+    [
+        (None, "X rejected the API key; check X_KEY (HTTP 401, model m)"),
+        ("X refused access", "X refused access (HTTP 401, model m)"),
+    ],
+)
+def test_classify_status_auth_summary_replaces_the_default(
+    summary: str | None, expected: str
+) -> None:
+    failure = classify_status(
+        401,
+        label="X",
+        env_var="X_KEY",
+        provider="p",
+        model="m",
+        detail="",
+        headers={},
+        now=lambda: NOW,
+        auth_summary=summary,
+    )
+
+    assert isinstance(failure.error, LLMAuthError)
+    assert str(failure.error) == expected
+
+
+@pytest.mark.parametrize(
+    ("hint", "expected"),
+    [
+        ("", "X request could not be sent (ValueError) (model m)"),
+        ("check X_URL", "X request could not be sent (ValueError); check X_URL (model m)"),
+    ],
+)
+def test_classify_transport_appends_the_unsendable_hint(hint: str, expected: str) -> None:
+    failure = classify_transport(
+        ValueError("x"),
+        label="X",
+        provider="p",
+        model="m",
+        unsendable=(ValueError,),
+        bad_response=(),
+        unsendable_hint=hint,
+    )
+
+    assert (failure.kind, failure.retryable) == ("unsendable", False)
+    assert str(failure.error) == expected
 
 
 def test_sanitize_detail_collapses_whitespace_and_truncates() -> None:

@@ -1,0 +1,9 @@
+{
+  "status": 429,
+  "headers": {
+    "content-type": "application/json; charset=utf-8"
+  },
+  "body": {
+    "error": "server busy, please try again. maximum pending requests exceeded"
+  }
+}
