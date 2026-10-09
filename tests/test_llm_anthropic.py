@@ -391,6 +391,35 @@ async def test_structured_text_instead_of_tool_is_repaired_once() -> None:
     assert usage.requests == 2
 
 
+async def test_structured_uses_the_tool_input_when_text_parts_accompany_it() -> None:
+    blocks = [
+        {"type": "text", "text": "Here is the answer."},
+        {
+            "type": "tool_use",
+            "id": "toolu_1",
+            "name": "Score",
+            "input": {"score": 0.5, "reason": "a"},
+        },
+        {"type": "text", "text": "Done."},
+    ]
+    provider, recorder, _ = make_provider(_text_reply("", content=blocks, stop_reason="tool_use"))
+
+    value, usage = await _structured(provider)
+
+    assert value == Score(score=0.5, reason="a")
+    assert (len(recorder.requests), usage.requests) == (1, 1)
+
+
+async def test_structured_several_text_parts_without_tool_are_repaired_once() -> None:
+    blocks = [{"type": "text", "text": '{"score": 0.5, '}, {"type": "text", "text": "oops"}]
+    provider, recorder, _ = make_provider(_text_reply("", content=blocks), "tool_use_ok")
+
+    value, usage = await _structured(provider)
+
+    assert value == Score(score=0.8, reason="fits")
+    assert (len(recorder.requests), usage.requests) == (2, 2)
+
+
 async def test_structured_invalid_twice_raises_invalid_output_with_summed_usage() -> None:
     provider, recorder, _ = make_provider("tool_use_invalid", "text_instead_of_tool")
 
@@ -486,6 +515,20 @@ async def test_provider_reuses_the_client_within_one_loop() -> None:
     assert recorder.clients_created == 1
 
 
+async def test_concurrent_calls_in_one_loop_share_one_client() -> None:
+    provider, recorder, _ = make_provider("message_ok", "tool_use_ok", "message_ok")
+
+    results = await asyncio.gather(_complete(provider), _structured(provider), _complete(provider))
+
+    assert [results[0][0], results[1][0], results[2][0]] == [
+        "Hello",
+        Score(score=0.8, reason="fits"),
+        "Hello",
+    ]
+    assert len(recorder.requests) == 3
+    assert recorder.clients_created == 1
+
+
 async def test_aclose_closes_the_client_of_the_running_loop() -> None:
     provider, recorder, _ = make_provider("message_ok", "message_ok")
     await _complete(provider)
@@ -565,6 +608,43 @@ async def test_successful_call_logs_one_llm_call_record(caplog: pytest.LogCaptur
     assert record.model == MODEL  # type: ignore[attr-defined]
     assert (record.input_tokens, record.output_tokens) == (12, 3)  # type: ignore[attr-defined]
     assert record.cost_usd is not None  # type: ignore[attr-defined]
+    dump = str([r.__dict__ for r in caplog.records])
+    assert API_KEY not in dump
+    assert "PROMPT-TEXT-SENTINEL" not in dump
+
+
+async def test_repaired_structured_call_logs_the_repair_flag_and_summed_tokens(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    provider, _, _ = make_provider("tool_use_invalid", "tool_use_ok")
+    logged = _LoggedProvider(provider, name="anthropic", registry=default_registry())
+
+    with caplog.at_level(logging.INFO, logger="invio.llm"):
+        await logged.complete_structured(SYSTEM, USER, Score, model=MODEL, temperature=0)
+
+    (record,) = [r for r in caplog.records if r.getMessage() == "llm.call"]
+    assert record.repaired is True  # type: ignore[attr-defined]
+    assert (record.input_tokens, record.output_tokens) == (24, 6)  # type: ignore[attr-defined]
+    assert "ANSWER-SENTINEL" not in str([r.__dict__ for r in caplog.records])
+
+
+@pytest.mark.parametrize(
+    ("replies", "error"),
+    [(("error_401",), "LLMAuthError"), (("error_529",) * 4, "LLMUnavailableError")],
+    ids=["auth", "overloaded"],
+)
+async def test_failed_call_logs_one_llm_error_record(
+    replies: tuple[str, ...], error: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    provider, _, _ = make_provider(*replies)
+    logged = _LoggedProvider(provider, name="anthropic", registry=default_registry())
+
+    with caplog.at_level(logging.INFO, logger="invio.llm"), pytest.raises(LLMError):
+        await logged.complete(SYSTEM, USER, model=MODEL, temperature=0, max_tokens=50)
+
+    assert [r for r in caplog.records if r.getMessage() == "llm.call"] == []
+    (record,) = [r for r in caplog.records if r.getMessage() == "llm.error"]
+    assert (record.error, record.provider, record.model) == (error, "anthropic", MODEL)  # type: ignore[attr-defined]
     dump = str([r.__dict__ for r in caplog.records])
     assert API_KEY not in dump
     assert "PROMPT-TEXT-SENTINEL" not in dump
