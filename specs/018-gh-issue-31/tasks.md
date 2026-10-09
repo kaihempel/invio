@@ -237,12 +237,12 @@ description: "Task list for the Anthropic (Claude) provider (issue #31)"
 
 ## Phase 7: Polish & cross-cutting
 
-- [ ] T020 [P] Update the docs:
+- [x] T020 [P] Update the docs:
   - `README.md`: provider list, `llm.provider: anthropic`, `INVIO_ANTHROPIC_API_KEY`, the supported models and why (forced tool use and temperature).
   - `docs/deployment.md` line 81: "jobs can use `mistral`, `openai` and `anthropic`".
   - `src/invio/llm/models.d/README.md`: already updated in T003; check the wording.
   - Check `docs/job.example.yaml` mentions anthropic only where appropriate.
-- [ ] T021 Run the full gates from `quickstart.md`: `uv run ruff check .`, `uv run ruff format --check .`, `uv run mypy`, `uv run pytest`. Fix findings; type-ignores must be narrow and justified in a comment.
+- [x] T021 Run the full gates from `quickstart.md`: `uv run ruff check .`, `uv run ruff format --check .`, `uv run mypy`, `uv run pytest`. Fix findings; type-ignores must be narrow and justified in a comment.
 - [ ] T022 Walk through `specs/018-gh-issue-31/quickstart.md`. If a real key is available, run `uv run invio llm test anthropic` (both models) and `uv run pytest -m live tests/test_llm_anthropic_live.py`. Record the result in the PR description, together with the justification for the new `anthropic` dependency and the model restriction (research R1). If no key is available, say so explicitly there.
 
 ---
