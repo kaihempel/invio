@@ -2,9 +2,9 @@
 
 Registry files are versioned (``schema_version: 1``) and parsed strictly; every problem is a
 :class:`~invio.llm.base.ModelRegistryError` naming the file. Costs are computed with
-:class:`~decimal.Decimal` and quantized to the precision of ``llm_usage.cost_usd``. An entry may carry the optional
-``max_output_tokens`` (the model's largest answer size); providers that need it, such as
-Anthropic, check for it when they are built.
+:class:`~decimal.Decimal` and quantized to the precision of ``llm_usage.cost_usd``. An entry may
+carry the optional ``max_output_tokens`` (the model's largest answer size); providers that need
+it, such as Anthropic, check for it when they are built.
 """
 
 import functools
