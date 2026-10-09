@@ -1,11 +1,16 @@
 """Offline tests of the Anthropic provider (recorded HTTP fixtures, no network, no real key)."""
 
 import asyncio
+import json
 import logging
 import threading
+import traceback
+from datetime import UTC, datetime, timedelta
+from email.utils import format_datetime
 from pathlib import Path
 from typing import Any
 
+import anthropic
 import httpx2
 import pytest
 from pydantic import BaseModel
@@ -13,17 +18,24 @@ from pydantic import BaseModel
 import invio.llm
 from invio.config.job import JobConfig
 from invio.llm import factory
-from invio.llm.anthropic import AnthropicProvider
+from invio.llm.anthropic import AnthropicProvider, _classify
 from invio.llm.base import (
     LLMAuthError,
     LLMConfigError,
+    LLMError,
     LLMInvalidOutputError,
+    LLMInvalidRequestError,
+    LLMQuotaError,
+    LLMRateLimitError,
     LLMUnavailableError,
     Usage,
+    with_timeout,
 )
 from invio.llm.factory import _LoggedProvider
+from invio.llm.http_retry import RetryPolicy
 from invio.llm.registry import default_registry, load_registry
-from tests.anthropic_helpers import API_KEY, BASE_URL, make_provider
+from invio.llm.retry import is_transient_llm
+from tests.anthropic_helpers import API_KEY, BASE_URL, HANG, make_provider
 from tests.llm_helpers import Score, make_settings, write_registry
 
 SYSTEM = "You rate things."
@@ -31,6 +43,7 @@ USER = "PROMPT-TEXT-SENTINEL rate this"
 HAIKU = "claude-haiku-4-5-20251001"
 SONNET = "claude-sonnet-4-6"
 MODEL = HAIKU
+NOW = datetime(2026, 10, 9, 12, 0, tzinfo=UTC)
 
 
 async def _complete(provider: AnthropicProvider) -> tuple[str, Usage]:
@@ -559,3 +572,716 @@ async def test_successful_call_logs_one_llm_call_record(caplog: pytest.LogCaptur
 
 def test_llm_package_docstring_lists_anthropic() -> None:
     assert "anthropic" in (invio.llm.__doc__ or "")
+
+
+# --- error mapping --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("fixture", ["error_401", "error_403"])
+async def test_auth_failures_are_not_retried(fixture: str) -> None:
+    provider, recorder, waits = make_provider(fixture, "message_ok")
+
+    with pytest.raises(LLMAuthError, match="INVIO_ANTHROPIC_API_KEY") as info:
+        await _complete(provider)
+
+    assert (info.value.provider, info.value.model) == ("anthropic", MODEL)
+    assert len(recorder.requests) == 1
+    assert waits == []
+
+
+@pytest.mark.parametrize("fixture", ["error_402", "error_400_credit_balance"])
+async def test_exhausted_credit_is_a_non_retryable_quota_error(fixture: str) -> None:
+    provider, recorder, waits = make_provider(fixture, "message_ok")
+
+    with pytest.raises(LLMQuotaError) as info:
+        await _complete(provider)
+
+    assert info.value.retry_after is None
+    assert isinstance(info.value, LLMRateLimitError)
+    assert not is_transient_llm(info.value)
+    assert (info.value.provider, info.value.model) == ("anthropic", MODEL)
+    assert len(recorder.requests) == 1
+    assert waits == []
+
+
+@pytest.mark.parametrize(
+    ("fixture", "status", "text"),
+    [
+        ("error_400", 400, "max_tokens: 99999 > 64000"),
+        ("error_404_model", 404, "claude-nope"),
+        ("error_413", 413, "maximum allowed number of bytes"),
+    ],
+)
+async def test_rejected_requests_are_invalid_request_errors(
+    fixture: str, status: int, text: str
+) -> None:
+    provider, recorder, waits = make_provider(fixture, "message_ok")
+
+    with pytest.raises(LLMInvalidRequestError) as info:
+        await _complete(provider)
+
+    message = str(info.value)
+    assert info.value.status == status
+    assert (info.value.provider, info.value.model) == ("anthropic", MODEL)
+    assert f"HTTP {status}" in message
+    assert text in message
+    assert len(recorder.requests) == 1
+    assert waits == []
+
+
+async def test_free_text_limit_above_the_model_maximum_is_an_invalid_request() -> None:
+    provider, recorder, _ = make_provider("error_400")
+
+    with pytest.raises(LLMInvalidRequestError, match="HTTP 400"):
+        await provider.complete(SYSTEM, USER, model=MODEL, temperature=0, max_tokens=99999)
+
+    assert recorder.requests[0].body["max_tokens"] == 99999
+
+
+async def test_bad_request_with_non_json_body_still_names_the_status() -> None:
+    provider, _, _ = make_provider(httpx2.Response(400, content=b"<html>BODY-LEAK</html>"))
+
+    with pytest.raises(LLMInvalidRequestError, match="HTTP 400") as info:
+        await _complete(provider)
+
+    assert "BODY-LEAK" not in str(info.value)
+
+
+async def test_error_message_is_bounded_and_free_of_the_response_body() -> None:
+    huge = httpx2.Response(
+        400,
+        json={
+            "type": "error",
+            "error": {"type": "invalid_request_error", "message": "x" * 10_000},
+            "extra": "BODY-LEAK",
+        },
+    )
+    provider, _, _ = make_provider(huge)
+
+    with pytest.raises(LLMInvalidRequestError) as info:
+        await _complete(provider)
+
+    assert len(str(info.value)) <= 400
+    assert "BODY-LEAK" not in str(info.value)
+
+
+async def test_error_message_collapses_whitespace_and_control_characters() -> None:
+    body = {"type": "error", "error": {"message": "bad\n\n  thing\x00here"}}
+    provider, _, _ = make_provider(httpx2.Response(400, json=body))
+
+    with pytest.raises(LLMInvalidRequestError, match=r"bad thing here"):
+        await _complete(provider)
+
+
+async def test_deadline_is_unavailable_and_not_retried() -> None:
+    provider, recorder, waits = make_provider(HANG, timeout_seconds=0.5)
+
+    with pytest.raises(LLMUnavailableError, match=r"did not answer within 0\.5 s"):
+        await _complete(provider)
+
+    assert len(recorder.requests) == 1
+    assert waits == []
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        httpx2.ConnectTimeout("x"),
+        httpx2.ReadTimeout("x"),
+        httpx2.WriteTimeout("x"),
+        httpx2.PoolTimeout("x"),
+    ],
+    ids=lambda e: type(e).__name__,
+)
+async def test_every_transport_timeout_is_not_retried(failure: Exception) -> None:
+    provider, recorder, waits = make_provider(failure, "message_ok")
+
+    with pytest.raises(LLMUnavailableError, match="timed out") as info:
+        await _complete(provider)
+
+    assert (info.value.provider, info.value.model) == ("anthropic", MODEL)
+    assert len(recorder.requests) == 1
+    assert waits == []
+
+
+async def test_timeout_after_a_retry_is_not_retried_again() -> None:
+    provider, recorder, waits = make_provider("error_529", httpx2.ReadTimeout("x"), "message_ok")
+
+    with pytest.raises(LLMUnavailableError, match="timed out"):
+        await _complete(provider)
+
+    assert len(recorder.requests) == 2
+    assert waits == [1.0]
+
+
+async def test_timeout_bounds_each_attempt_separately(monkeypatch: pytest.MonkeyPatch) -> None:
+    bounds: list[float] = []
+
+    async def recording_with_timeout(awaitable: Any, *, seconds: float, **kwargs: Any) -> Any:
+        bounds.append(seconds)
+        return await with_timeout(awaitable, seconds=seconds, **kwargs)
+
+    monkeypatch.setattr("invio.llm.anthropic.with_timeout", recording_with_timeout)
+    provider, _, _ = make_provider("error_429", "error_529", "message_ok", timeout_seconds=7.0)
+
+    await _complete(provider)
+
+    assert bounds == [7.0, 7.0, 7.0]
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        httpx2.Response(200, content=b"<html>BODY-LEAK</html>"),
+        httpx2.Response(200, headers={"content-type": "application/json"}, content=b"{not json"),
+        httpx2.Response(200, headers={"content-type": "application/json"}, content=b"[1, 2]"),
+    ],
+    ids=["html", "broken-json", "json-array"],
+)
+async def test_non_object_success_body_is_unavailable_without_retry(
+    reply: httpx2.Response,
+) -> None:
+    provider, recorder, waits = make_provider(reply, "message_ok")
+
+    with pytest.raises(LLMUnavailableError) as info:
+        await _complete(provider)
+
+    assert "BODY-LEAK" not in str(info.value)
+    assert len(recorder.requests) == 1
+    assert waits == []
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        "error_401",
+        "error_402",
+        "error_413",
+        "error_429",
+        "error_529",
+        "malformed_200",
+        "message_refusal",
+        httpx2.ConnectError("boom SECRET-IN-EXC"),
+    ],
+    ids=["401", "402", "413", "429", "529", "malformed", "refusal", "connect"],
+)
+async def test_errors_never_expose_key_or_prompt_and_are_not_chained(reply: Any) -> None:
+    provider, _, _ = make_provider(*([reply] * 4), retry=RetryPolicy(max_retries=3))
+
+    with pytest.raises(LLMError) as info:
+        await _complete(provider)
+
+    chain = "".join(traceback.format_exception(info.value, chain=True))
+    for text in (str(info.value), repr(info.value), repr(provider), chain):
+        assert API_KEY not in text
+        assert "PROMPT-TEXT-SENTINEL" not in text
+        assert "SECRET-IN-EXC" not in text
+        assert "REFUSAL-TEXT-SENTINEL" not in text
+    assert info.value.__cause__ is None
+    assert info.value.__context__ is None
+
+
+async def test_structured_invalid_output_has_no_context() -> None:
+    provider, _, _ = make_provider("tool_use_invalid", "tool_use_invalid")
+
+    with pytest.raises(LLMInvalidOutputError) as info:
+        await _structured(provider)
+
+    assert info.value.__cause__ is None
+    assert info.value.__context__ is None
+
+
+# --- rate limits and retries ----------------------------------------------------------------
+
+
+async def test_rate_limit_is_retried_with_exponential_backoff() -> None:
+    provider, recorder, waits = make_provider(*["error_429"] * 4)
+
+    with pytest.raises(LLMRateLimitError) as info:
+        await _complete(provider)
+
+    assert len(recorder.requests) == 4
+    assert waits == [1.0, 2.0, 4.0]
+    assert info.value.retry_after is None
+    assert (info.value.provider, info.value.model) == ("anthropic", MODEL)
+    assert "per-minute rate limit" in str(info.value)
+
+
+@pytest.mark.parametrize("fixture", ["error_500", "error_529"])
+async def test_server_and_overloaded_errors_exhaust_retries_naming_the_status(
+    fixture: str,
+) -> None:
+    provider, recorder, waits = make_provider(*[fixture] * 4)
+
+    with pytest.raises(LLMUnavailableError, match=r"HTTP 5\d\d"):
+        await _complete(provider)
+
+    assert len(recorder.requests) == 4
+    assert waits == [1.0, 2.0, 4.0]
+
+
+@pytest.mark.parametrize("status", [500, 502, 503, 504, 529])
+async def test_every_5xx_status_exhausts_retries(status: int) -> None:
+    provider, recorder, _ = make_provider(*[httpx2.Response(status, text="<html>oops</html>")] * 4)
+
+    with pytest.raises(LLMUnavailableError, match=str(status)):
+        await _complete(provider)
+
+    assert len(recorder.requests) == 4
+
+
+async def test_overloaded_then_success() -> None:
+    provider, recorder, waits = make_provider("error_529", "message_ok")
+
+    text, usage = await _complete(provider)
+
+    assert (text, usage.requests) == ("Hello", 1)
+    assert waits == [1.0]
+    assert len(recorder.requests) == 2
+
+
+async def test_connection_failure_exhausts_retries() -> None:
+    provider, recorder, waits = make_provider(*[httpx2.ConnectError("x")] * 4)
+
+    with pytest.raises(LLMUnavailableError, match="connection failed"):
+        await _complete(provider)
+
+    assert len(recorder.requests) == 4
+    assert waits == [1.0, 2.0, 4.0]
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [httpx2.ConnectError("x"), httpx2.ReadError("x"), httpx2.RemoteProtocolError("x")],
+    ids=lambda e: type(e).__name__,
+)
+async def test_connection_failure_once_then_success(failure: Exception) -> None:
+    provider, _, waits = make_provider(failure, "message_ok")
+
+    text, _ = await _complete(provider)
+
+    assert text == "Hello"
+    assert waits == [1.0]
+
+
+async def test_unsendable_request_is_not_retried() -> None:
+    provider, recorder, waits = make_provider(httpx2.UnsupportedProtocol("x"), "message_ok")
+
+    with pytest.raises(LLMUnavailableError, match="could not be sent"):
+        await _complete(provider)
+
+    assert (len(recorder.requests), waits) == (1, [])
+
+
+async def test_retry_after_header_sets_the_wait() -> None:
+    provider, _, waits = make_provider("error_429_retry_after", "message_ok")
+
+    await _complete(provider)
+
+    assert waits == [2.0]
+
+
+async def test_retry_after_above_the_cap_fails_immediately() -> None:
+    provider, recorder, waits = make_provider("error_429_retry_after_long", "message_ok")
+
+    with pytest.raises(LLMRateLimitError) as info:
+        await _complete(provider)
+
+    assert info.value.retry_after == 3600
+    assert len(recorder.requests) == 1
+    assert waits == []
+
+
+async def test_final_rate_limit_error_keeps_retry_after() -> None:
+    provider, recorder, waits = make_provider(*["error_429_retry_after"] * 4)
+
+    with pytest.raises(LLMRateLimitError) as info:
+        await _complete(provider)
+
+    assert info.value.retry_after == 2
+    assert len(recorder.requests) == 4
+    assert waits == [2.0, 2.0, 2.0]
+
+
+async def test_retry_after_at_and_above_the_cap() -> None:
+    body = {"type": "error", "error": {"type": "rate_limit_error", "message": "x"}}
+    at_cap = httpx2.Response(429, headers={"retry-after": "5"}, json=body)
+    provider, _, waits = make_provider(at_cap, "message_ok", retry=RetryPolicy(max_retry_after=5))
+    await _complete(provider)
+    assert waits == [5.0]
+
+    over = httpx2.Response(429, headers={"retry-after": "6"}, json=body)
+    provider, recorder, waits = make_provider(
+        over, "message_ok", retry=RetryPolicy(max_retry_after=5)
+    )
+    with pytest.raises(LLMRateLimitError):
+        await _complete(provider)
+    assert (len(recorder.requests), waits) == (1, [])
+
+
+async def test_retry_after_http_date_is_relative_to_now() -> None:
+    reply = httpx2.Response(
+        429,
+        headers={"Retry-After": format_datetime(NOW + timedelta(seconds=10), usegmt=True)},
+        json={"type": "error", "error": {"message": "slow down"}},
+    )
+    provider, _, waits = make_provider(reply, "message_ok", now=lambda: NOW)
+
+    await _complete(provider)
+
+    assert waits == [10.0]
+
+
+async def test_unparseable_retry_after_falls_back_to_backoff() -> None:
+    reply = httpx2.Response(429, headers={"Retry-After": "soon"}, content=b"{}")
+    provider, _, waits = make_provider(reply, "message_ok")
+
+    await _complete(provider)
+
+    assert waits == [1.0]
+
+
+async def test_overflowing_retry_after_fails_immediately() -> None:
+    reply = httpx2.Response(429, headers={"Retry-After": "9" * 400}, content=b"{}")
+    provider, recorder, waits = make_provider(reply, "message_ok")
+
+    with pytest.raises(LLMRateLimitError) as info:
+        await _complete(provider)
+
+    assert info.value.retry_after is None
+    assert len(recorder.requests) == 1
+    assert waits == []
+
+
+async def test_retry_after_on_a_server_error_is_ignored() -> None:
+    reply = httpx2.Response(529, headers={"Retry-After": "30"}, content=b"{}")
+    provider, _, waits = make_provider(reply, "message_ok")
+
+    await _complete(provider)
+
+    assert waits == [1.0]
+
+
+async def test_jitter_scales_the_wait_and_uses_the_policy_range() -> None:
+    bounds: list[tuple[float, float]] = []
+
+    def uniform(a: float, b: float) -> float:
+        bounds.append((a, b))
+        return b
+
+    provider, _, waits = make_provider(
+        "error_529", "message_ok", retry=RetryPolicy(jitter=0.5), uniform=uniform
+    )
+
+    await _complete(provider)
+
+    assert bounds == [(-0.5, 0.5)]
+    assert waits == [1.5]
+
+
+async def test_zero_retries_means_exactly_one_http_request() -> None:
+    provider, recorder, waits = make_provider("error_529", retry=RetryPolicy(max_retries=0))
+
+    with pytest.raises(LLMUnavailableError):
+        await _complete(provider)
+
+    assert len(recorder.requests) == 1
+    assert waits == []
+
+
+async def test_repair_request_has_its_own_retry_budget() -> None:
+    provider, recorder, waits = make_provider("tool_use_invalid", "error_529", "tool_use_ok")
+
+    value, usage = await _structured(provider)
+
+    assert value == Score(score=0.8, reason="fits")
+    assert len(recorder.requests) == 3
+    assert waits == [1.0]
+    assert usage.requests == 2
+
+
+async def test_cancellation_during_the_retry_wait_stops_the_request() -> None:
+    entered = asyncio.Event()
+    never = asyncio.Event()
+
+    async def blocking_sleep(seconds: float) -> None:
+        entered.set()
+        await never.wait()
+
+    provider, recorder, _ = make_provider("error_529", "message_ok", sleep=blocking_sleep)
+    task = asyncio.ensure_future(_complete(provider))
+    await entered.wait()
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert len(recorder.requests) == 1
+
+
+async def test_each_retry_logs_one_warning_without_prompt_text(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    provider, _, _ = make_provider("error_429", "error_529", "message_ok")
+
+    with caplog.at_level(logging.WARNING, logger="invio.llm"):
+        await _complete(provider)
+
+    records = [r for r in caplog.records if r.getMessage() == "llm.retry"]
+    assert len(records) == 2
+    first, second = records
+    assert (first.provider, first.model, first.attempt) == ("anthropic", MODEL, 1)  # type: ignore[attr-defined]
+    assert (first.status, first.failure, first.wait_s) == (429, "rate_limit", 1.0)  # type: ignore[attr-defined]
+    assert (second.attempt, second.status, second.failure) == (2, 529, "server")  # type: ignore[attr-defined]
+    dump = str([r.__dict__ for r in caplog.records])
+    assert "PROMPT-TEXT-SENTINEL" not in dump
+    assert API_KEY not in dump
+    assert all(r.exc_info is None for r in records)
+
+
+@pytest.mark.parametrize(
+    "reply",
+    ["error_401", "error_400", "error_402", httpx2.ReadTimeout("x"), "error_429_retry_after_long"],
+    ids=["auth", "invalid-request", "billing", "timeout", "retry-after-above-cap"],
+)
+async def test_non_retried_failures_log_no_retry_line(
+    reply: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    provider, _, _ = make_provider(reply)
+
+    with caplog.at_level(logging.WARNING, logger="invio.llm"), pytest.raises(LLMError):
+        await _complete(provider)
+
+    assert [r for r in caplog.records if r.getMessage() == "llm.retry"] == []
+
+
+@pytest.mark.parametrize(
+    ("replies", "timeout"),
+    [
+        (("error_401",), 60.0),
+        (("error_402",), 60.0),
+        (("error_400",), 60.0),
+        (("error_404_model",), 60.0),
+        (("error_413",), 60.0),
+        (("error_429",) * 4, 60.0),
+        (("error_500",) * 4, 60.0),
+        (("error_529",) * 4, 60.0),
+        ((httpx2.ConnectError("x"),) * 4, 60.0),
+        ((httpx2.ReadTimeout("x"),), 60.0),
+        ((HANG,), 0.01),
+        (("malformed_200",), 60.0),
+        (("message_empty",), 60.0),
+        (("message_refusal",), 60.0),
+        (("message_max_tokens",), 60.0),
+    ],
+)
+async def test_every_error_names_provider_and_model(
+    replies: tuple[Any, ...], timeout: float
+) -> None:
+    provider, _, _ = make_provider(*replies, timeout_seconds=timeout)
+
+    with pytest.raises(LLMError) as info:
+        await _complete(provider)
+
+    message = str(info.value)
+    assert (info.value.provider, info.value.model) == ("anthropic", MODEL)
+    assert MODEL in message
+    assert API_KEY not in message
+    assert "PROMPT-TEXT-SENTINEL" not in message
+
+
+# --- client configuration -------------------------------------------------------------------
+
+
+async def test_sdk_retries_are_disabled_and_timeout_has_a_margin() -> None:
+    provider, _, _ = make_provider("message_ok", timeout_seconds=10.0)
+    await _complete(provider)
+
+    sdk_client, _ = next(iter(provider._clients.values()))
+
+    assert sdk_client.max_retries == 0
+    assert sdk_client.timeout == 15.0
+    assert str(sdk_client.base_url).rstrip("/") == BASE_URL
+
+
+def test_default_base_url_is_the_anthropic_api() -> None:
+    provider = AnthropicProvider(API_KEY, timeout_seconds=5, registry=default_registry())
+
+    assert provider._base_url == "https://api.anthropic.com"
+
+
+async def test_large_max_tokens_does_not_trip_the_sdk_streaming_guard() -> None:
+    provider, recorder, _ = make_provider("tool_use_ok")
+
+    await _structured(provider, SONNET)
+
+    assert recorder.requests[0].body["max_tokens"] == 128000
+
+
+# --- helpers: _classify ---------------------------------------------------------------------
+
+
+def _request() -> httpx2.Request:
+    return httpx2.Request("POST", "https://api.anthropic.test/v1/messages")
+
+
+def _status_error(status: int, body: object, *, headers: dict[str, str] | None = None) -> Any:
+    response = httpx2.Response(status, request=_request(), headers=headers or {})
+    return anthropic.APIStatusError("SDK-MESSAGE-LEAK raw body", response=response, body=body)
+
+
+def _wrapped(kind: str, message: str = "m") -> dict[str, Any]:
+    return {"type": "error", "error": {"type": kind, "message": message}}
+
+
+def test_classify_other_exception_returns_none() -> None:
+    assert _classify(RuntimeError("x"), MODEL, lambda: NOW) is None
+
+
+def test_classify_timeout_is_checked_before_connection_error() -> None:
+    failure = _classify(anthropic.APITimeoutError(request=_request()), MODEL, lambda: NOW)
+
+    assert failure is not None
+    assert (failure.kind, failure.retryable) == ("timeout", False)
+
+
+def test_classify_connection_error_without_cause_is_retryable() -> None:
+    failure = _classify(anthropic.APIConnectionError(request=_request()), MODEL, lambda: NOW)
+
+    assert failure is not None
+    assert (failure.kind, failure.retryable) == ("connection", True)
+
+
+@pytest.mark.parametrize(
+    ("cause", "kind", "retryable"),
+    [
+        (httpx2.InvalidURL("x"), "unsendable", False),
+        (httpx2.UnsupportedProtocol("x"), "unsendable", False),
+        (httpx2.LocalProtocolError("x"), "unsendable", False),
+        (httpx2.DecodingError("x"), "bad_response", False),
+        (httpx2.TooManyRedirects("x"), "bad_response", False),
+        (httpx2.StreamConsumed(), "bad_response", False),
+        (httpx2.ConnectError("x"), "connection", True),
+        (httpx2.RemoteProtocolError("x"), "connection", True),
+    ],
+    ids=lambda value: type(value).__name__ if isinstance(value, Exception) else "",
+)
+def test_classify_connection_error_by_cause(cause: Exception, kind: str, retryable: bool) -> None:
+    exc = anthropic.APIConnectionError(request=_request())
+    exc.__cause__ = cause
+
+    failure = _classify(exc, MODEL, lambda: NOW)
+
+    assert failure is not None
+    assert (failure.kind, failure.retryable) == (kind, retryable)
+    assert type(cause).__name__ in str(failure.error)
+
+
+@pytest.mark.parametrize(
+    ("raw", "kind"),
+    [
+        (httpx2.InvalidURL("x"), "unsendable"),
+        (httpx2.ReadTimeout("x"), "timeout"),
+        (httpx2.ConnectError("x"), "connection"),
+        (httpx2.DecodingError("x"), "bad_response"),
+    ],
+    ids=lambda value: type(value).__name__ if isinstance(value, Exception) else "",
+)
+def test_classify_raw_transport_errors(raw: Exception, kind: str) -> None:
+    failure = _classify(raw, MODEL, lambda: NOW)
+
+    assert failure is not None
+    assert failure.kind == kind
+
+
+def test_classify_response_validation_and_json_errors_are_not_retryable() -> None:
+    response = httpx2.Response(200, request=_request())
+    for exc in (
+        anthropic.APIResponseValidationError(response, None),
+        json.JSONDecodeError("x", "doc", 0),
+    ):
+        failure = _classify(exc, MODEL, lambda: NOW)
+        assert failure is not None
+        assert (failure.kind, failure.retryable) == ("bad_response", False)
+
+
+@pytest.mark.parametrize("status", [100, 301, 304])
+def test_classify_non_error_status_is_bad_response(status: int) -> None:
+    failure = _classify(_status_error(status, _wrapped("x")), MODEL, lambda: NOW)
+
+    assert failure is not None
+    assert (failure.kind, failure.retryable, failure.status) == ("bad_response", False, status)
+
+
+def test_classify_other_4xx_never_uses_the_sdk_message() -> None:
+    failure = _classify(_status_error(409, _wrapped("x", "conflict")), MODEL, lambda: NOW)
+
+    assert failure is not None
+    assert isinstance(failure.error, LLMInvalidRequestError)
+    assert failure.error.status == 409
+    assert "conflict" in str(failure.error)
+    assert "SDK-MESSAGE-LEAK" not in str(failure.error)
+
+
+def test_classify_accepts_a_flat_message_body() -> None:
+    failure = _classify(_status_error(400, {"message": "flat"}), MODEL, lambda: NOW)
+
+    assert failure is not None
+    assert "flat" in str(failure.error)
+
+
+@pytest.mark.parametrize(
+    "body", [None, "plain text", ["a"], {"message": 5}, {"error": {"message": 5}}, {"other": "x"}]
+)
+def test_classify_status_with_unusable_body_has_no_detail(body: object) -> None:
+    failure = _classify(_status_error(400, body), MODEL, lambda: NOW)
+
+    assert failure is not None
+    assert str(failure.error) == f"Anthropic rejected the request (HTTP 400, model {MODEL})"
+
+
+def test_classify_credit_exhaustion_by_status_type_or_message() -> None:
+    errors = [
+        _status_error(402, None),
+        _status_error(400, _wrapped("billing_error")),
+        _status_error(400, _wrapped("invalid_request_error", "Your Credit Balance is low")),
+        _status_error(400, _wrapped("invalid_request_error", "bad")),
+        _status_error(429, _wrapped("rate_limit_error")),
+    ]
+
+    failures = [_classify(e, MODEL, lambda: NOW) for e in errors]
+
+    assert [f.kind for f in failures if f is not None] == [
+        "quota",
+        "quota",
+        "quota",
+        "invalid_request",
+        "rate_limit",
+    ]
+
+
+def test_classify_billing_type_attribute_of_a_typed_sdk_error() -> None:
+    exc = _status_error(400, None)
+    exc.type = "billing_error"
+
+    failure = _classify(exc, MODEL, lambda: NOW)
+
+    assert failure is not None
+    assert failure.kind == "quota"
+
+
+def test_retry_after_is_read_from_lowercase_sdk_headers() -> None:
+    exc = _status_error(429, _wrapped("rate_limit_error"), headers={"retry-after": "4"})
+
+    failure = _classify(exc, MODEL, lambda: NOW)
+
+    assert failure is not None
+    assert failure.retry_after == 4.0
+
+
+def test_graph_layer_does_not_retry_quota_errors() -> None:
+    failure = _classify(_status_error(402, _wrapped("billing_error")), MODEL, lambda: NOW)
+
+    assert failure is not None
+    assert isinstance(failure.error, LLMQuotaError)
+    assert not is_transient_llm(failure.error)

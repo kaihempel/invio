@@ -158,7 +158,7 @@ description: "Task list for the Anthropic (Claude) provider (issue #31)"
   - `error_500.json` (`api_error`)
   - `error_529.json` (`overloaded_error`)
   - `malformed_200.json` (non-JSON body)
-- [ ] T013 [US2] Add the failure tests to `tests/test_llm_anthropic.py`, mirroring `tests/test_llm_openai.py`:
+- [x] T013 [US2] Add the failure tests to `tests/test_llm_anthropic.py`, mirroring `tests/test_llm_openai.py`:
   - **Auth.** 401 and 403 raise `LLMAuthError` after one attempt, with a message naming `INVIO_ANTHROPIC_API_KEY`.
   - **Exhausted credit.** 402 and the credit-balance 400 raise `LLMQuotaError` (an `LLMRateLimitError` with `retry_after is None`) after one attempt, and `invio.llm.retry.is_transient_llm` is false for it.
   - **Rate limit.** 429 raises `LLMRateLimitError` with `retry_after`. It is retried with waits honoured up to `max_retry_after`; a longer hint fails immediately.
