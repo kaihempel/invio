@@ -393,3 +393,50 @@ def test_models_for_returns_sorted_ids_of_one_provider() -> None:
 
 def test_models_for_unknown_provider_is_empty() -> None:
     assert load_registry([FIXTURE_REGISTRY_DIR]).models_for("nobody") == []
+
+
+def test_max_output_tokens_is_accepted_and_exposed(tmp_path: Path) -> None:
+    models_dir = write_registry(tmp_path, "p", {"m": {**ENTRY, "max_output_tokens": 64000}})
+
+    info = load_registry([models_dir]).get("m")
+
+    assert info is not None
+    assert info.max_output_tokens == 64000
+
+
+def test_max_output_tokens_defaults_to_none(tmp_path: Path) -> None:
+    models_dir = write_registry(tmp_path, "p", {"m": ENTRY})
+
+    info = load_registry([models_dir]).get("m")
+
+    assert info is not None
+    assert info.max_output_tokens is None
+
+
+def test_existing_registry_files_load_without_max_output_tokens() -> None:
+    registry = default_registry()
+
+    for provider in ("mistral", "openai"):
+        models = registry.models_for(provider)
+        assert models
+        assert all(info.max_output_tokens is None for info in models)
+
+
+@pytest.mark.parametrize("raw", ["0", "-5", "5.0", "'5'", "true"])
+def test_invalid_max_output_tokens_is_rejected(tmp_path: Path, raw: str) -> None:
+    models_dir = _write_raw(
+        tmp_path,
+        "p.yaml",
+        "schema_version: 1\nprovider: p\nmodels:\n  m:\n    input_price_per_mtok: 1\n"
+        f"    output_price_per_mtok: 1\n    context_window: 5\n    max_output_tokens: {raw}\n",
+    )
+
+    with pytest.raises(ModelRegistryError, match=r"p\.yaml.*models\.m\.max_output_tokens"):
+        load_registry([models_dir])
+
+
+def test_every_anthropic_model_defines_max_output_tokens() -> None:
+    models = default_registry().models_for("anthropic")
+
+    assert len(models) == 2
+    assert all(info.max_output_tokens and info.max_output_tokens > 0 for info in models)

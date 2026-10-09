@@ -26,14 +26,14 @@ description: "Task list for the Anthropic (Claude) provider (issue #31)"
 
 ## Phase 1: Setup
 
-- [ ] T001 Add `anthropic>=1.12,<2` to `dependencies` in `pyproject.toml`, run `uv lock` and commit the updated `uv.lock`. Against the installed SDK, verify and record the results in `specs/018-gh-issue-31/research.md` (new section "R10 – SDK verification"):
+- [x] T001 Add `anthropic>=1.12,<2` to `dependencies` in `pyproject.toml`, run `uv lock` and commit the updated `uv.lock`. Against the installed SDK, verify and record the results in `specs/018-gh-issue-31/research.md` (new section "R10 – SDK verification"):
   - (a) `AsyncAnthropic.messages.create` accepts `extra_body={"temperature": ...}` and sends it in the JSON body.
   - (b) An explicit client `timeout` skips the SDK's non-streaming large-`max_tokens` guard for `max_tokens=128000`.
   - (c) The shape of `APIStatusError.body` for an Anthropic error response (`{"type": "error", "error": {"type", "message"}}` vs. an unwrapped `error`), plus `.type` and `.status_code`.
   - (d) How to make sure only `x-api-key` is sent when `ANTHROPIC_AUTH_TOKEN` is set (for example the `auth_token` argument or a `default_headers` `Omit`).
   - (e) The exception types for 402 and 529, and the `httpx2` exception wrapped by `APIConnectionError` / `APITimeoutError`.
   - (f) The attribute names of `Message.stop_reason`, `Message.usage`, `TextBlock.text` and `ToolUseBlock.name` / `.input`.
-- [ ] T002 [P] Create `src/invio/llm/models.d/anthropic.yaml` (`schema_version: 1`, `provider: anthropic`) with exactly two models, first = fast and second = smart:
+- [x] T002 [P] Create `src/invio/llm/models.d/anthropic.yaml` (`schema_version: 1`, `provider: anthropic`) with exactly two models, first = fast and second = smart:
   - `claude-haiku-4-5-20251001`: `input_price_per_mtok: 1.00`, `output_price_per_mtok: 5.00`, `context_window: 200000`, `max_output_tokens: 64000`.
   - `claude-sonnet-4-6`: `input_price_per_mtok: 3.00`, `output_price_per_mtok: 15.00`, `context_window: 1000000`, `max_output_tokens: 128000`.
   - Re-verify IDs, prices and limits against Anthropic's model and pricing pages on the day of implementation.
@@ -46,12 +46,12 @@ description: "Task list for the Anthropic (Claude) provider (issue #31)"
 
 **Purpose**: the registry field required by FR-011a/b.
 
-- [ ] T003 In `src/invio/llm/registry.py` add the optional field `max_output_tokens`:
+- [x] T003 In `src/invio/llm/registry.py` add the optional field `max_output_tokens`:
   - `ModelInfo.max_output_tokens: int | None = None`.
   - `_ModelEntry.max_output_tokens: StrictInt | None = Field(default=None, gt=0)`.
   - Copy the value in `load_registry`. `schema_version` stays `Literal[1]`.
   - Update the module docstring, and document the field in `src/invio/llm/models.d/README.md` as `max_output_tokens: <integer > 0>  # optional; tokens; required for anthropic models`.
-- [ ] T004 [P] Extend `tests/test_llm_registry.py`:
+- [x] T004 [P] Extend `tests/test_llm_registry.py`:
   - The field is accepted and exposed on `ModelInfo`.
   - It is `None` when absent, and the existing `mistral.yaml` and `openai.yaml` still load unchanged.
   - `0`, negative values, floats and strings are rejected with a `ModelRegistryError` naming the file and `max_output_tokens`.
