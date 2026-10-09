@@ -220,3 +220,62 @@ Answers that come back with HTTP 200 (handled in `_answer`):
   `INVIO_GOOGLE_API_KEY`: a connectivity check on the cheapest model, a structured check with
   `RelevanceResult`, and one with `ItemSummary`. The structured checks confirm the converted
   schema is accepted.
+
+## R8 – SDK verification
+
+Verified on 2026-10-09 against `google-genai` 2.29.0 (installed by `uv add`), using small scripts
+with an `httpx.MockTransport` and the environment variables `GOOGLE_API_KEY`, `GEMINI_API_KEY`,
+`GOOGLE_GEMINI_BASE_URL=https://evil.test/` and `GOOGLE_GENAI_USE_VERTEXAI=true` all set.
+
+- **(a) mypy.** `from google import genai` and `from google.genai import errors, types` pass
+  `mypy --strict` with no override.
+- **(b) Client.** With `Client(vertexai=False, api_key=..., http_options=HttpOptions(base_url,
+  api_version="v1beta", timeout=<ms>, httpx_async_client=...))`:
+  - The request goes to `<base_url>/v1beta/models/<model>:generateContent`.
+  - It carries `x-goog-api-key` and no `authorization` header.
+  - It ignores all four environment variables (the key and host are the explicit ones).
+    The SDK still prints an informational "Both GOOGLE_API_KEY and GEMINI_API_KEY are set" line
+    when both are set; it has no effect.
+  - A 503 with `retry_options` unset is requested exactly once.
+- **(c) Body.**
+  - Top-level `systemInstruction` (`{"parts": [{"text": ...}], "role": "user"}`) and `contents`
+    (`[{"parts": [{"text": ...}], "role": "user"}]`).
+  - `generationConfig` holds `maxOutputTokens`, `responseMimeType`, `responseJsonSchema` and
+    `temperature`.
+  - **Differs from the plan**: `thinkingConfig` is serialized with the snake_case key
+    `thinking_level`, and the value is upper case (`"MINIMAL"`, `"LOW"`, ...), also when a lower
+    case string is passed (it is coerced to `types.ThinkingLevel`). The tests therefore assert
+    `generationConfig.thinkingConfig.thinking_level`. The Gemini API accepts both spellings
+    (proto JSON); the live test confirms it.
+  - An unset `temperature` is omitted; `temperature=0.0` is sent as `0.0`. An empty config gives
+    `"generationConfig": {}`.
+  - `responseJsonSchema` is passed through unchanged, including a property called `default`.
+- **(d) Errors.** 4xx raise `errors.ClientError`, 5xx `errors.ServerError`, both subclasses of
+  `errors.APIError`, with `.code` (int), `.status` (the gRPC status string) and `.message`
+  (the `error.message` string).
+  - **Differs from the plan**: `.details` is the *whole* parsed body (`{"error": {"code", "message",
+    "status", "details": [...]}}`), not the inner details list. The `RetryInfo`/`QuotaFailure`/
+    `ErrorInfo` entries are at `exc.details["error"]["details"]`. A missing `details` key is
+    simply absent. The provider reads that path defensively.
+  - `.response` is the `httpx.Response`; `.response.headers` includes `retry-after` when sent.
+  - `str(exc)` is `"<code> <status>. <whole body>"`: never used.
+  - No exception has a `__cause__`. Each status produced exactly one request.
+- **(e) Transport.** `httpx.ConnectError`, `ReadTimeout`, `ConnectTimeout`, `LocalProtocolError`
+  and `UnsupportedProtocol` propagate raw, unwrapped.
+- **(f) Non-JSON 200.** **Differs from the plan**: the SDK raises `json.JSONDecodeError` (not
+  `errors.UnknownApiResponseError`). `_classify` handles both. A 200 whose body is valid JSON
+  but not an object (`[1]`) returns a response with every field `None`; it falls into the
+  "no candidates" path.
+- **(g) Response attributes.**
+  - `candidates[0].finish_reason` is a `types.FinishReason` member (a `str` enum), and
+    `prompt_feedback.block_reason` a `types.BlockedReason`; `safety_ratings[].category` is a
+    `types.HarmCategory`. `.name` gives the REST spelling.
+  - `prompt_feedback.block_reason_message`, `safety_ratings[].blocked` and
+    `usage_metadata.prompt_token_count` / `candidates_token_count` / `thoughts_token_count` exist
+    as planned; `parts[].thought` is `True` for thought parts.
+  - An unknown finish reason does not fail: it becomes a member with that name and a
+    `UserWarning`, so it is reported as a stopped answer.
+  - A candidate without `content` or `parts` gives `content is None` / `parts is None`. A
+    blocked prompt gives `candidates is None`.
+- **(h) Closing.** `Client.aio` has an `aclose()`, but the caller-owned `httpx.AsyncClient` is
+  closed independently by `LoopClients`; `aio` holds no other resource, so it is not closed.
