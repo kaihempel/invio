@@ -50,19 +50,19 @@ Reused, unchanged:
 
 **Purpose**: Set up the branch, register the marker and create the empty modules.
 
-- [ ] T001 Switch to the feature branch the constitution requires ("Development Workflow": work
+- [X] T001 Switch to the feature branch the constitution requires ("Development Workflow": work
   happens on a branch named `gh-issue-<N>`). The worktree is currently on
   `worktree-track-integration`. Create and switch to `gh-issue-26` (or rename the worktree
   branch to it), and check that the current branch is `gh-issue-26`. Commit the spec artifacts in
   `specs/022-gh-issue-26/` as the first commit.
-- [ ] T002 Register the pytest marker in `pyproject.toml` `[tool.pytest.ini_options].markers`:
+- [X] T002 Register the pytest marker in `pyproject.toml` `[tool.pytest.ini_options].markers`:
   `"e2e: end-to-end scenarios over local fixtures (SQLite; MariaDB with INVIO_TEST_DATABASE_URL)"`.
   Do NOT add `db` to e2e tests (FR-017). Verify with `uv run pytest --markers | grep e2e`.
-- [ ] T003 [P] Create `tests/e2e_helpers.py` with a module docstring ("End-to-end fixtures:
+- [X] T003 [P] Create `tests/e2e_helpers.py` with a module docstring ("End-to-end fixtures:
   local feed server, SMTP sink, fake provider, network guard and scenario environment (not
   shipped). Contract: specs/022-gh-issue-26/contracts/e2e-harness.md.") and an `__all__` list.
   Follow the style of `tests/run_cli_helpers.py`.
-- [ ] T004 [P] Create `tests/test_e2e_scenarios.py` and `tests/test_e2e_process.py`, each with a
+- [X] T004 [P] Create `tests/test_e2e_scenarios.py` and `tests/test_e2e_process.py`, each with a
   module docstring and `pytestmark = pytest.mark.e2e`.
 
 ---
@@ -75,14 +75,14 @@ T009 goes in `tests/e2e_helpers.py`, so those tasks are sequential (same file). 
 
 **⚠️ CRITICAL**: No scenario can be written before this phase is done.
 
-- [ ] T005 Implement `E2EArticle` (frozen dataclass) in `tests/e2e_helpers.py` with the fields
+- [X] T005 Implement `E2EArticle` (frozen dataclass) in `tests/e2e_helpers.py` with the fields
   `slug: str` ("unique within a feed; URL path `/articles/<slug>.html`"), `title: str` ("unique;
   the fake provider routes by it"), `published_at: datetime` (UTC, "relative to the scenario
   clock"), `relevant: bool = True` ("`True` → score 0.9, `False` → score 0.1 (below
   `min_relevance` 0.6)") and `fail_at: Literal["relevance"] | None = None`. Add
   `initial_articles(now)`, which returns A1, A2, A3 (relevant) and X1 (off-topic), published at
   `now - 1..4 hours`.
-- [ ] T006 Implement `E2EFeed` in `tests/e2e_helpers.py`, wrapping
+- [X] T006 Implement `E2EFeed` in `tests/e2e_helpers.py`, wrapping
   `tests.http_helpers.LoopbackServer`:
   - `articles` list and an `add(article)` method;
   - `_render()` sets `routes["/feed.xml"]` (RSS 2.0, `Content-Type: application/rss+xml`, items
@@ -92,13 +92,13 @@ T009 goes in `tests/e2e_helpers.py`, so those tasks are sequential (same file). 
   - a static `routes["/robots.txt"]` = `"User-agent: *\nAllow: /\n"`;
   - properties `feed_url` and `requests`.
   Escape titles with `xml.sax.saxutils.escape`.
-- [ ] T007 Implement `scenario_provider(articles) -> RoutedFakeProvider` in
+- [X] T007 Implement `scenario_provider(articles) -> RoutedFakeProvider` in
   `tests/e2e_helpers.py`. It uses a relevance route callable `title -> step`: `RuntimeError("boom
   secret")` if the article's `fail_at == "relevance"`, `relevance_reply(0.9)` if relevant,
   otherwise `relevance_reply(0.1)`. Look the title up in a dict that the test may extend (needed
   for Scenario C's added article), and use the default summarize/synthesize replies. Unknown
   titles raise `AssertionError`.
-- [ ] T008 Implement the network guard in `tests/e2e_helpers.py`:
+- [X] T008 Implement the network guard in `tests/e2e_helpers.py`:
   - `class ExternalNetworkError(AssertionError)`;
   - fixture `no_external_network(monkeypatch)`: wrap `socket.socket.connect`,
     `socket.socket.connect_ex` and `socket.getaddrinfo`. Allow only hosts `127.0.0.0/8`, `::1`,
@@ -106,14 +106,14 @@ T009 goes in `tests/e2e_helpers.py`, so those tasks are sequential (same file). 
     access blocked: {host}")` (research R7);
   - in the same fixture, `monkeypatch.delenv` every variable ending in `_API_KEY` and
     `INVIO_SMTP_USER` / `INVIO_SMTP_PASSWORD` (`raising=False`).
-- [ ] T009 [P] Add a `pytest_sessionstart(session)` hook to `tests/conftest.py`, next to the
+- [X] T009 [P] Add a `pytest_sessionstart(session)` hook to `tests/conftest.py`, next to the
   existing `INVIO_REQUIRE_DEPLOY_TOOLS` handling. Read `INVIO_REQUIRE_TEST_DATABASE` at import
   time in `tests/db_helpers.py`, as `TEST_DATABASE_URL` is, because `isolated_settings` strips
   `INVIO_*` per test. If it equals `"1"` and `uses_sqlite()` is true, call
   `pytest.exit("INVIO_REQUIRE_TEST_DATABASE=1 but INVIO_TEST_DATABASE_URL is not a MariaDB URL",
   returncode=1)`. This runs before collection, so no `db` or `e2e` test runs on SQLite in the
   nightly job (contracts/ci-workflows.md, FR-016). Do not add a fixture for this.
-- [ ] T010 Implement `write_job_yaml(path, *, feed_url, recipients) -> Path` in
+- [X] T010 Implement `write_job_yaml(path, *, feed_url, recipients) -> Path` in
   `tests/e2e_helpers.py`, following data-model.md "Job YAML template":
   - schedule daily 07:00 `UTC`;
   - `notification.to` = `["reader-1@example.test", "reader-2@example.test"]`;
@@ -123,7 +123,7 @@ T009 goes in `tests/e2e_helpers.py`, so those tasks are sequential (same file). 
   - `archive: {enabled: true, base_url: https://archive.example.test/digests}`.
   Dump with `yaml.safe_dump`. Check the key names against `src/invio/config/job.py` and
   `docs/job.example.yaml`.
-- [ ] T011 Implement `E2EEnv` (dataclass) in `tests/e2e_helpers.py` with the fields from
+- [X] T011 Implement `E2EEnv` (dataclass) in `tests/e2e_helpers.py` with the fields from
   data-model.md (`tmp`, `database_url`, `archive_dir`, `job_name`, `job_yaml`, `feed`, `mail`,
   `provider`, `clock`, `assert_engine`, `runner`) and these methods:
   - `cli(*args) -> Result`: `CliRunner().invoke(invio.cli.main.app, list(args), env={"COLUMNS":
@@ -148,7 +148,7 @@ T009 goes in `tests/e2e_helpers.py`, so those tasks are sequential (same file). 
     copies.
   Read rows with `sqlalchemy.select` on `invio.db.models` (`Job`, `Run`, `Item`, `Digest`,
   `Notification`), filtered by the job id.
-- [ ] T012 Implement the fixture `e2e_env(tmp_path, monkeypatch, patched_providers,
+- [X] T012 Implement the fixture `e2e_env(tmp_path, monkeypatch, patched_providers,
   no_external_network, _server_engine, clean_jobs)` in
   `tests/e2e_helpers.py`. Steps:
   1. Start `E2EFeed` (with `initial_articles(clock())`) and the SMTP sink
@@ -171,7 +171,7 @@ T009 goes in `tests/e2e_helpers.py`, so those tasks are sequential (same file). 
   7. Teardown: stop the feed, sink and engine.
   Re-export the conftest fixtures it needs by importing `e2e_env` into both test modules (the
   same pattern as `run_cli` in `tests/run_cli_helpers.py`).
-- [ ] T013 Add `test_e2e_network_guard_blocks_external_hosts` in `tests/test_e2e_scenarios.py`
+- [X] T013 Add `test_e2e_network_guard_blocks_external_hosts` in `tests/test_e2e_scenarios.py`
   (contract "Guard self-test"). With `no_external_network` active:
   - `socket.create_connection(("93.184.216.34", 80), timeout=1)` raises `ExternalNetworkError`;
   - `socket.getaddrinfo("example.com", 80)` raises `ExternalNetworkError`;
@@ -189,16 +189,16 @@ the future.
 
 **Independent Test**: `uv run pytest -m e2e -k first_run`.
 
-- [ ] T014 [US1] Add `run_scenario_a(env) -> Result` in `tests/e2e_helpers.py`:
+- [X] T014 [US1] Add `run_scenario_a(env) -> Result` in `tests/e2e_helpers.py`:
   `env.setup_job()`, `env.make_due()`, `result = env.run_due()`, assert `result.exit_code == 0`,
   return the result. US2 and US3 reuse it.
-- [ ] T015 [US1] Add assertion helpers in `tests/e2e_helpers.py`:
+- [X] T015 [US1] Add assertion helpers in `tests/e2e_helpers.py`:
   - `mail_texts(env, recipient) -> list[str]`: the plain-text parts via
     `tests.smtp_helpers.parts`;
   - `archive_pages(env) -> list[Path]`;
   - `assert_no_external_resources(path)`: fail on `<script src=`, `<link` with
     `href="http`, and `url(http` / `@import` in the HTML (data-model "Observed outcomes").
-- [ ] T016 [US1] Write `test_e2e_first_run_delivers_digest_mail_and_archive(e2e_env)` in
+- [X] T016 [US1] Write `test_e2e_first_run_delivers_digest_mail_and_archive(e2e_env)` in
   `tests/test_e2e_scenarios.py`, implementing contract Scenario A items 1–7 exactly:
   - stdout contains the job name and `succeeded`;
   - 1 run `succeeded` with no errors;
@@ -211,7 +211,7 @@ the future.
   - job `locked_until is None` and `next_run_at == env.expected_next_run()` (exact, contract
     "Schedule check").
   Get the slug via `invio.notify.archive.slugify_job_name`.
-- [ ] T017 [US1] Create `tests/e2e_bootstrap/sitecustomize.py` (test-only, research R8).
+- [X] T017 [US1] Create `tests/e2e_bootstrap/sitecustomize.py` (test-only, research R8).
   Import only `invio.pipeline.deps` and replace its attribute `default_deps` with a wrapper that
   defaults `allow_networks` to `(IPv4Network("127.0.0.0/8"),)` when the caller passes none.
   `sitecustomize` runs before any other invio module is imported, so the later
@@ -220,7 +220,7 @@ the future.
   that would slow every subprocess start. Keep it import-safe (no side effects except the patch)
   and add a docstring that says it must never be packaged. T019 proves that it loaded (the feed
   server sees `/feed.xml`).
-- [ ] T018 [US1] Implement `FakeOllamaServer` in `tests/e2e_helpers.py`: a
+- [X] T018 [US1] Implement `FakeOllamaServer` in `tests/e2e_helpers.py`: a
   `http.server.ThreadingHTTPServer` on `127.0.0.1:0` that handles `POST /api/chat`.
   - Parse the JSON body and pick the reply: if `format` is a dict whose `properties` contain
     `score` → relevance JSON (score 0.9); if it contains `headline` → summary JSON (same shape as
@@ -230,7 +230,7 @@ the future.
     (`message.content`, `prompt_eval_count`, `eval_count`, `done: true`).
   - Record `(purpose, model)` per request in a thread-safe list.
   - Provide `start()`, `stop()` and `base_url`.
-- [ ] T019 [US1] Write `test_e2e_installed_command_runs_scenario_a(tmp_path, ...)` in
+- [X] T019 [US1] Write `test_e2e_installed_command_runs_scenario_a(tmp_path, ...)` in
   `tests/test_e2e_process.py` (contract "Separate-process smoke test", FR-019):
   - Start `E2EFeed`, the SMTP sink and `FakeOllamaServer`.
   - Locate the command with `Path(sys.executable).parent / "invio"`, and assert that it exists.
@@ -260,7 +260,7 @@ mails, and makes no new provider calls. A job that is not due is not run.
 
 **Independent Test**: `uv run pytest -m e2e -k rerun`.
 
-- [ ] T020 [US2] Write `test_e2e_rerun_without_new_articles_sends_nothing(e2e_env)` in
+- [X] T020 [US2] Write `test_e2e_rerun_without_new_articles_sends_nothing(e2e_env)` in
   `tests/test_e2e_scenarios.py`, implementing contract Scenario B items 1–5:
   1. `run_scenario_a(env)`, then `before = env.snapshot()`.
   2. `env.clock.advance(timedelta(days=1))`, `env.make_due()`, `env.run_due()` exits 0.
@@ -283,7 +283,7 @@ mails, and makes no new provider calls. A job that is not due is not run.
 
 **Independent Test**: `uv run pytest -m e2e -k new_article`.
 
-- [ ] T021 [US3] Write `test_e2e_new_article_is_the_only_item_processed(e2e_env)` in
+- [X] T021 [US3] Write `test_e2e_new_article_is_the_only_item_processed(e2e_env)` in
   `tests/test_e2e_scenarios.py`, implementing contract Scenario C items 1–6:
   1. `run_scenario_a(env)`, then `before = env.snapshot()`.
   2. Add `A4` (relevant, `published_at = clock() + 1 day - 1 hour`) through `env.feed.add` and
@@ -308,11 +308,11 @@ mail and archive still go out.
 
 **Independent Test**: `uv run pytest -m e2e -k partial`.
 
-- [ ] T022 [US4] Add a way to start an `E2EEnv` with a modified article set in
+- [X] T022 [US4] Add a way to start an `E2EEnv` with a modified article set in
   `tests/e2e_helpers.py`. For example, `env.set_articles([...])` re-renders the feed and rebuilds
   the provider's title table before `setup_job()`. Alternatively, use an indirect parametrization
   of `e2e_env`. Pick whichever keeps `e2e_env`'s signature simple.
-- [ ] T023 [US4] Write `test_e2e_one_failing_item_gives_partial_run_and_still_mails(e2e_env)` in
+- [X] T023 [US4] Write `test_e2e_one_failing_item_gives_partial_run_and_still_mails(e2e_env)` in
   `tests/test_e2e_scenarios.py`, implementing contract Scenario D items 1–5:
   1. Set A2 to `fail_at="relevance"`, then `run_scenario_a`-like steps (setup, `make_due`,
      `run_due` exits 0).

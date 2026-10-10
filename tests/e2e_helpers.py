@@ -380,9 +380,7 @@ class E2EEnv:
         with session_scope(session_factory(self.assert_engine)) as session:
             runs = tuple(
                 (run.status.value, tuple((run.stats or {}).get("errors", [])))
-                for run in session.scalars(
-                    select(Run).where(Run.job_id == job_id).order_by(Run.id)
-                )
+                for run in session.scalars(select(Run).where(Run.job_id == job_id).order_by(Run.id))
             )
             items = {
                 item.title: (item.status.value, item.id)
