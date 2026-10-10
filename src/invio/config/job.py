@@ -291,12 +291,15 @@ class LLMConfig(_StrictModel):
 
     @model_validator(mode="after")
     def _fallback_differs(self) -> Self:
-        if self.fallback_provider is not None and self.fallback_provider == self.provider:
+        selections = {name: self.role(name) for name in get_args(LLMRole)}
+        # Checked only when a role is served by ``provider``; else no role can fall back to itself.
+        if self.fallback_provider == self.provider and any(
+            selection.provider == self.provider for selection in selections.values()
+        ):
             raise ValueError("fallback_provider must differ from provider")
         if self.fallback_models is not None and self.fallback_provider is None:
             raise ValueError("fallback_models requires fallback_provider")
-        for name in get_args(LLMRole):
-            selection = self.role(name)
+        for name, selection in selections.items():
             if selection.fallback is not None and selection.fallback.provider == selection.provider:
                 raise ValueError(
                     f"the fallback provider of role '{name}' must differ from its provider"

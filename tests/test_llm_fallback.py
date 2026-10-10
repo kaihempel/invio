@@ -165,13 +165,31 @@ async def test_a_fallback_logs_one_warning_without_message_text(
     assert SECRET not in str([r.__dict__ for r in caplog.records])
 
 
+async def test_a_failing_fallback_logs_its_error_class_without_message_text(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    provider, _, _ = _fallback(
+        [LLMUnavailableError(f"down: {SECRET}")], [LLMQuotaError(f"no credit: {SECRET}")]
+    )
+
+    with caplog.at_level(logging.WARNING, logger="invio.llm"), pytest.raises(LLMQuotaError):
+        await _complete(provider)
+
+    (record,) = [r for r in caplog.records if r.getMessage() == "llm.fallback_failed"]
+    assert record.__dict__["fallback_provider"] == "backup"
+    assert record.__dict__["error"] == "LLMQuotaError"
+    assert SECRET not in str([r.__dict__ for r in caplog.records])
+
+
 async def test_no_warning_without_fallback(caplog: pytest.LogCaptureFixture) -> None:
     provider, _, _ = _fallback([FakeReply("ok")], [])
 
     with caplog.at_level(logging.WARNING, logger="invio.llm"):
         await _complete(provider)
 
-    assert "llm.fallback" not in [r.getMessage() for r in caplog.records]
+    messages = [r.getMessage() for r in caplog.records]
+    assert "llm.fallback" not in messages
+    assert "llm.fallback_failed" not in messages
 
 
 async def test_the_primary_is_retried_before_falling_back() -> None:

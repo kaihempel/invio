@@ -19,6 +19,7 @@ from sqlalchemy import Engine
 from invio.config.job import (
     LLMConfig,
     LLMRole,
+    LLMRoleModel,
     RoleSelection,
     SourceConfig,
     YoutubeChannelSource,
@@ -28,7 +29,13 @@ from invio.config.settings import Settings
 from invio.db.session import check_database_url, create_db_engine, session_factory
 from invio.db.types import utcnow
 from invio.domain import Candidate
-from invio.graph.ports import DeliveryReport, ProviderBinding, RoleBinding, RunDeps
+from invio.graph.ports import (
+    DeliveryReport,
+    FallbackBinding,
+    ProviderBinding,
+    RoleBinding,
+    RunDeps,
+)
 from invio.llm.base import LLMProvider
 from invio.llm.factory import get_provider
 from invio.llm.registry import ModelRegistry, default_registry
@@ -116,18 +123,19 @@ async def default_deps(
 
             def bind(selection: RoleSelection) -> RoleBinding:
                 name = selection.provider.value
-                if selection.fallback is None:
-                    return RoleBinding(
-                        provider=provider(name), provider_name=name, model=selection.model
+                fallback = None
+                if selection.fallback is not None:
+                    fallback_name = selection.fallback.provider.value
+                    fallback = FallbackBinding(
+                        provider=provider(fallback_name),
+                        provider_name=fallback_name,
+                        model=selection.fallback.model,
                     )
-                fallback_name = selection.fallback.provider.value
                 return RoleBinding(
                     provider=provider(name),
                     provider_name=name,
                     model=selection.model,
-                    fallback=provider(fallback_name),
-                    fallback_name=fallback_name,
-                    fallback_model=selection.fallback.model,
+                    fallback=fallback,
                 )
 
             return ProviderBinding(
@@ -159,19 +167,31 @@ async def default_deps(
 
 
 def _warn_unconfigured_fallback(llm_config: LLMConfig) -> None:
-    """Warn when ``fallback_provider`` is set but some role gets no fallback from it.
+    """Warn when the job-wide fallback is incomplete or unused.
 
     ``fallback_provider`` alone (the old config form) names no models, so the run goes on
-    without a fallback for the roles that have no fallback of their own.
+    without a fallback for the roles that have no fallback of their own
+    (``llm.fallback_unconfigured``). ``fallback_models`` is never used when every role has its
+    own fallback (``llm.fallback_models_unused``).
     """
-    if llm_config.fallback_provider is None or llm_config.fallback_models is not None:
+    if llm_config.fallback_provider is None:
         return
-    roles = [role for role in get_args(LLMRole) if llm_config.role(role).fallback is None]
-    if roles:
+    roles = [role for role in get_args(LLMRole) if not _has_own_fallback(llm_config, role)]
+    if llm_config.fallback_models is None and roles:
         logger.warning(
             "llm.fallback_unconfigured",
             extra={"fallback_provider": llm_config.fallback_provider.value, "roles": roles},
         )
+    elif llm_config.fallback_models is not None and not roles:
+        logger.warning(
+            "llm.fallback_models_unused",
+            extra={"fallback_provider": llm_config.fallback_provider.value},
+        )
+
+
+def _has_own_fallback(llm_config: LLMConfig, role: LLMRole) -> bool:
+    entry = getattr(llm_config.models, role)
+    return isinstance(entry, LLMRoleModel) and entry.fallback is not None
 
 
 async def _close_all(

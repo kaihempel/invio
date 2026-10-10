@@ -55,8 +55,9 @@ llm:
   `LLMModels.fast`/`smart` become `str | LLMRoleModel`.
 - `LLMConfig.fallback_models: LLMModels-like (strings only) | None = None`;
   `fallback_models` without `fallback_provider` is a validation error.
-- Keep the existing rule `fallback_provider != provider`; additionally a role's effective
-  fallback provider must differ from the role's effective provider.
+- Keep the existing rule `fallback_provider != provider` while some role is served by
+  `provider`; additionally a role's effective fallback provider must differ from the role's
+  effective provider.
 - `LLMConfig.role(name)` resolves the shorthand to a frozen `RoleSelection(provider, model,
   fallback: LLMTarget | None)`: role fallback first, else `fallback_provider` + the
   `fallback_models` entry, else none.
@@ -66,7 +67,8 @@ llm:
 
 `fallback_provider` without `fallback_models` (and no role fallback) still validates; at run
 start (`provider_for`) log a warning `llm.fallback_unconfigured` once and run without a fallback,
-as today.
+as today. `fallback_models` that no role uses (every role has its own fallback) logs
+`llm.fallback_models_unused`.
 
 ### 3. Runtime
 
@@ -75,7 +77,8 @@ as today.
   `LLMRateLimitError` (incl. `LLMQuotaError`) it logs `llm.fallback` (warning: primary provider,
   primary model, fallback provider, fallback model, error class — never the message) and calls
   `fallback` with `fallback_model`. `LLMAuthError`, `LLMInvalidRequestError`,
-  `LLMInvalidOutputError` and non-LLM errors propagate untouched. Fallback errors propagate.
+  `LLMInvalidOutputError` and non-LLM errors propagate untouched. Fallback errors propagate
+  after an `llm.fallback_failed` warning (same fields).
   Stateless per call (safe under concurrency). Module must not import `invio.graph`.
 - Retries happen **before** the fallback: compose `FallbackProvider(RetryingProvider(primary),
   RetryingProvider(fallback))`, so `load_job` builds the per-role providers instead of wrapping
@@ -85,8 +88,9 @@ as today.
   `FallbackProvider` stamps on every result (and on `LLMInvalidOutputError.usage`);
   `_record_usage` uses `usage.provider or ctx.provider_name` and `usage.model or model`, and
   prices with the model actually used.
-- `ProviderBinding` describes each role (`fast`, `smart`: provider, provider name, model,
-  optional fallback provider/name/model) so the stage contexts get the right provider per role.
+- `ProviderBinding` describes each role (`RoleBinding` for `fast`, `smart`: provider, provider
+  name, model and an optional `FallbackBinding` of provider, provider name and model) so the
+  stage contexts get the right provider per role.
   Providers for the same provider name are built once per run and all are closed on exit.
 - Every model (primary and fallback) is checked with `registry.require(model, provider)` when
   binding, before any call.

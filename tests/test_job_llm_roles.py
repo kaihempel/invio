@@ -170,6 +170,25 @@ def test_the_job_wide_rule_still_applies(job_data: dict[str, Any]) -> None:
     assert errors == [(("llm",), "Value error, fallback_provider must differ from provider")]
 
 
+def test_fallback_provider_may_equal_provider_when_no_role_uses_it(
+    job_data: dict[str, Any],
+) -> None:
+    on_anthropic = {"provider": "anthropic", "model": "haiku"}
+    _llm(
+        job_data,
+        models={"fast": on_anthropic, "smart": {**on_anthropic, "model": "sonnet"}},
+        fallback_provider="openai",
+        fallback_models={"fast": "gpt-small", "smart": "gpt-large"},
+    )
+
+    llm = JobConfig.model_validate(job_data).llm
+
+    assert llm.role("fast") == RoleSelection(
+        ANTHROPIC, "haiku", LLMTarget(provider=OPENAI, model="gpt-small")
+    )
+    assert llm.role("smart").fallback == LLMTarget(provider=OPENAI, model="gpt-large")
+
+
 @pytest.mark.parametrize(
     ("models", "line"),
     [

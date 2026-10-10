@@ -510,19 +510,27 @@ llm:
 
 A role's fallback is its own `fallback`, else `fallback_provider` with the role's
 `fallback_models` entry. `fallback_models` needs `fallback_provider`, `fallback_provider` must
-differ from `provider`, and a role's fallback provider must differ from the role's provider.
-`fallback_provider` without `fallback_models` (the old form) still validates; such a run logs
-`llm.fallback_unconfigured` once and runs without a fallback. Every model, fallbacks included,
-must be in the registry for its provider; this is checked when the run starts, before any call.
+differ from `provider` (unless no role uses `provider`), and a role's fallback provider must
+differ from the role's provider. `fallback_provider` without `fallback_models` (the old form)
+still validates; such a run logs `llm.fallback_unconfigured` once and runs without a fallback.
+`fallback_models` that no role uses (every role has its own `fallback`) logs
+`llm.fallback_models_unused`. Every model, fallbacks included, must be in the registry for its
+provider, and every provider needs its API key; both are checked when the run starts, before
+any call.
 
 A request goes to the role's provider first and is retried there on transient errors as usual.
 If it still fails because the provider is unavailable or rate-limited (`LLMUnavailableError`,
 `LLMRateLimitError`, `LLMQuotaError`), the same request goes to the fallback with the fallback
 model, and one `llm.fallback` warning is logged (provider, model, fallback provider, fallback
 model and error class; never the error message). Authentication errors, rejected requests and
-invalid structured answers never fall back. The `llm_usage` row of a call names the provider
-and model that actually answered and is priced with that model. Each provider is built once per
-run, also when several roles or fallbacks name it.
+invalid structured answers never fall back. If the fallback fails too, `llm.fallback_failed`
+(same fields) is logged and its error ends the call. The `llm_usage` row of a call names the
+provider and model that actually answered and is priced with that model; the failed requests to
+the primary report no usage and leave no row. Each provider is built once per run, also when
+several roles or fallbacks name it.
+
+There is no circuit breaker: during a long outage every call runs the primary's full retry
+policy before it reaches the fallback, so a run gets slower but still completes.
 
 ### Mistral
 

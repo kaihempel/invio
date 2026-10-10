@@ -215,17 +215,14 @@ def _composed(role: RoleBinding, deps: RunDeps) -> RoleBinding:
     that still fails with an outage or a rate limit hands the request to the fallback.
     """
     provider: LLMProvider = RetryingProvider(role.provider, policy=deps.retry, sleep=deps.sleep)
-    if (
-        role.fallback is not None
-        and role.fallback_name is not None
-        and role.fallback_model is not None
-    ):
+    fallback = role.fallback
+    if fallback is not None:
         provider = FallbackProvider(
             provider,
-            RetryingProvider(role.fallback, policy=deps.retry, sleep=deps.sleep),
+            RetryingProvider(fallback.provider, policy=deps.retry, sleep=deps.sleep),
             primary_name=role.provider_name,
-            fallback_name=role.fallback_name,
-            fallback_model=role.fallback_model,
+            fallback_name=fallback.provider_name,
+            fallback_model=fallback.model,
         )
     return dataclasses.replace(role, provider=provider)
 

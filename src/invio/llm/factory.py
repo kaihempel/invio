@@ -23,8 +23,6 @@ from invio.llm.registry import ModelRegistry, default_registry
 
 logger = logging.getLogger("invio.llm")
 
-Role = LLMRole
-
 _MAX_TEMPERATURE = 2.0
 
 
@@ -186,7 +184,7 @@ def get_provider(
 
 def resolve(
     llm_config: LLMConfig,
-    role: Role,
+    role: LLMRole,
     settings: Settings | None = None,
     *,
     registry: ModelRegistry | None = None,
@@ -197,7 +195,7 @@ def resolve(
     be declared in the registry for that provider; this is checked before the provider is
     built, so registry problems surface even when the API key is missing.
     """
-    roles = get_args(Role)
+    roles = get_args(LLMRole)
     if role not in roles:
         raise LLMConfigError(f"unknown LLM role '{role}'; expected one of: {', '.join(roles)}")
     selection = llm_config.role(role)

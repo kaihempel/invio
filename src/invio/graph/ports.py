@@ -22,6 +22,7 @@ from invio.retry import RetrySettings, Sleep
 
 __all__ = [
     "DeliveryReport",
+    "FallbackBinding",
     "Notifier",
     "PageFetcher",
     "ProgressCounts",
@@ -63,23 +64,22 @@ class Notifier(Protocol):
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class RoleBinding:
-    """The provider and model of one role (``fast`` or ``smart``), with its optional fallback.
-
-    ``fallback``, ``fallback_name`` and ``fallback_model`` are all set or all ``None``.
-    """
+class FallbackBinding:
+    """The provider and model a role falls back to when its provider is down or rate-limited."""
 
     provider: LLMProvider
     provider_name: str
     model: str
-    fallback: LLMProvider | None = None
-    fallback_name: str | None = None
-    fallback_model: str | None = None
 
-    def __post_init__(self) -> None:
-        parts = (self.fallback, self.fallback_name, self.fallback_model)
-        if any(part is None for part in parts) and any(part is not None for part in parts):
-            raise ValueError("fallback, fallback_name and fallback_model go together")
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class RoleBinding:
+    """The provider and model of one role (``fast`` or ``smart``), with its optional fallback."""
+
+    provider: LLMProvider
+    provider_name: str
+    model: str
+    fallback: FallbackBinding | None = None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

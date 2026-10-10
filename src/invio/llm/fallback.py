@@ -11,8 +11,13 @@ Compose it around retrying providers, ``FallbackProvider(RetryingProvider(primar
 RetryingProvider(fallback))``, so the primary's transient errors are retried before falling
 back. The provider and model that actually answered are stamped on the returned
 :class:`~invio.llm.base.Usage` (and on ``LLMInvalidOutputError.usage``) so usage rows name and
-price them. Each call is independent (no state), so concurrent calls are safe. Only
-``invio.llm.base`` is imported; the module knows nothing of the graph.
+price them. When the fallback fails too, ``llm.fallback_failed`` is logged and its error
+propagates.
+
+Each call is independent (no state), so concurrent calls are safe. The flip side: there is no
+circuit breaker, so during a long outage every call runs the primary's full retry policy before
+it reaches the fallback. Only ``invio.llm.base`` is imported; the module knows nothing of the
+graph.
 """
 
 import dataclasses
@@ -29,12 +34,12 @@ from invio.llm.base import (
     Usage,
 )
 
-__all__ = ["FallbackProvider", "is_fallback_error"]
+__all__ = ["FallbackProvider"]
 
 logger = logging.getLogger("invio.llm")
 
 
-def is_fallback_error(err: BaseException) -> bool:
+def _is_fallback_error(err: BaseException) -> bool:
     """An outage or a rate limit (an exhausted quota too) of the primary provider."""
     return isinstance(err, LLMUnavailableError | LLMRateLimitError)
 
@@ -70,22 +75,27 @@ class FallbackProvider:
         try:
             result, usage = await self._attempt(self._primary, self._primary_name, model, send)
         except Exception as err:
-            if not is_fallback_error(err):
+            if not _is_fallback_error(err):
                 raise
-            logger.warning(
-                "llm.fallback",
-                extra={
-                    "provider": self._primary_name,
-                    "model": model,
-                    "fallback_provider": self._fallback_name,
-                    "fallback_model": self._fallback_model,
-                    "error": type(err).__name__,
-                },
-            )
-            result, usage = await self._attempt(
-                self._fallback, self._fallback_name, self._fallback_model, send
-            )
+            logger.warning("llm.fallback", extra=self._log_fields(model, err))
+            try:
+                result, usage = await self._attempt(
+                    self._fallback, self._fallback_name, self._fallback_model, send
+                )
+            except Exception as fallback_err:
+                logger.warning("llm.fallback_failed", extra=self._log_fields(model, fallback_err))
+                raise
         return result, usage
+
+    def _log_fields(self, model: str, err: Exception) -> dict[str, str]:
+        """Providers, models and the error class of a fallback; never the error message."""
+        return {
+            "provider": self._primary_name,
+            "model": model,
+            "fallback_provider": self._fallback_name,
+            "fallback_model": self._fallback_model,
+            "error": type(err).__name__,
+        }
 
     @staticmethod
     async def _attempt[R](
