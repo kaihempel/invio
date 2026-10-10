@@ -13,7 +13,7 @@ import os
 import re
 import secrets
 import stat
-from collections.abc import Callable, Hashable, Mapping
+from collections.abc import Callable, Hashable, Iterable, Mapping
 from enum import StrEnum
 from pathlib import Path
 from typing import Annotated, Any, Final, Literal, Self, get_args
@@ -62,7 +62,9 @@ __all__ = [
     "Weekday",
     "YoutubeChannelSource",
     "YoutubePlaylistSource",
+    "clean_keywords",
     "dump_yaml",
+    "dump_yaml_data",
     "job_json_schema",
     "known_timezones",
     "load_yaml",
@@ -202,6 +204,44 @@ class KeywordsConfig(_StrictModel):
     any: list[_Keyword] = Field(default_factory=list)
     all: list[_Keyword] = Field(default_factory=list)
     exclude: list[_Keyword] = Field(default_factory=list)
+
+
+def _split_keywords(values: Iterable[str], warnings: list[str] | None) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for raw in values:
+        parts = [part.strip() for part in raw.split(",")]
+        if len(parts) > 1 and warnings is not None:
+            warnings.append(f"'{raw.strip()}' split at commas into separate keywords")
+        for part in parts:
+            if part and part.casefold() not in seen:
+                seen.add(part.casefold())
+                result.append(part)
+    return result
+
+
+def clean_keywords(
+    any_: Iterable[str], all_: Iterable[str], exclude: Iterable[str], *, note_splits: bool = True
+) -> tuple[dict[str, list[str]], list[str]]:
+    """Return the ``any``/``all``/``exclude`` lists cleaned, and notes on what changed.
+
+    Splits entries at commas (keywords are edited comma-joined), strips them, drops empty ones
+    and case-insensitive duplicates (first wins) and drops excludes that are also include
+    keywords. ``note_splits=False`` leaves the comma splits out of the notes (for input that is
+    comma-joined by design). Idempotent.
+    """
+    warnings: list[str] = []
+    split_notes = warnings if note_splits else None
+    any_list = _split_keywords(any_, split_notes)
+    all_list = _split_keywords(all_, split_notes)
+    included = {kw.casefold() for kw in (*any_list, *all_list)}
+    exclude_list: list[str] = []
+    for kw in _split_keywords(exclude, split_notes):
+        if kw.casefold() in included:
+            warnings.append(f"'{kw}' removed from exclude: it is also an include keyword")
+        else:
+            exclude_list.append(kw)
+    return {"any": any_list, "all": all_list, "exclude": exclude_list}, warnings
 
 
 class SearchConfig(_StrictModel):
@@ -680,31 +720,39 @@ def load_yaml(path: str | os.PathLike[str]) -> JobConfig:
 
 
 class _JobYamlDumper(yaml.SafeDumper):
-    """SafeDumper that double-quotes strings containing NEL (U+0085).
+    """SafeDumper for readable job YAML.
 
-    With ``allow_unicode`` PyYAML writes NEL raw into single-quoted scalars, where a reader folds
-    it into a space; double quotes escape it as ``\\N``.
+    Multi-line strings become ``|`` block scalars. Strings containing NEL (U+0085) are
+    double-quoted: with ``allow_unicode`` PyYAML writes NEL raw into other styles, where a reader
+    folds it into a space; double quotes escape it as ``\\N``.
     """
 
 
 def _represent_str(dumper: yaml.SafeDumper, value: str) -> yaml.ScalarNode:
     if "\x85" in value:
         return dumper.represent_scalar("tag:yaml.org,2002:str", value, style='"')
+    if "\n" in value:  # PyYAML falls back to a quoted style where a block cannot hold it
+        return dumper.represent_scalar("tag:yaml.org,2002:str", value, style="|")
     return dumper.represent_str(value)
 
 
 _JobYamlDumper.add_representer(str, _represent_str)
 
 
-def dump_yaml(config: JobConfig) -> str:
-    """Render a job as YAML: every field (defaults and ``None`` included) in definition order."""
+def dump_yaml_data(data: Mapping[str, Any]) -> str:
+    """Render plain data (a job or a part of one) in the job file style, keys in given order."""
     return yaml.dump(
-        config.model_dump(mode="json"),
+        dict(data),
         Dumper=_JobYamlDumper,
         sort_keys=False,
         allow_unicode=True,
         default_flow_style=False,
     )
+
+
+def dump_yaml(config: JobConfig) -> str:
+    """Render a job as YAML: every field (defaults and ``None`` included) in definition order."""
+    return dump_yaml_data(config.model_dump(mode="json"))
 
 
 def _create_temp(target: Path) -> tuple[int, Path]:

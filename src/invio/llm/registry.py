@@ -82,6 +82,10 @@ class _RegistryFile(BaseModel):
     models: dict[Annotated[str, Field(min_length=1)], _ModelEntry]
 
 
+def _total_price(info: ModelInfo) -> Decimal:
+    return info.input_price_per_mtok + info.output_price_per_mtok
+
+
 class ModelRegistry:
     """Immutable mapping ``model_id -> ModelInfo``."""
 
@@ -105,11 +109,12 @@ class ModelRegistry:
 
     def cheapest(self, provider: str) -> ModelInfo | None:
         """Return the model of ``provider`` with the lowest input + output price (ties: by id)."""
-        return min(
-            self.models_for(provider),
-            key=lambda info: info.input_price_per_mtok + info.output_price_per_mtok,
-            default=None,
-        )
+        return min(self.models_for(provider), key=_total_price, default=None)
+
+    def most_expensive(self, provider: str) -> ModelInfo | None:
+        """Return the model of ``provider`` with the highest input + output price (ties: by id)."""
+        # ``models_for`` is ordered by id and ``max`` keeps the first of equal elements.
+        return max(self.models_for(provider), key=_total_price, default=None)
 
     def require(self, model_id: str, provider: str) -> ModelInfo:
         """Return the entry of ``model_id``; ``LLMConfigError`` unless ``provider`` owns it."""

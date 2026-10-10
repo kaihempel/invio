@@ -376,6 +376,31 @@ def test_cheapest_sums_both_prices_and_breaks_ties_by_id(tmp_path: Path) -> None
     assert registry.cheapest("nobody") is None
 
 
+def test_most_expensive_sums_both_prices_and_breaks_ties_by_lowest_id(tmp_path: Path) -> None:
+    write_registry(
+        tmp_path,
+        "acme",
+        {
+            "acme-b": {**ENTRY, "input_price_per_mtok": 5, "output_price_per_mtok": 5},
+            "acme-a": {**ENTRY, "input_price_per_mtok": 0, "output_price_per_mtok": 10},
+            "acme-c": {**ENTRY, "input_price_per_mtok": 1, "output_price_per_mtok": 1},
+        },
+    )
+    models_dir = write_registry(tmp_path, "zeta", {"zeta-1": {**ENTRY, "input_price_per_mtok": 99}})
+    registry = load_registry([models_dir])
+
+    best = registry.most_expensive("acme")
+
+    assert best is not None
+    assert best.model_id == "acme-a"  # 0 + 10 ties with 5 + 5; "acme-a" sorts first
+    zeta = registry.most_expensive("zeta")
+    assert zeta is not None and zeta.model_id == "zeta-1"  # other providers' models are ignored
+
+
+def test_most_expensive_unknown_provider_is_none(tmp_path: Path) -> None:
+    assert _three_models(tmp_path).most_expensive("nobody") is None
+
+
 def test_require_returns_the_entry_of_that_provider(tmp_path: Path) -> None:
     registry = _three_models(tmp_path)
 

@@ -72,6 +72,13 @@ async def test_roles_resolve_to_their_models(
     assert [r.model for r in fake.requests] == [fast_model, smart_model]
 
 
+def test_registered_providers_is_sorted_and_contains_the_shipped_ones() -> None:
+    names = factory.registered_providers()
+
+    assert list(names) == sorted(names)
+    assert {"anthropic", "google", "mistral", "openai"} <= set(names)
+
+
 def test_unknown_role_lists_valid_roles(job_config: JobConfig, registry: Any) -> None:
     with pytest.raises(LLMConfigError) as info:
         resolve(job_config.llm, "medium", make_settings(), registry=registry)  # type: ignore[arg-type]

@@ -1,9 +1,9 @@
 """Shared prompt helpers: untrusted document text, the research interest and the language."""
 
-import re
 from typing import Final
 
 from invio.config.languages import language_name
+from invio.textsafe import neutralise_tags
 
 __all__ = [
     "MAX_TITLE_CHARS",
@@ -15,13 +15,7 @@ __all__ = [
 
 MAX_TITLE_CHARS: Final = 500  # title characters sent; a feed title can be arbitrarily long
 
-_OPEN: Final = chr(0x2039)  # single left angle quote, replaces "<" in neutralised tags
-_CLOSE: Final = chr(0x203A)  # single right angle quote, replaces ">" in neutralised tags
-# Any opening or closing delimiter tag, also with attributes, spaces around the slash or
-# trailing text, and also unterminated (no ">"), which the template's own tag would complete.
-# Each whitespace run has its own anchor ("<" or "/"): two adjacent runs would backtrack
-# quadratically on "<" followed by a long run of spaces.
-_DELIMITER = re.compile(r"<\s*(?:/\s*)?(?:document|title|content)\b[^<>]*>?", re.IGNORECASE)
+_TAGS: Final = ("document", "title", "content")
 
 
 def neutralise(text: str) -> str:
@@ -30,7 +24,7 @@ def neutralise(text: str) -> str:
     The text stays readable, but it can no longer open or close a delimiter. Length-preserving
     and idempotent.
     """
-    return _DELIMITER.sub(lambda m: m[0].replace("<", _OPEN).replace(">", _CLOSE), text)
+    return neutralise_tags(text, _TAGS)
 
 
 def document_message(title: str, content: str) -> str:

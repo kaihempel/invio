@@ -21,6 +21,7 @@ from invio.cli.wizard import (
     Q_KW_ALL,
     Q_KW_ANY,
     Q_KW_EXCLUDE,
+    Q_LANGUAGE,
     Q_MORE_EMAIL,
     Q_MORE_SOURCE,
     Q_NAME,
@@ -35,12 +36,14 @@ from invio.cli.wizard import (
     Q_TIMEZONE,
     Q_USE_ANYWAY,
     Q_WEEKDAY,
+    WizardPrefill,
     run_wizard,
+    validate_language,
 )
 from invio.config.job import JobConfig, JobConfigError, LimitsConfig, dump_yaml, validate_job
 from invio.llm.base import ModelRegistryError
 from invio.llm.registry import ModelInfo, ModelRegistry
-from tests.cli_helpers import FakeChecker, FakePrompter, make_registry
+from tests.cli_helpers import CLEAR, FakeChecker, FakePrompter, make_registry
 
 
 class Echo:
@@ -75,6 +78,7 @@ def script(
     sources: list[str | bool] = SOURCE,
     keywords: list[str | bool] = KEYWORDS,
     description: str = "New frameworks.",
+    language: str = "",
     llm: list[str | bool] = LLM,
     limits: list[str | bool] | None = None,
     save: bool = True,
@@ -87,6 +91,7 @@ def script(
         *sources,
         *keywords,
         description,
+        language,
         *llm,
         *([True] if limits is None else limits),
         save,
@@ -102,6 +107,7 @@ def run(
     name: str | None = None,
     echo: Echo | None = None,
     use_registry: bool = True,
+    prefill: WizardPrefill | None = None,
 ) -> tuple[tuple[str, JobConfig] | None, FakePrompter, Echo]:
     prompter = FakePrompter(answers)
     typed: Prompter = prompter  # the fake must satisfy the Prompter protocol
@@ -114,6 +120,7 @@ def run(
         name=name,
         default_timezone="UTC",
         echo=out,
+        prefill=prefill,
     )
     return result, prompter, out
 
@@ -259,6 +266,16 @@ def test_keywords_blank_items_dropped_and_empty_allowed() -> None:
     assert (kw.any, kw.all, kw.exclude) == (["a", "b"], [], [])
 
 
+def test_keywords_drop_duplicates_and_excludes_that_are_includes_with_a_warning() -> None:
+    result, _, out = run(script(keywords=["Heat Pump, heat pump, boiler", "", "BOILER, spam"]))
+
+    assert result is not None
+    kw = result[1].search.keywords
+    assert (kw.any, kw.all, kw.exclude) == (["Heat Pump", "boiler"], [], ["spam"])
+    assert "'BOILER' removed from exclude: it is also an include keyword" in out.err
+    assert "split at commas" not in out.err  # comma-joined input is expected here
+
+
 def test_empty_description_is_rejected() -> None:
     answers = script(description="  ")
     answers.insert(answers.index("  ") + 1, "now valid")
@@ -282,7 +299,7 @@ def test_questions_in_documented_order() -> None:
     order = [
         Q_NAME, Q_FREQUENCY, Q_WEEKDAY, Q_TIME, Q_TIMEZONE, Q_EMAIL, Q_MORE_EMAIL, Q_SUBJECT,
         Q_SOURCE_TYPE, Q_FEED_URL, Q_MORE_SOURCE, Q_KW_ANY, Q_KW_ALL, Q_KW_EXCLUDE, Q_DESC,
-        Q_PROVIDER, Q_FAST, Q_SMART, Q_KEEP_LIMITS, Q_SAVE,
+        Q_LANGUAGE, Q_PROVIDER, Q_FAST, Q_SMART, Q_KEEP_LIMITS, Q_SAVE,
     ]  # fmt: skip
     assert prompter.asked == order
 
@@ -537,3 +554,217 @@ def test_url_credentials_are_not_echoed() -> None:
 
     assert "down.example.com" in out.out
     assert "p@ss" not in out.out + out.err and "bob" not in out.out + out.err
+
+
+# --- language step (gh-issue-37) -------------------------------------------------------------
+
+
+def test_the_language_question_follows_the_description_with_default_en() -> None:
+    result, prompter, _ = run(script())
+
+    assert result is not None and result[1].language == "en"
+    assert prompter.defaults[Q_LANGUAGE] == "en"
+    assert Q_LANGUAGE == "Summary language (ISO 639-1 code)"
+
+
+@pytest.mark.parametrize("value", ["xx", "EN1", "english", "e", "  "])
+def test_an_invalid_language_is_rejected_inline_and_asked_again(value: str) -> None:
+    answers = script()
+    position = answers.index("New frameworks.") + 1
+    answers[position : position + 1] = [value, "de"]
+
+    result, prompter, _ = run(answers)
+
+    assert result is not None and result[1].language == "de"
+    assert [e for e in prompter.errors if e[0] == Q_LANGUAGE]
+
+
+def test_a_language_code_is_stored_lower_case() -> None:
+    result, _, _ = run(script(language="DE"))
+
+    assert result is not None and result[1].language == "de"
+
+
+@pytest.mark.parametrize(("value", "ok"), [("de", True), ("DE", True), ("xx", False), ("", False)])
+def test_validate_language(value: str, ok: bool) -> None:
+    assert (validate_language(value) is True) is ok
+    if not ok:
+        assert validate_language(value) == "unknown ISO 639-1 language code"
+
+
+def test_the_language_survives_a_re_ask(monkeypatch: pytest.MonkeyPatch) -> None:
+    real = wizard.validate_job
+    calls = 0
+
+    def flaky(data: Any) -> JobConfig:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise JobConfigError(None, ["language: boom"])
+        return real(data)
+
+    monkeypatch.setattr(wizard, "validate_job", flaky)
+    answers = script(language="de")
+    answers[-1:-1] = [""]  # the re-asked language step keeps the previous answer
+
+    result, prompter, _ = run(answers)
+
+    assert result is not None and result[1].language == "de"
+    assert prompter.asked.count(Q_LANGUAGE) == 2
+
+
+# --- prefill (gh-issue-37) -------------------------------------------------------------------
+
+
+def _prefill(**overrides: Any) -> WizardPrefill:
+    values: dict[str, Any] = {
+        "keywords": {"any": ["a"], "all": [], "exclude": ["x"]},
+        "description": "D",
+        "language": "de",
+        "provider": "openai",
+        "smart_model": "gpt-large",
+        "sources_note": "Try trade portals",
+    }
+    values.update(overrides)
+    return WizardPrefill(**values)
+
+
+def _keep_search_answers() -> list[str | bool]:
+    """A script that answers every search and LLM question with "keep the default"."""
+    return script(keywords=["", "", ""], description="", language="", llm=["", "gpt-small", ""])
+
+
+def test_prefill_supplies_the_defaults_of_every_search_question() -> None:
+    _, prompter, _ = run(_keep_search_answers(), prefill=_prefill())
+
+    assert prompter.defaults[Q_KW_ANY] == "a"
+    assert prompter.defaults[Q_KW_ALL] == ""
+    assert prompter.defaults[Q_KW_EXCLUDE] == "x"
+    assert prompter.defaults[Q_DESC] == "D"
+    assert prompter.defaults[Q_LANGUAGE] == "de"
+    assert prompter.defaults[Q_PROVIDER] == "openai"
+    assert prompter.defaults[Q_SMART] == "gpt-large"
+    assert prompter.defaults[Q_FAST] is None  # the fast model is not prefilled
+
+
+def test_keeping_all_prefilled_values_puts_them_in_the_job() -> None:
+    result, _, _ = run(_keep_search_answers(), prefill=_prefill())
+
+    assert result is not None
+    config = result[1]
+    assert config.search.keywords.any == ["a"]
+    assert config.search.keywords.all == []
+    assert config.search.keywords.exclude == ["x"]
+    assert config.search.semantic_description == "D"
+    assert config.language == "de"
+    assert (config.llm.provider.value, config.llm.models.smart) == ("openai", "gpt-large")
+
+
+def test_every_prefilled_value_can_be_replaced() -> None:
+    answers = script(
+        keywords=["b, c", "d", "e"],
+        description="New D",
+        language="fr",
+        llm=["mistral", "mistral-one", "mistral-one"],
+    )
+
+    result, _, _ = run(answers, prefill=_prefill())
+
+    assert result is not None
+    config = result[1]
+    assert config.search.keywords.any == ["b", "c"]
+    assert config.search.keywords.all == ["d"]
+    assert config.search.keywords.exclude == ["e"]
+    assert config.search.semantic_description == "New D"
+    assert config.language == "fr"
+    assert config.llm.provider.value == "mistral"
+
+
+def test_clearing_prefilled_keyword_lists_empties_them() -> None:
+    answers = script(
+        keywords=[CLEAR, CLEAR, CLEAR], description="", language="", llm=["", "gpt-small", ""]
+    )
+
+    result, _, _ = run(answers, prefill=_prefill())
+
+    assert result is not None
+    keywords = result[1].search.keywords
+    assert (keywords.any, keywords.all, keywords.exclude) == ([], [], [])
+
+
+def test_clearing_the_prefilled_description_is_rejected_and_asked_again() -> None:
+    answers = script(
+        keywords=["", "", ""], description=CLEAR, language="", llm=["", "gpt-small", ""]
+    )
+    answers[answers.index(CLEAR) + 1 : answers.index(CLEAR) + 1] = ["Second D"]
+
+    result, prompter, _ = run(answers, prefill=_prefill())
+
+    assert result is not None and result[1].search.semantic_description == "Second D"
+    assert [e for e in prompter.errors if e[0] == Q_DESC]
+
+
+def test_the_sources_hint_is_echoed_once_before_the_first_source_and_nothing_is_prefilled() -> None:
+    result, prompter, out = run(_keep_search_answers(), prefill=_prefill())
+
+    assert result is not None
+    assert out.out.count("Hint from the suggestion: Try trade portals") == 1
+    assert out.out.index("Hint from the suggestion") < out.out.index("checking")
+    assert prompter.defaults.get(Q_FEED_URL) == ""
+
+
+def test_no_hint_is_echoed_without_a_note() -> None:
+    _, _, out = run(_keep_search_answers(), prefill=_prefill(sources_note=None))
+
+    assert "Hint from the suggestion" not in out.out
+
+
+def test_a_prefilled_model_that_is_not_registered_falls_back_to_the_text_prompt() -> None:
+    answers = script(
+        keywords=["", "", ""],
+        description="",
+        language="",
+        llm=["openai", "gpt-small", OTHER, "gpt-large"],
+    )
+
+    _, prompter, _ = run(answers, prefill=_prefill(smart_model="gpt-unknown"))
+
+    assert prompter.defaults[Q_SMART] is None  # not offered as a select default
+    assert prompter.defaults[Q_SMART_ID] == "gpt-unknown"
+
+
+def test_a_validation_re_ask_keeps_the_edited_language(monkeypatch: pytest.MonkeyPatch) -> None:
+    real = wizard.validate_job
+    calls = 0
+
+    def flaky(data: Any) -> JobConfig:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise JobConfigError(None, ["language: boom"])
+        return real(data)
+
+    monkeypatch.setattr(wizard, "validate_job", flaky)
+    answers = script(
+        language="fr", keywords=["", "", ""], description="", llm=["", "gpt-small", ""]
+    )
+    answers[-1:-1] = [""]
+
+    result, prompter, _ = run(answers, prefill=_prefill())
+
+    assert result is not None and result[1].language == "fr"
+    assert prompter.defaults[Q_LANGUAGE] == "fr"
+
+
+# --- FakePrompter.CLEAR ----------------------------------------------------------------------
+
+
+def test_clear_answers_empty_even_with_a_default_and_runs_the_validator() -> None:
+    prompter = FakePrompter([CLEAR, "x"])
+
+    value = prompter.text("q", default="kept", validate=lambda v: True if v else "empty")
+
+    assert value == "x"
+    assert prompter.errors == [("q", "empty")]
+    assert FakePrompter([CLEAR]).text("q", default="kept") == ""
+    assert FakePrompter([""]).text("q", default="kept") == "kept"

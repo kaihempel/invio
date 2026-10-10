@@ -36,6 +36,22 @@ def test_full_run_creates_job_and_list_shows_it(job_cli: JobCli) -> None:
     )
 
 
+def test_the_summary_language_answer_is_stored(job_cli: JobCli) -> None:
+    job_cli.use(FakePrompter(script(language="DE")))
+
+    result = job_cli.invoke(["create"])
+
+    assert result.exit_code == 0, result.output
+    assert job_cli.service.get_by_name("ai-news").config.language == "de"
+
+
+def test_create_help_mentions_the_summary_language(job_cli: JobCli) -> None:
+    result = job_cli.invoke(["create", "--help"])
+
+    assert result.exit_code == 0
+    assert "summary language" in " ".join(result.stdout.split())
+
+
 def test_bad_email_then_good_email(job_cli: JobCli) -> None:
     prompter = FakePrompter(script(recipients=["me@example", "me@example.com", False]))
     job_cli.use(prompter)
@@ -277,6 +293,7 @@ class _InterruptAt(FakePrompter):
         w.Q_FEED_URL,
         w.Q_KW_ALL,
         w.Q_DESC,
+        w.Q_LANGUAGE,
         w.Q_SMART,
         w.Q_KEEP_LIMITS,
         w.Q_SAVE,

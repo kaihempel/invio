@@ -79,6 +79,12 @@ def _discover() -> None:
     _discovered = True
 
 
+def registered_providers() -> tuple[str, ...]:
+    """Return the sorted names of all registered providers (after module discovery)."""
+    _discover()
+    return tuple(sorted(_REGISTRY))
+
+
 class _LoggedProvider:
     """Validates call parameters and logs every call of the wrapped provider."""
 

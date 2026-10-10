@@ -7,7 +7,7 @@ touches storage or the terminal directly (output goes through the injected ``ech
 """
 
 import re
-from collections.abc import Callable, Collection
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Annotated, Any, Final, get_args
 
@@ -27,10 +27,12 @@ from invio.config.job import (
     RssSource,
     ScheduleConfig,
     Weekday,
+    clean_keywords,
     dump_yaml,
     known_timezones,
     validate_job,
 )
+from invio.config.languages import ISO_639_1
 from invio.llm.base import ModelRegistryError
 from invio.llm.registry import ModelRegistry
 from invio.services.jobs import JobNameError, check_job_name
@@ -39,9 +41,11 @@ from invio.sources.urls import redact
 __all__ = [
     "OTHER",
     "WARNING_NO_REGISTRY",
+    "WizardPrefill",
     "run_wizard",
     "validate_day_of_month",
     "validate_email",
+    "validate_language",
     "validate_limit",
     "validate_name",
     "validate_nonempty",
@@ -76,6 +80,7 @@ Q_KW_ANY: Final = "Keywords — any of (comma-separated)"
 Q_KW_ALL: Final = "Keywords — all of"
 Q_KW_EXCLUDE: Final = "Keywords — exclude"
 Q_DESC: Final = "Describe what you are looking for (finish with Esc+Enter)"
+Q_LANGUAGE: Final = "Summary language (ISO 639-1 code)"
 Q_PROVIDER: Final = "LLM provider"
 Q_FAST: Final = "Fast model"
 Q_SMART: Final = "Smart model"
@@ -164,6 +169,13 @@ def validate_nonempty(value: str) -> bool | str:
     return True if value.strip() else "must not be empty"
 
 
+def validate_language(value: str) -> bool | str:
+    """Accept an ISO 639-1 code in any case (the stored value is lower-case)."""
+    if value.strip().lower() in ISO_639_1:
+        return True
+    return "unknown ISO 639-1 language code"
+
+
 def _valid_int(adapter: TypeAdapter[Any], value: str) -> bool:
     text = value.strip()
     if not (text.isascii() and text.isdigit()):
@@ -214,11 +226,13 @@ class _Session:
     sources: list[dict[str, Any]] = field(default_factory=list)
     keywords: dict[str, list[str]] = field(default_factory=dict)
     description: str = ""
+    language: str = "en"
     provider: str = ""
     fast: str = ""
     smart: str = ""
     limits: dict[str, int] | None = None
     registry_broken: bool = False
+    sources_note: str | None = None
 
     def warn(self, message: str) -> None:
         self.echo(message, err=True)
@@ -234,6 +248,7 @@ class _Session:
         if self.day_of_month is not None:
             schedule["day_of_month"] = self.day_of_month
         data: dict[str, Any] = {
+            "language": self.language,
             "schedule": schedule,
             "notification": {"to": list(self.to), "subject": self.subject},
             "sources": [dict(source) for source in self.sources],
@@ -327,6 +342,9 @@ def _ask_source(s: _Session) -> tuple[tuple[str, str], dict[str, Any]]:
 
 
 def _step_sources(s: _Session) -> None:
+    if s.sources_note:
+        s.echo(f"Hint from the suggestion: {s.sources_note}")
+        s.sources_note = None  # once; a re-ask does not repeat it
     s.sources = []
     seen: set[tuple[str, str]] = set()
     while True:
@@ -340,25 +358,28 @@ def _step_sources(s: _Session) -> None:
             break
 
 
-def _split_keywords(text: str) -> list[str]:
-    return [item for item in (part.strip() for part in text.split(",")) if item]
-
-
 def _step_keywords(s: _Session) -> None:
     p = s.prompter
-    s.keywords = {
-        "any": _split_keywords(p.text(Q_KW_ANY, default=", ".join(s.keywords.get("any", [])))),
-        "all": _split_keywords(p.text(Q_KW_ALL, default=", ".join(s.keywords.get("all", [])))),
-        "exclude": _split_keywords(
-            p.text(Q_KW_EXCLUDE, default=", ".join(s.keywords.get("exclude", [])))
-        ),
-    }
+    answers = [
+        p.text(question, default=", ".join(s.keywords.get(key, [])))
+        for question, key in ((Q_KW_ANY, "any"), (Q_KW_ALL, "all"), (Q_KW_EXCLUDE, "exclude"))
+    ]
+    any_, all_, exclude = ([answer] for answer in answers)  # comma-joined: splitting is expected
+    s.keywords, notes = clean_keywords(any_, all_, exclude, note_splits=False)
+    for note in notes:
+        s.warn(note)
 
 
 def _step_description(s: _Session) -> None:
     s.description = s.prompter.text(
         Q_DESC, default=s.description, validate=validate_nonempty, multiline=True
     ).strip()
+
+
+def _step_language(s: _Session) -> None:
+    s.language = (
+        s.prompter.text(Q_LANGUAGE, default=s.language, validate=validate_language).strip().lower()
+    )
 
 
 def _known_models(s: _Session) -> list[str] | None:
@@ -373,15 +394,21 @@ def _known_models(s: _Session) -> list[str] | None:
         return None
 
 
-def _ask_model(s: _Session, select_question: str, id_question: str) -> str:
+def _ask_model(
+    s: _Session, select_question: str, id_question: str, default: str | None = None
+) -> str:
+    """Ask for a model; ``default`` preselects a registered model, else it prefills the text."""
     known = _known_models(s)
     while True:
-        question = id_question
         if known:
-            choice = s.prompter.select(select_question, [*known, OTHER])
+            choice = s.prompter.select(
+                select_question, [*known, OTHER], default=default if default in known else None
+            )
             if choice != OTHER:
                 return choice
-        model = s.prompter.text(question, validate=validate_nonempty).strip()
+        model = s.prompter.text(
+            id_question, default=default or "", validate=validate_nonempty
+        ).strip()
         if known is None or model in known:
             return model
         s.warn(
@@ -396,8 +423,8 @@ def _step_llm(s: _Session) -> None:
     s.provider = s.prompter.select(
         Q_PROVIDER, [p.value for p in LLMProvider], default=s.provider or None
     )
-    s.fast = _ask_model(s, Q_FAST, Q_FAST_ID)
-    s.smart = _ask_model(s, Q_SMART, Q_SMART_ID)
+    s.fast = _ask_model(s, Q_FAST, Q_FAST_ID, s.fast or None)
+    s.smart = _ask_model(s, Q_SMART, Q_SMART_ID, s.smart or None)
 
 
 def _step_limits(s: _Session) -> None:
@@ -425,6 +452,7 @@ _STEPS: Final[tuple[_Step, ...]] = (
     _step_sources,
     _step_keywords,
     _step_description,
+    _step_language,
     _step_llm,
     _step_limits,
 )
@@ -435,6 +463,7 @@ _STEP_FOR_PREFIX: Final[tuple[tuple[str, _Step], ...]] = (
     ("sources", _step_sources),
     ("search.keywords", _step_keywords),
     ("search", _step_description),
+    ("language", _step_language),
     ("llm", _step_llm),
     ("limits", _step_limits),
 )
@@ -451,6 +480,18 @@ def _owning_step(errors: list[str]) -> _Step | None:
     return None
 
 
+@dataclass(frozen=True, kw_only=True)
+class WizardPrefill:
+    """Answers to offer as prompt defaults (a drafted search definition); all stay editable."""
+
+    keywords: Mapping[str, Sequence[str]]
+    description: str
+    language: str = "en"
+    provider: str | None = None
+    smart_model: str | None = None
+    sources_note: str | None = None
+
+
 def run_wizard(
     prompter: Prompter,
     checker: SourceChecker,
@@ -460,8 +501,11 @@ def run_wizard(
     name: str | None = None,
     default_timezone: str = "UTC",
     echo: Echo = typer.echo,
+    prefill: WizardPrefill | None = None,
 ) -> tuple[str, JobConfig] | None:
     """Ask all steps and show the preview; ``None`` if the operator declined saving.
+
+    ``prefill`` seeds the prompt defaults of the search, language and LLM questions.
 
     Raises ``WizardAborted`` on Ctrl+C / EOF. Warnings go to ``echo(..., err=True)``.
     """
@@ -472,6 +516,13 @@ def run_wizard(
         echo=echo,
         default_timezone=default_timezone,
     )
+    if prefill is not None:
+        s.keywords = {key: list(values) for key, values in prefill.keywords.items()}
+        s.description = prefill.description
+        s.language = prefill.language
+        s.provider = prefill.provider or ""
+        s.smart = prefill.smart_model or ""
+        s.sources_note = prefill.sources_note
     s.name = (
         name if name is not None else prompter.text(Q_NAME, validate=validate_name(existing_names))
     )
