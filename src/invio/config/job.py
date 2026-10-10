@@ -13,8 +13,8 @@ import os
 import re
 import secrets
 import stat
-from dataclasses import dataclass
 from collections.abc import Callable, Hashable, Iterable, Mapping
+from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 from typing import Annotated, Any, Final, Literal, Self, get_args
