@@ -36,11 +36,17 @@ _FENCE_END = re.compile(r"\r?\n```[ \t]*\Z")
 
 @dataclass(frozen=True, slots=True)
 class Usage:
-    """Token usage behind one result; ``requests`` counts the provider requests summed in."""
+    """Token usage behind one result; ``requests`` counts the provider requests summed in.
+
+    ``provider`` and ``model`` name what actually answered when that can differ from what was
+    asked for (set by ``FallbackProvider``); ``None`` means the requested provider and model.
+    """
 
     input_tokens: int
     output_tokens: int
     requests: int = 1
+    provider: str | None = None
+    model: str | None = None
 
     def __post_init__(self) -> None:
         if self.input_tokens < 0:
@@ -51,10 +57,13 @@ class Usage:
             raise ValueError(f"requests must be >= 1, got {self.requests}")
 
     def __add__(self, other: "Usage") -> "Usage":
+        """Sum the counts; ``provider`` and ``model`` are kept from the left operand."""
         return Usage(
             self.input_tokens + other.input_tokens,
             self.output_tokens + other.output_tokens,
             self.requests + other.requests,
+            self.provider,
+            self.model,
         )
 
 

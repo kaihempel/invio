@@ -31,6 +31,12 @@ def test_usage_addition_sums_fields() -> None:
     assert Usage(1, 2) + Usage(3, 4) == Usage(4, 6, 2)
 
 
+def test_usage_addition_keeps_provider_and_model_of_the_left_operand() -> None:
+    assert Usage(1, 2).provider is None and Usage(1, 2).model is None
+    assert Usage(1, 2, 1, "p", "m") + Usage(3, 4, 1, "q", "n") == Usage(4, 6, 2, "p", "m")
+    assert Usage(1, 2) + Usage(3, 4, 1, "q", "n") == Usage(4, 6, 2)
+
+
 @pytest.mark.parametrize(
     "args", [(-1, 0, 1), (0, -1, 1), (0, 0, 0)], ids=["input", "output", "requests"]
 )

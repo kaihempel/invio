@@ -14,6 +14,7 @@ import re
 import secrets
 import stat
 from collections.abc import Callable, Hashable, Iterable, Mapping
+from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 from typing import Annotated, Any, Final, Literal, Self, get_args
@@ -24,12 +25,14 @@ import yaml
 from pydantic import (
     BaseModel,
     ConfigDict,
+    Discriminator,
     EmailStr,
     Field,
     HttpUrl,
     StrictBool,
     StrictFloat,
     StrictInt,
+    Tag,
     ValidationError,
     ValidationInfo,
     field_validator,
@@ -49,10 +52,15 @@ __all__ = [
     "JobYamlLoader",
     "KeywordsConfig",
     "LLMConfig",
+    "LLMFallbackModels",
     "LLMModels",
     "LLMProvider",
+    "LLMRole",
+    "LLMRoleModel",
+    "LLMTarget",
     "LimitsConfig",
     "NotificationConfig",
+    "RoleSelection",
     "RssSource",
     "ScheduleConfig",
     "SearchConfig",
@@ -252,25 +260,104 @@ class SearchConfig(_StrictModel):
     min_relevance: StrictFloat = Field(default=0.6, ge=0, le=1)
 
 
-class LLMModels(_StrictModel):
-    """Model names for the cheap and the capable tier."""
+LLMRole = Literal["fast", "smart"]
+"""The two model tiers a job uses: ``fast`` (cheap, per item) and ``smart`` (merging, digest)."""
 
-    fast: str = Field(min_length=1)
-    smart: str = Field(min_length=1)
+_ModelId = Annotated[str, Field(min_length=1)]
+
+
+class LLMTarget(_StrictModel):
+    """A model of a named provider (a role's fallback)."""
+
+    provider: LLMProvider
+    model: _ModelId
+
+
+class LLMRoleModel(_StrictModel):
+    """Long form of a role: its own provider (default ``llm.provider``) and fallback."""
+
+    provider: LLMProvider | None = None
+    model: _ModelId
+    fallback: LLMTarget | None = None
+
+
+def _role_form(value: object) -> str:
+    """Tag of a role entry: a mapping is the long form, anything else must be a model id."""
+    return "long_form" if isinstance(value, Mapping | LLMRoleModel) else "shorthand"
+
+
+# Discriminated by type, so a bad entry reports the problems of one form only.
+_RoleEntry = Annotated[
+    Annotated[_ModelId, Tag("shorthand")] | Annotated[LLMRoleModel, Tag("long_form")],
+    Discriminator(_role_form),
+]
+
+
+class LLMModels(_StrictModel):
+    """Model of the cheap and the capable tier: a model id of ``llm.provider`` or the long form."""
+
+    fast: _RoleEntry
+    smart: _RoleEntry
+
+
+class LLMFallbackModels(_StrictModel):
+    """Model ids of ``llm.fallback_provider`` for the roles without their own fallback."""
+
+    fast: _ModelId
+    smart: _ModelId
+
+
+@dataclass(frozen=True, slots=True)
+class RoleSelection:
+    """What one role resolves to: provider, model and the fallback, if any."""
+
+    provider: LLMProvider
+    model: str
+    fallback: LLMTarget | None
 
 
 class LLMConfig(_StrictModel):
-    """LLM provider selection."""
+    """LLM provider selection.
+
+    ``provider`` is the default provider of every role. A role's fallback is its own
+    ``fallback`` if set, else ``fallback_provider`` with the role's ``fallback_models`` entry.
+    ``fallback_provider`` alone (the old form) validates but configures no fallback.
+    """
 
     provider: LLMProvider
     models: LLMModels
     fallback_provider: LLMProvider | None = None
+    fallback_models: LLMFallbackModels | None = None
 
     @model_validator(mode="after")
     def _fallback_differs(self) -> Self:
-        if self.fallback_provider is not None and self.fallback_provider == self.provider:
+        selections = {name: self.role(name) for name in get_args(LLMRole)}
+        # Checked only when a role is served by ``provider``; else no role can fall back to itself.
+        if self.fallback_provider == self.provider and any(
+            selection.provider == self.provider for selection in selections.values()
+        ):
             raise ValueError("fallback_provider must differ from provider")
+        if self.fallback_models is not None and self.fallback_provider is None:
+            raise ValueError("fallback_models requires fallback_provider")
+        for name, selection in selections.items():
+            if selection.fallback is not None and selection.fallback.provider == selection.provider:
+                raise ValueError(
+                    f"the fallback provider of role '{name}' must differ from its provider"
+                )
         return self
+
+    def role(self, name: LLMRole) -> RoleSelection:
+        """Resolve role ``name`` (shorthand or long form) to its provider, model and fallback."""
+        entry: str | LLMRoleModel = getattr(self.models, name)
+        if isinstance(entry, str):
+            return RoleSelection(self.provider, entry, self._job_fallback(name))
+        fallback = entry.fallback if entry.fallback is not None else self._job_fallback(name)
+        return RoleSelection(entry.provider or self.provider, entry.model, fallback)
+
+    def _job_fallback(self, name: LLMRole) -> LLMTarget | None:
+        if self.fallback_provider is None or self.fallback_models is None:
+            return None
+        return LLMTarget(provider=self.fallback_provider, model=getattr(self.fallback_models, name))
 
 
 class LimitsConfig(_StrictModel):
@@ -652,6 +739,10 @@ _SOURCE_TAGS: Final = frozenset(
 )
 
 
+# Discriminator values of a role entry in ``LLMModels``; Pydantic puts them into its locations.
+_ROLE_FORM_TAGS: Final = frozenset({"shorthand", "long_form"})
+
+
 def _format_validation_error(exc: ValidationError) -> list[str]:
     """Render each Pydantic error as ``<dotted.loc>: <message>``."""
     lines: list[str] = []
@@ -664,6 +755,8 @@ def _format_validation_error(exc: ValidationError) -> list[str]:
             and loc[2] in _SOURCE_TAGS
         ):
             del loc[2]
+        if len(loc) > 3 and loc[:2] == ["llm", "models"] and loc[3] in _ROLE_FORM_TAGS:
+            del loc[3]
         text = ""
         for part in loc:
             text += f"[{part}]" if isinstance(part, int) else (f".{part}" if text else str(part))

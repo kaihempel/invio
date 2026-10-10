@@ -42,6 +42,16 @@ llm:
     fast: gpt-small
     smart: gpt-large
   fallback_provider: anthropic
+  fallback_models:              # used when the provider is down or rate-limited
+    fast: claude-haiku-4-5-20251001
+    smart: claude-sonnet-4-6
+# A role can also name its own provider and fallback (see README, "Per-role providers and
+# fallback"):
+#   models:
+#     smart:
+#       provider: anthropic
+#       model: claude-sonnet-4-6
+#       fallback: {provider: openai, model: gpt-large}
 limits:
   max_items_per_source: 20
   max_items_per_run: 100

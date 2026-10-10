@@ -21,7 +21,7 @@ progress and the rest stay unchanged, see :mod:`invio.graph.budget`). Persistenc
 import logging
 import re
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from math import ceil
 from typing import Annotated, Final, Literal
 
@@ -108,7 +108,11 @@ class ChunkSummary(BaseModel):
 
 @dataclass(frozen=True, kw_only=True, slots=True)
 class SummaryContext:
-    """Everything summarizing needs besides the item: job settings, provider, models, repos."""
+    """Everything summarizing needs besides the item: job settings, providers, models, repos.
+
+    ``provider`` and ``provider_name`` serve the ``fast`` role (short and map calls);
+    ``smart_provider`` and ``smart_provider_name`` the ``smart`` role (combine calls).
+    """
 
     job_id: int
     run_id: int | None
@@ -117,6 +121,8 @@ class SummaryContext:
     provider: LLMProvider
     provider_name: str
     fast_model: str
+    smart_provider: LLMProvider
+    smart_provider_name: str
     smart_model: str
     registry: ModelRegistry
     items: ItemRepository
@@ -469,6 +475,7 @@ async def _combine(
     tally: _Tally,
 ) -> ItemSummary:
     """Merge partial summaries with the ``smart`` model until one summary remains (reduce)."""
+    smart = replace(ctx, provider=ctx.smart_provider, provider_name=ctx.smart_provider_name)
     parts = len(partials)
     while True:
         merged: list[ItemSummary] = []
@@ -487,7 +494,7 @@ async def _combine(
             tally.calls += 1
             merged.append(
                 await call_structured(
-                    ctx,
+                    smart,
                     ItemSummary,
                     model=ctx.smart_model,
                     purpose=PURPOSE_COMBINE,

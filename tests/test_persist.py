@@ -132,6 +132,8 @@ def _contexts(
         provider=fake,
         provider_name="mistral",
         fast_model="fast-model",
+        smart_provider=fake,
+        smart_provider_name="mistral",
         smart_model="smart-model",
         registry=_REGISTRY,
         items=items,

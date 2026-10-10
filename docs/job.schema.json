@@ -69,7 +69,7 @@
     },
     "LLMConfig": {
       "additionalProperties": false,
-      "description": "LLM provider selection.",
+      "description": "LLM provider selection.\n\n``provider`` is the default provider of every role. A role's fallback is its own\n``fallback`` if set, else ``fallback_provider`` with the role's ``fallback_models`` entry.\n``fallback_provider`` alone (the old form) validates but configures no fallback.",
       "properties": {
         "provider": {
           "$ref": "#/$defs/LLMProvider"
@@ -87,6 +87,17 @@
             }
           ],
           "default": null
+        },
+        "fallback_models": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LLMFallbackModels"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
@@ -96,9 +107,9 @@
       "title": "LLMConfig",
       "type": "object"
     },
-    "LLMModels": {
+    "LLMFallbackModels": {
       "additionalProperties": false,
-      "description": "Model names for the cheap and the capable tier.",
+      "description": "Model ids of ``llm.fallback_provider`` for the roles without their own fallback.",
       "properties": {
         "fast": {
           "minLength": 1,
@@ -109,6 +120,42 @@
           "minLength": 1,
           "title": "Smart",
           "type": "string"
+        }
+      },
+      "required": [
+        "fast",
+        "smart"
+      ],
+      "title": "LLMFallbackModels",
+      "type": "object"
+    },
+    "LLMModels": {
+      "additionalProperties": false,
+      "description": "Model of the cheap and the capable tier: a model id of ``llm.provider`` or the long form.",
+      "properties": {
+        "fast": {
+          "oneOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "$ref": "#/$defs/LLMRoleModel"
+            }
+          ],
+          "title": "Fast"
+        },
+        "smart": {
+          "oneOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "$ref": "#/$defs/LLMRoleModel"
+            }
+          ],
+          "title": "Smart"
         }
       },
       "required": [
@@ -129,6 +176,64 @@
       ],
       "title": "LLMProvider",
       "type": "string"
+    },
+    "LLMRoleModel": {
+      "additionalProperties": false,
+      "description": "Long form of a role: its own provider (default ``llm.provider``) and fallback.",
+      "properties": {
+        "provider": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LLMProvider"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "model": {
+          "minLength": 1,
+          "title": "Model",
+          "type": "string"
+        },
+        "fallback": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LLMTarget"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "model"
+      ],
+      "title": "LLMRoleModel",
+      "type": "object"
+    },
+    "LLMTarget": {
+      "additionalProperties": false,
+      "description": "A model of a named provider (a role's fallback).",
+      "properties": {
+        "provider": {
+          "$ref": "#/$defs/LLMProvider"
+        },
+        "model": {
+          "minLength": 1,
+          "title": "Model",
+          "type": "string"
+        }
+      },
+      "required": [
+        "provider",
+        "model"
+      ],
+      "title": "LLMTarget",
+      "type": "object"
     },
     "LimitsConfig": {
       "additionalProperties": false,

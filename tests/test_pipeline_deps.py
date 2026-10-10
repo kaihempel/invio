@@ -1,5 +1,6 @@
 """``default_deps``: source dispatch, page fetch, provider binding, delivery mapping, closing."""
 
+import logging
 import time
 from datetime import timedelta
 from pathlib import Path
@@ -8,9 +9,9 @@ from typing import Any, ClassVar
 import httpx2
 import pytest
 
-from invio.config.job import JobConfig, LLMConfig
+from invio.config.job import JobConfig
 from invio.config.settings import MissingSettingError, Settings
-from invio.llm.base import LLMConfigError
+from invio.llm.base import LLMAuthError, LLMConfigError
 from invio.llm.fake import FakeProvider
 from invio.llm.registry import ModelRegistry, load_registry
 from invio.notify.email import DeliveryOutcome
@@ -44,7 +45,11 @@ def _config(**overrides: Any) -> JobConfig:
 
 @pytest.fixture
 def registry(tmp_path: Path) -> ModelRegistry:
-    price = {"input_price_per_mtok": 1, "output_price_per_mtok": 2, "context_window": 1000}
+    price: dict[str, object] = {
+        "input_price_per_mtok": 1,
+        "output_price_per_mtok": 2,
+        "context_window": 1000,
+    }
     return load_registry([write_registry(tmp_path, "mistral", {"m-fast": price, "m-smart": price})])
 
 
@@ -211,21 +216,17 @@ async def test_provider_for_binds_models_and_closes_providers_on_exit(
         async def aclose(self) -> None:
             closed.append("closed")
 
-    def fake_resolve(llm_config: LLMConfig, role: str, settings: Settings, **kw: Any) -> Any:
-        return Closing([]), getattr(llm_config.models, role)
-
-    monkeypatch.setattr(deps_module, "resolve", fake_resolve)
+    monkeypatch.setattr(deps_module, "get_provider", lambda name, settings, **kw: Closing([]))
     config = _config(llm={"provider": "mistral", "models": {"fast": "m-fast", "smart": "m-smart"}})
 
     async with default_deps(
         _settings(), registry=registry, transport=RecordingTransport(_handler)
     ) as deps:
         binding = deps.provider_for(config.llm)
-        assert (binding.provider_name, binding.fast_model, binding.smart_model) == (
-            "mistral",
-            "m-fast",
-            "m-smart",
-        )
+        assert (binding.fast.provider_name, binding.fast.model) == ("mistral", "m-fast")
+        assert (binding.smart.provider_name, binding.smart.model) == ("mistral", "m-smart")
+        assert binding.fast.provider is binding.smart.provider  # one provider per name
+        assert binding.fast.fallback is None and binding.smart.fallback is None
         assert binding.registry is registry
         assert closed == []
 
@@ -235,9 +236,7 @@ async def test_provider_for_binds_models_and_closes_providers_on_exit(
 async def test_provider_for_rejects_an_unregistered_smart_model(
     monkeypatch: pytest.MonkeyPatch, registry: ModelRegistry
 ) -> None:
-    monkeypatch.setattr(
-        deps_module, "resolve", lambda config, role, settings, **kw: (FakeProvider([]), "m-fast")
-    )
+    monkeypatch.setattr(deps_module, "get_provider", lambda name, settings, **kw: FakeProvider([]))
     config = _config(llm={"provider": "mistral", "models": {"fast": "m-fast", "smart": "nope"}})
 
     async with default_deps(
@@ -301,9 +300,7 @@ async def test_every_provider_is_closed_even_when_one_close_fails(
             closed.append("fine")
 
     queue: list[FakeProvider] = [Failing([]), Fine([])]
-    monkeypatch.setattr(
-        deps_module, "resolve", lambda config, role, settings, **kw: (queue.pop(0), "m-fast")
-    )
+    monkeypatch.setattr(deps_module, "get_provider", lambda name, settings, **kw: queue.pop(0))
     config = _config(llm={"provider": "mistral", "models": {"fast": "m-fast", "smart": "m-smart"}})
 
     async with default_deps(
@@ -338,3 +335,210 @@ async def test_the_engine_is_disposed_when_building_the_client_fails(
             pass  # pragma: no cover
 
     assert disposed == [True]
+
+
+# --- Per-role providers and fallback (#34) ----------------------------------------------------
+
+
+@pytest.fixture
+def two_providers(tmp_path: Path) -> ModelRegistry:
+    price: dict[str, object] = {
+        "input_price_per_mtok": 1,
+        "output_price_per_mtok": 2,
+        "context_window": 1000,
+    }
+    write_registry(tmp_path, "mistral", {"m-fast": price, "m-smart": price})
+    return load_registry([write_registry(tmp_path, "openai", {"o-fast": price, "o-smart": price})])
+
+
+def _named_providers(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Replace ``get_provider`` with fakes named after the provider; return the names built."""
+    built: list[str] = []
+
+    def fake_get_provider(name: str, settings: Settings, **kw: Any) -> FakeProvider:
+        built.append(name)
+        return FakeProvider([], name=name)
+
+    monkeypatch.setattr(deps_module, "get_provider", fake_get_provider)
+    return built
+
+
+async def test_provider_for_binds_each_role_and_fallback_once_per_provider(
+    monkeypatch: pytest.MonkeyPatch, two_providers: ModelRegistry
+) -> None:
+    built = _named_providers(monkeypatch)
+    config = _config(
+        llm={
+            "provider": "mistral",
+            "models": {
+                "fast": "m-fast",
+                "smart": {
+                    "provider": "openai",
+                    "model": "o-smart",
+                    "fallback": {"provider": "mistral", "model": "m-smart"},
+                },
+            },
+            "fallback_provider": "openai",
+            "fallback_models": {"fast": "o-fast", "smart": "o-fast"},
+        }
+    )
+
+    async with default_deps(
+        _settings(), registry=two_providers, transport=RecordingTransport(_handler)
+    ) as deps:
+        binding = deps.provider_for(config.llm)
+
+    fast, smart = binding.fast, binding.smart
+    assert fast.fallback is not None and smart.fallback is not None
+    assert (fast.provider_name, fast.model) == ("mistral", "m-fast")
+    assert (fast.fallback.provider_name, fast.fallback.model) == ("openai", "o-fast")
+    assert (smart.provider_name, smart.model) == ("openai", "o-smart")
+    assert (smart.fallback.provider_name, smart.fallback.model) == ("mistral", "m-smart")
+    assert fast.provider is smart.fallback.provider
+    assert smart.provider is fast.fallback.provider
+    assert sorted(built) == ["mistral", "openai"]
+
+
+async def test_provider_for_rejects_an_unregistered_fallback_model_before_building(
+    monkeypatch: pytest.MonkeyPatch, two_providers: ModelRegistry
+) -> None:
+    built = _named_providers(monkeypatch)
+    config = _config(
+        llm={
+            "provider": "mistral",
+            "models": {"fast": "m-fast", "smart": "m-smart"},
+            "fallback_provider": "openai",
+            "fallback_models": {"fast": "o-fast", "smart": "m-smart"},  # not an openai model
+        }
+    )
+
+    async with default_deps(
+        _settings(), registry=two_providers, transport=RecordingTransport(_handler)
+    ) as deps:
+        with pytest.raises(LLMConfigError, match="'m-smart' is not registered for LLM provider"):
+            deps.provider_for(config.llm)
+
+    assert built == []
+
+
+async def test_a_fallback_provider_without_models_warns_and_binds_no_fallback(
+    monkeypatch: pytest.MonkeyPatch, registry: ModelRegistry, caplog: pytest.LogCaptureFixture
+) -> None:
+    built = _named_providers(monkeypatch)
+    config = _config(
+        llm={
+            "provider": "mistral",
+            "models": {"fast": "m-fast", "smart": "m-smart"},
+            "fallback_provider": "openai",
+        }
+    )
+
+    with caplog.at_level(logging.WARNING, logger="invio.pipeline"):
+        async with default_deps(
+            _settings(), registry=registry, transport=RecordingTransport(_handler)
+        ) as deps:
+            binding = deps.provider_for(config.llm)
+
+    (record,) = [r for r in caplog.records if r.getMessage() == "llm.fallback_unconfigured"]
+    assert record.__dict__["fallback_provider"] == "openai"
+    assert record.__dict__["roles"] == ["fast", "smart"]
+    assert binding.fast.fallback is None
+    assert binding.smart.fallback is None
+    assert built == ["mistral"]
+
+
+async def test_no_warning_when_every_role_has_its_own_fallback(
+    monkeypatch: pytest.MonkeyPatch, two_providers: ModelRegistry, caplog: pytest.LogCaptureFixture
+) -> None:
+    _named_providers(monkeypatch)
+    own = {"provider": "openai", "model": "o-fast"}
+    config = _config(
+        llm={
+            "provider": "mistral",
+            "models": {
+                "fast": {"model": "m-fast", "fallback": own},
+                "smart": {"model": "m-smart", "fallback": own},
+            },
+            "fallback_provider": "openai",
+        }
+    )
+
+    with caplog.at_level(logging.WARNING, logger="invio.pipeline"):
+        async with default_deps(
+            _settings(), registry=two_providers, transport=RecordingTransport(_handler)
+        ) as deps:
+            deps.provider_for(config.llm)
+
+    assert "llm.fallback_unconfigured" not in [r.getMessage() for r in caplog.records]
+
+
+async def test_unused_fallback_models_warn(
+    monkeypatch: pytest.MonkeyPatch, two_providers: ModelRegistry, caplog: pytest.LogCaptureFixture
+) -> None:
+    _named_providers(monkeypatch)
+    own = {"provider": "openai", "model": "o-fast"}
+    config = _config(
+        llm={
+            "provider": "mistral",
+            "models": {
+                "fast": {"model": "m-fast", "fallback": own},
+                "smart": {"model": "m-smart", "fallback": own},
+            },
+            "fallback_provider": "openai",
+            "fallback_models": {"fast": "o-fast", "smart": "o-smart"},
+        }
+    )
+
+    with caplog.at_level(logging.WARNING, logger="invio.pipeline"):
+        async with default_deps(
+            _settings(), registry=two_providers, transport=RecordingTransport(_handler)
+        ) as deps:
+            deps.provider_for(config.llm)
+
+    messages = [r.getMessage() for r in caplog.records]
+    (record,) = [r for r in caplog.records if r.getMessage() == "llm.fallback_models_unused"]
+    assert record.__dict__["fallback_provider"] == "openai"
+    assert "llm.fallback_unconfigured" not in messages
+
+
+async def test_no_unused_warning_when_a_role_uses_fallback_models(
+    monkeypatch: pytest.MonkeyPatch, two_providers: ModelRegistry, caplog: pytest.LogCaptureFixture
+) -> None:
+    _named_providers(monkeypatch)
+    config = _config(
+        llm={
+            "provider": "mistral",
+            "models": {
+                "fast": {"model": "m-fast", "fallback": {"provider": "openai", "model": "o-fast"}},
+                "smart": "m-smart",
+            },
+            "fallback_provider": "openai",
+            "fallback_models": {"fast": "o-fast", "smart": "o-smart"},
+        }
+    )
+
+    with caplog.at_level(logging.WARNING, logger="invio.pipeline"):
+        async with default_deps(
+            _settings(), registry=two_providers, transport=RecordingTransport(_handler)
+        ) as deps:
+            deps.provider_for(config.llm)
+
+    assert "llm.fallback_models_unused" not in [r.getMessage() for r in caplog.records]
+
+
+async def test_a_missing_fallback_api_key_fails_when_binding(two_providers: ModelRegistry) -> None:
+    config = _config(
+        llm={
+            "provider": "mistral",
+            "models": {"fast": "m-fast", "smart": "m-smart"},
+            "fallback_provider": "openai",
+            "fallback_models": {"fast": "o-fast", "smart": "o-smart"},
+        }
+    )
+    settings = _settings(mistral_api_key="sk-test", openai_api_key=None)
+
+    async with default_deps(
+        settings, registry=two_providers, transport=RecordingTransport(_handler)
+    ) as deps:
+        with pytest.raises(LLMAuthError, match="INVIO_OPENAI_API_KEY"):
+            deps.provider_for(config.llm)
