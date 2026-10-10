@@ -10,10 +10,11 @@ import asyncio
 import contextlib
 import os
 import sys
-from collections.abc import Coroutine, Iterator
+from collections.abc import Awaitable, Callable, Coroutine, Iterator
 from contextlib import AbstractAsyncContextManager
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, assert_never
 
 import typer
 import yaml
@@ -22,13 +23,14 @@ from rich.table import Table
 
 from invio.cli import editor
 from invio.cli.console import stderr_console, stdout_console
-from invio.cli.errors import fail, mapped_errors
+from invio.cli.errors import fail, format_llm_error, mapped_errors
 from invio.cli.progress import RunProgressView
 from invio.cli.prompts import Prompter, QuestionaryPrompter, WizardAborted
 from invio.cli.run_output import DASH, format_time, stats_block
 from invio.cli.runtime import settings_error, setup_runtime
 from invio.cli.source_check import HttpSourceChecker, SourceChecker
-from invio.cli.wizard import WARNING_NO_REGISTRY, run_wizard
+from invio.cli.suggest_flow import Create, Discard, PrintYaml, run_suggest_flow
+from invio.cli.wizard import WARNING_NO_REGISTRY, WizardPrefill, run_wizard
 from invio.config.job import (
     Frequency,
     JobConfigError,
@@ -37,9 +39,19 @@ from invio.config.job import (
     known_timezones,
     loads_yaml,
 )
+from invio.config.languages import ISO_639_1
 from invio.config.settings import get_settings
 from invio.domain import RunStatus
-from invio.llm.base import ModelRegistryError
+from invio.llm.base import (
+    LLMAuthError,
+    LLMConfigError,
+    LLMError,
+    LLMInvalidOutputError,
+    LLMProvider,
+    ModelRegistryError,
+    Usage,
+)
+from invio.llm.factory import get_provider
 from invio.llm.registry import ModelRegistry, default_registry
 from invio.pipeline import RunDeps
 from invio.pipeline.deps import default_deps
@@ -52,6 +64,15 @@ from invio.services.jobs import (
     JobService,
     StoredJobConfigError,
     check_job_name,
+)
+from invio.services.suggest import (
+    MAX_TOPIC_CHARS,
+    ModelChoice,
+    SearchSuggestion,
+    choose_model,
+    refine,
+    search_yaml,
+    suggest,
 )
 from invio.textsafe import strip_control
 
@@ -108,6 +129,11 @@ def _make_registry() -> ModelRegistry | None:
     except ModelRegistryError as exc:
         typer.echo(WARNING_NO_REGISTRY.format(exc), err=True)
         return None
+
+
+def _make_suggest_provider(name: str, registry: ModelRegistry) -> LLMProvider:
+    """The provider behind ``invio job suggest``; always the logging wrapper (tests replace it)."""
+    return get_provider(name, get_settings(), registry=registry)
 
 
 def _default_timezone() -> str:
@@ -242,7 +268,11 @@ def create(
     ] = None,
     name: Annotated[str | None, typer.Option("--name", help="Job name.")] = None,
 ) -> None:
-    """Create a job with the interactive wizard, or from a YAML file."""
+    """Create a job with the interactive wizard, or from a YAML file.
+
+    The wizard asks for the schedule, notification, sources, keywords, description, summary
+    language (ISO 639-1, default en), LLM provider and models, and limits.
+    """
     with _errors():
         if from_file is None:
             _create_interactive(name)
@@ -386,6 +416,214 @@ def import_job(
         record = service.import_yaml(file, name, replace=replace)
         verb = "replaced" if existed and replace else "imported"
         typer.echo(f"{verb} job '{record.name}'")
+
+
+# --- suggest ---------------------------------------------------------------------------------
+
+
+def _call[T](provider: LLMProvider, make: Callable[[], Awaitable[T]]) -> T:
+    """Run one model call on its own event loop and close the provider's clients afterwards."""
+
+    async def run_and_close() -> T:
+        try:
+            return await make()
+        finally:
+            await provider.aclose()
+
+    return asyncio.run(run_and_close())
+
+
+@dataclass
+class _UsageTally:
+    """The token usage of all model calls of one session (failed calls count if they cost)."""
+
+    total: Usage | None = None
+
+    def add(self, usage: Usage) -> None:
+        self.total = usage if self.total is None else self.total + usage
+
+    def add_error(self, exc: LLMError) -> None:
+        if isinstance(exc, LLMInvalidOutputError):
+            self.add(exc.usage)  # an invalid answer still consumed tokens
+
+    def summary(self, registry: ModelRegistry, model: str) -> str | None:
+        if self.total is None:
+            return None
+        usage = self.total
+        noun = "request" if usage.requests == 1 else "requests"
+        text = (
+            f"suggestions used {usage.requests} {noun}, "
+            f"{usage.input_tokens} in / {usage.output_tokens} out tokens"
+        )
+        cost = registry.cost(model, usage)
+        return text if cost is None else f"{text}, ~${cost}"
+
+
+def _checked_topic(topic: str) -> str:
+    cleaned = strip_control(topic)
+    if not 1 <= len(cleaned) <= MAX_TOPIC_CHARS:
+        raise fail(f"Error: the topic must have 1 to {MAX_TOPIC_CHARS} characters", 2)
+    return cleaned
+
+
+def _checked_language(language: str) -> str:
+    code = language.strip().lower()
+    if code not in ISO_639_1:
+        raise fail(f"Error: unknown ISO 639-1 language code '{strip_control(language)}'", 2)
+    return code
+
+
+def _create_from_suggestion(
+    prompter: Prompter,
+    suggestion: SearchSuggestion,
+    *,
+    choice: ModelChoice,
+    language: str,
+    registry: ModelRegistry,
+) -> None:
+    """Hand the suggestion to the job wizard; save only if the operator confirms there."""
+    service = _make_service()
+    prefill = WizardPrefill(
+        keywords={
+            "any": suggestion.keywords_any,
+            "all": suggestion.keywords_all,
+            "exclude": suggestion.keywords_exclude,
+        },
+        description=suggestion.semantic_description,
+        language=language,
+        provider=choice.provider_name,
+        smart_model=choice.model,
+        sources_note=strip_control(suggestion.suggested_sources_hint),
+    )
+    result = run_wizard(
+        prompter,
+        _make_checker(),
+        registry=registry,
+        existing_names=set(service.names()),
+        default_timezone=_default_timezone(),
+        prefill=prefill,
+    )
+    if result is None:
+        raise fail("job not created", 1)
+    job_name, config = result
+    record = service.create(job_name, config)
+    typer.echo(_status_line("created", job_name, record))
+
+
+@app.command("suggest")
+def suggest_command(
+    topic: Annotated[str, typer.Argument(help="What the job should look for (1-500 characters).")],
+    language: Annotated[
+        str, typer.Option("--language", help="ISO 639-1 code of the description language.")
+    ] = "en",
+    provider: Annotated[
+        str | None,
+        typer.Option(
+            "--provider",
+            help="LLM provider (default: the first with an API key and registered models).",
+        ),
+    ] = None,
+    model: Annotated[
+        str | None,
+        typer.Option("--model", help="Registered model id (default: the provider's priciest)."),
+    ] = None,
+    as_yaml: Annotated[
+        bool, typer.Option("--yaml", help="Print the YAML once and exit; ask nothing.")
+    ] = False,
+) -> None:
+    """Let a capable model draft keywords and a description for TOPIC.
+
+    Interactive: preview, refine, edit, then create the job through the wizard, print YAML or
+    discard. With --yaml or without a terminal: print the YAML block once. Nothing is saved
+    unless you confirm the wizard.
+
+    Exit codes: 0 done, 1 model call failed or aborted or not saved, 2 usage or configuration
+    error.
+    """
+    topic = _checked_topic(topic)
+    language = _checked_language(language)
+    registry = _make_registry()
+    if registry is None:
+        raise fail("Configuration error: model registry unavailable", 2)
+    try:
+        choice = choose_model(get_settings(), registry, provider=provider, model=model)
+        llm = _make_suggest_provider(choice.provider_name, registry)
+    except (LLMAuthError, LLMConfigError) as exc:
+        raise fail(f"Configuration error: {exc}", 2) from exc
+    tally = _UsageTally()
+    typer.echo(f"Asking {choice.provider_name}/{choice.model} …", err=True)
+    try:
+        with _errors():  # also Ctrl+C during a model call: "aborted; nothing saved"
+            _suggest_session(
+                llm,
+                tally,
+                topic=topic,
+                language=language,
+                choice=choice,
+                registry=registry,
+                as_yaml=as_yaml,
+            )
+    finally:
+        line = tally.summary(registry, choice.model)
+        if line is not None:
+            typer.echo(line, err=True)
+
+
+def _suggest_session(
+    llm: LLMProvider,
+    tally: _UsageTally,
+    *,
+    topic: str,
+    language: str,
+    choice: ModelChoice,
+    registry: ModelRegistry,
+    as_yaml: bool,
+) -> None:
+    try:
+        first, usage = _call(
+            llm, lambda: suggest(llm, choice.model, topic=topic, language=language)
+        )
+    except LLMError as exc:
+        tally.add_error(exc)
+        error = format_llm_error(exc, provider=choice.provider_name, model=choice.model)
+        raise fail(error, 1) from exc
+    tally.add(usage)
+    if as_yaml or not _is_interactive():
+        typer.echo(search_yaml(first), nl=False)
+        return
+
+    def ask(remark: str, previous: SearchSuggestion) -> SearchSuggestion:
+        try:
+            value, used = _call(
+                llm,
+                lambda: refine(
+                    llm,
+                    choice.model,
+                    topic=topic,
+                    language=language,
+                    previous=previous,
+                    remark=remark,
+                ),
+            )
+        except LLMError as exc:
+            tally.add_error(exc)
+            raise
+        tally.add(used)
+        return value
+
+    prompter = _make_prompter()
+    outcome = run_suggest_flow(prompter, ask, first=first, choice=choice, language=language)
+    match outcome:
+        case PrintYaml(suggestion):
+            typer.echo(search_yaml(suggestion), nl=False)
+        case Discard():
+            typer.echo("Nothing saved.", err=True)
+        case Create(suggestion):
+            _create_from_suggestion(
+                prompter, suggestion, choice=choice, language=language, registry=registry
+            )
+        case _:
+            assert_never(outcome)
 
 
 # --- run -------------------------------------------------------------------------------------

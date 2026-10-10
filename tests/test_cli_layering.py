@@ -70,3 +70,32 @@ def test_source_discovery_stays_below_the_upper_layers() -> None:
     offenders = [m for m in _imported_modules(path) if m.startswith(banned)]
 
     assert offenders == []
+
+
+# --- suggestion layering (gh-issue-37) -------------------------------------------------------
+
+SERVICES_DIR = Path(invio.__file__).parent / "services"
+
+
+def _starts_with_any(modules: set[str], prefixes: tuple[str, ...]) -> list[str]:
+    return sorted(m for m in modules if any(m == p or m.startswith(f"{p}.") for p in prefixes))
+
+
+def test_suggest_service_imports_no_cli_db_or_orchestration() -> None:
+    modules = _imported_modules(SERVICES_DIR / "suggest.py")
+
+    forbidden = (
+        "typer",
+        "invio.db",
+        "invio.graph",
+        "invio.cli",
+        "invio.pipeline",
+        "invio.sources",
+    )
+    assert _starts_with_any(modules, forbidden) == []
+
+
+def test_suggest_flow_imports_no_storage_asyncio_or_job_service() -> None:
+    modules = _imported_modules(CLI_DIR / "suggest_flow.py")
+
+    assert _starts_with_any(modules, ("invio.db", "invio.services.jobs", "asyncio")) == []

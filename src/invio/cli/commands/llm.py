@@ -6,6 +6,7 @@ from typing import Annotated
 
 import typer
 
+from invio.cli.errors import format_llm_error
 from invio.config.settings import get_settings
 from invio.llm import registry as llm_registry
 from invio.llm.base import LLMAuthError, LLMError, LLMProvider, Usage
@@ -71,7 +72,7 @@ def test(
     try:
         usage = asyncio.run(_check(client, model))
     except LLMError as exc:
-        raise _fail(f"Error: {type(exc).__name__}: {exc}", 1) from exc
+        raise _fail(format_llm_error(exc), 1) from exc
     duration_ms = round((time.perf_counter() - started) * 1000, 1)
     typer.echo(
         f"ok provider={provider} model={model} input_tokens={usage.input_tokens} "
