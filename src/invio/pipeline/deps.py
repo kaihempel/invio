@@ -2,7 +2,8 @@
 
 :func:`default_deps` builds the real adapters from the settings and closes them when the
 ``async with`` block ends: the database engine, the HTTP client, the web source (and its
-browser) and every provider that :attr:`RunDeps.provider_for` created.
+browser) and every provider that :attr:`RunDeps.provider_for` created. ``provider_for`` builds
+one provider per provider name and run, shared by the roles and fallbacks that name it.
 """
 
 import logging
@@ -10,19 +11,26 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from contextlib import asynccontextmanager
 from datetime import timedelta
 from ipaddress import IPv4Network, IPv6Network
-from typing import assert_never
+from typing import assert_never, get_args
 
 import httpx2
 from sqlalchemy import Engine
 
-from invio.config.job import LLMConfig, SourceConfig, YoutubeChannelSource, YoutubePlaylistSource
+from invio.config.job import (
+    LLMConfig,
+    LLMRole,
+    RoleSelection,
+    SourceConfig,
+    YoutubeChannelSource,
+    YoutubePlaylistSource,
+)
 from invio.config.settings import Settings
 from invio.db.session import check_database_url, create_db_engine, session_factory
 from invio.db.types import utcnow
 from invio.domain import Candidate
-from invio.graph.ports import DeliveryReport, ProviderBinding, RunDeps
+from invio.graph.ports import DeliveryReport, ProviderBinding, RoleBinding, RunDeps
 from invio.llm.base import LLMProvider
-from invio.llm.factory import resolve
+from invio.llm.factory import get_provider
 from invio.llm.registry import ModelRegistry, default_registry
 from invio.notify.email import deliver_digest
 from invio.scheduling.backoff import retry_delay
@@ -90,17 +98,40 @@ async def default_deps(
             return result.text()
 
         def provider_for(llm_config: LLMConfig) -> ProviderBinding:
-            provider, fast_model = resolve(llm_config, "fast", settings, registry=models)
-            providers.append(provider)
-            provider_name = llm_config.provider.value
-            smart_model = llm_config.models.smart
-            models.require(smart_model, provider_name)
+            selections = {role: llm_config.role(role) for role in get_args(LLMRole)}
+            # Every model is checked before any provider is built, so registry problems
+            # surface even when an API key is missing.
+            for selection in selections.values():
+                models.require(selection.model, selection.provider.value)
+                if selection.fallback is not None:
+                    models.require(selection.fallback.model, selection.fallback.provider.value)
+            _warn_unconfigured_fallback(llm_config)
+            built: dict[str, LLMProvider] = {}  # one provider per name and run
+
+            def provider(name: str) -> LLMProvider:
+                if name not in built:
+                    built[name] = get_provider(name, settings, registry=models)
+                    providers.append(built[name])
+                return built[name]
+
+            def bind(selection: RoleSelection) -> RoleBinding:
+                name = selection.provider.value
+                if selection.fallback is None:
+                    return RoleBinding(
+                        provider=provider(name), provider_name=name, model=selection.model
+                    )
+                fallback_name = selection.fallback.provider.value
+                return RoleBinding(
+                    provider=provider(name),
+                    provider_name=name,
+                    model=selection.model,
+                    fallback=provider(fallback_name),
+                    fallback_name=fallback_name,
+                    fallback_model=selection.fallback.model,
+                )
+
             return ProviderBinding(
-                provider=provider,
-                provider_name=provider_name,
-                fast_model=fast_model,
-                smart_model=smart_model,
-                registry=models,
+                fast=bind(selections["fast"]), smart=bind(selections["smart"]), registry=models
             )
 
         factory = session_factory(engine)
@@ -125,6 +156,22 @@ async def default_deps(
     finally:
         youtube.close()
         await _close_all(web, providers, engine)
+
+
+def _warn_unconfigured_fallback(llm_config: LLMConfig) -> None:
+    """Warn when ``fallback_provider`` is set but some role gets no fallback from it.
+
+    ``fallback_provider`` alone (the old config form) names no models, so the run goes on
+    without a fallback for the roles that have no fallback of their own.
+    """
+    if llm_config.fallback_provider is None or llm_config.fallback_models is not None:
+        return
+    roles = [role for role in get_args(LLMRole) if llm_config.role(role).fallback is None]
+    if roles:
+        logger.warning(
+            "llm.fallback_unconfigured",
+            extra={"fallback_provider": llm_config.fallback_provider.value, "roles": roles},
+        )
 
 
 async def _close_all(

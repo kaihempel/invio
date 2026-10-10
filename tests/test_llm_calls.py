@@ -220,6 +220,32 @@ async def test_ledger_entry_equals_the_stored_row(db_session: Session) -> None:
 
 
 @pytest.mark.db
+async def test_a_stamped_usage_names_and_prices_the_provider_that_answered(
+    db_session: Session,
+) -> None:
+    registry = ModelRegistry(
+        {
+            "fast-model": ModelInfo("fast-model", "mistral", Decimal("1"), Decimal("2"), 32000),
+            "backup": ModelInfo("backup", "openai", Decimal("10"), Decimal("20"), 32000),
+        }
+    )
+    stamped = Usage(1000, 500, 1, "openai", "backup")
+    bad = FakeReply('{"value": "x"}', stamped)
+    fake = FakeProvider([FakeReply('{"value": 1}', stamped), bad, bad])
+    ctx, _, _ = _ctx(db_session, fake, BudgetTracker(100_000), registry)
+
+    await _call(ctx)
+    with pytest.raises(LLMInvalidOutputError):
+        await _call(ctx)
+
+    rows = _rows(db_session)
+    assert [(r.provider, r.model, r.cost_usd) for r in rows] == [
+        ("openai", "backup", Decimal("0.020000")),
+        ("openai", "backup", Decimal("0.040000")),
+    ]
+
+
+@pytest.mark.db
 async def test_invalid_answer_is_counted_and_stored_too(db_session: Session) -> None:
     bad = FakeReply('{"value": "x"}', Usage(30, 10))
     fake = FakeProvider([bad, bad])

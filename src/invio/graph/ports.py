@@ -28,6 +28,7 @@ __all__ = [
     "ProgressEvent",
     "ProgressSnapshot",
     "ProviderBinding",
+    "RoleBinding",
     "RunDeps",
     "RunObserver",
     "SourceFetcher",
@@ -62,13 +63,36 @@ class Notifier(Protocol):
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class ProviderBinding:
-    """A provider with the model ids and registry a run uses with it."""
+class RoleBinding:
+    """The provider and model of one role (``fast`` or ``smart``), with its optional fallback.
+
+    ``fallback``, ``fallback_name`` and ``fallback_model`` are all set or all ``None``.
+    """
 
     provider: LLMProvider
     provider_name: str
-    fast_model: str
-    smart_model: str
+    model: str
+    fallback: LLMProvider | None = None
+    fallback_name: str | None = None
+    fallback_model: str | None = None
+
+    def __post_init__(self) -> None:
+        parts = (self.fallback, self.fallback_name, self.fallback_model)
+        if any(part is None for part in parts) and any(part is not None for part in parts):
+            raise ValueError("fallback, fallback_name and fallback_model go together")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ProviderBinding:
+    """The providers and models of both roles and the registry a run prices calls with.
+
+    Built by ``RunDeps.provider_for``, which owns (and closes) the providers. ``load_job``
+    replaces each role's ``provider`` with the composed one (retries, then the fallback), so
+    the stages call ``provider`` only.
+    """
+
+    fast: RoleBinding
+    smart: RoleBinding
     registry: ModelRegistry
 
 

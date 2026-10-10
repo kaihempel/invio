@@ -37,7 +37,7 @@ from invio.db.repositories import JobRepository, RunRepository
 from invio.db.session import session_factory, session_scope
 from invio.domain import Candidate, RunStatus
 from invio.graph.nodes import relevance, summarize_item, synthesize
-from invio.graph.ports import DeliveryReport, ProviderBinding, RunDeps
+from invio.graph.ports import DeliveryReport, ProviderBinding, RoleBinding, RunDeps
 from invio.llm.base import LLMError, LLMProvider, Usage, structured_with_repair
 from invio.llm.fake import FakeReply, FakeScriptExhaustedError, FakeStep
 from invio.llm.registry import ModelRegistry, load_registry
@@ -523,10 +523,12 @@ def make_deps(
 
     def bind(config: LLMConfig) -> ProviderBinding:
         return ProviderBinding(
-            provider=provider,
-            provider_name=PROVIDER_NAME,
-            fast_model=config.models.fast,
-            smart_model=config.models.smart,
+            fast=RoleBinding(
+                provider=provider, provider_name=PROVIDER_NAME, model=config.role("fast").model
+            ),
+            smart=RoleBinding(
+                provider=provider, provider_name=PROVIDER_NAME, model=config.role("smart").model
+            ),
             registry=registry,
         )
 

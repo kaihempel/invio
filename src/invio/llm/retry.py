@@ -8,8 +8,10 @@ chunk calls of a summary (spec 014, research R4).
 
 Permanent errors (credentials, a rejected request, an invalid structured answer, which the
 inner provider already repaired once) are raised after one attempt, and so is a rate limit
-whose ``retry_after`` is longer than the policy's ``max_interval``. The module only depends on
-``invio.retry`` and ``invio.llm.base``; it knows nothing of the graph.
+whose ``retry_after`` is longer than the policy's ``max_interval``. A
+:class:`~invio.llm.fallback.FallbackProvider` wraps retrying providers, so a primary provider is
+retried before the fallback is asked. The module only depends on ``invio.retry`` and
+``invio.llm.base``; it knows nothing of the graph.
 """
 
 from pydantic import BaseModel

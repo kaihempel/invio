@@ -86,6 +86,8 @@ def _context(
         provider=fake,
         provider_name="mistral",
         fast_model="fast-model",
+        smart_provider=fake,
+        smart_provider_name="mistral",
         smart_model="smart-model",
         registry=_REGISTRY,
         items=ItemRepository(db_session),
@@ -347,6 +349,28 @@ async def test_long_body_is_mapped_with_fast_and_combined_with_smart(db_session:
     rows = _usage_rows(db_session)
     assert [(r.purpose, r.model) for r in rows] == [("summarize_chunk", "fast-model")] * count + [
         ("summarize_combine", "smart-model")
+    ]
+
+
+@pytest.mark.db
+async def test_combine_calls_go_to_the_smart_provider(db_session: Session) -> None:
+    job = make_job(db_session)
+    item = make_item(db_session, job, raw_content=_paragraphs(2))
+    fast = FakeProvider([FakeReply(_chunk_json()), FakeReply(_chunk_json())])
+    smart = FakeProvider([FakeReply(_summary_json())])
+    ctx = replace(
+        _context(db_session, job, fast), smart_provider=smart, smart_provider_name="anthropic"
+    )
+
+    outcome = await summarize_item(item, ctx)
+
+    assert outcome.status == ItemStatus.SUMMARIZED
+    assert [r.model for r in fast.requests] == ["fast-model", "fast-model"]
+    assert [r.model for r in smart.requests] == ["smart-model"]
+    assert [(r.purpose, r.provider) for r in _usage_rows(db_session)] == [
+        ("summarize_chunk", "mistral"),
+        ("summarize_chunk", "mistral"),
+        ("summarize_combine", "anthropic"),
     ]
 
 
@@ -908,9 +932,11 @@ def _job_context(db_session: Session, job: Job, fake: LLMProvider, language: str
         language=config.language,
         semantic_description=config.search.semantic_description,
         provider=fake,
-        provider_name=config.llm.provider.value,
-        fast_model=config.llm.models.fast,
-        smart_model=config.llm.models.smart,
+        provider_name=config.llm.role("fast").provider.value,
+        fast_model=config.llm.role("fast").model,
+        smart_provider=fake,
+        smart_provider_name=config.llm.role("smart").provider.value,
+        smart_model=config.llm.role("smart").model,
         registry=_REGISTRY,
         items=ItemRepository(db_session),
         usage=UsageRepository(db_session),

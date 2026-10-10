@@ -583,7 +583,7 @@ def test_dump_nested_key_order() -> None:
     ]
     assert list(dumped["search"]) == ["keywords", "semantic_description", "min_relevance"]
     assert list(dumped["search"]["keywords"]) == ["any", "all", "exclude"]
-    assert list(dumped["llm"]) == ["provider", "models", "fallback_provider"]
+    assert list(dumped["llm"]) == ["provider", "models", "fallback_provider", "fallback_models"]
     assert list(dumped["llm"]["models"]) == ["fast", "smart"]
     assert list(dumped["limits"]) == [
         "max_items_per_source",

@@ -11,19 +11,19 @@ import logging
 import pkgutil
 import time
 from collections.abc import Callable
-from typing import Literal, Protocol, Self, get_args
+from typing import Protocol, Self, get_args
 
 from pydantic import BaseModel
 
 import invio.llm
-from invio.config.job import LLMConfig
+from invio.config.job import LLMConfig, LLMRole
 from invio.config.settings import Settings, get_settings
 from invio.llm.base import LLMConfigError, LLMError, LLMInvalidOutputError, LLMProvider, Usage
 from invio.llm.registry import ModelRegistry, default_registry
 
 logger = logging.getLogger("invio.llm")
 
-Role = Literal["fast", "smart"]
+Role = LLMRole
 
 _MAX_TEMPERATURE = 2.0
 
@@ -191,16 +191,17 @@ def resolve(
     *,
     registry: ModelRegistry | None = None,
 ) -> tuple[LLMProvider, str]:
-    """Return the provider of ``llm_config`` and the model id for ``role``.
+    """Return the provider and the model id of ``role`` in ``llm_config`` (fallback ignored).
 
-    The model must be declared in the registry for that provider; this is checked before the
-    provider is built, so registry problems surface even when the API key is missing.
+    The role's own provider applies if it names one, else ``llm_config.provider``. The model must
+    be declared in the registry for that provider; this is checked before the provider is
+    built, so registry problems surface even when the API key is missing.
     """
     roles = get_args(Role)
     if role not in roles:
         raise LLMConfigError(f"unknown LLM role '{role}'; expected one of: {', '.join(roles)}")
-    model: str = getattr(llm_config.models, role)
-    provider_name = llm_config.provider.value
+    selection = llm_config.role(role)
+    provider_name = selection.provider.value
     registry = registry if registry is not None else default_registry()
-    registry.require(model, provider_name)
-    return get_provider(provider_name, settings, registry=registry), model
+    registry.require(selection.model, provider_name)
+    return get_provider(provider_name, settings, registry=registry), selection.model

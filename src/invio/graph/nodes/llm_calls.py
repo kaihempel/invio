@@ -78,16 +78,19 @@ class CallContext(Protocol):
 def _record_usage(ctx: CallContext, model: str, purpose: str, usage: Usage) -> None:
     """Count one call on the budget and store its ``llm_usage`` row (a repair is summed in).
 
+    The row names and is priced with the provider and model that actually answered: the ones
+    stamped on ``usage`` (a fallback), else the context's provider and the requested ``model``.
     The tracker comes first: if the flush fails, the tokens are still in the ledger for the
     replay after the rollback.
     """
+    used_model = usage.model or model
     entry = UsageEntry(
-        provider=ctx.provider_name,
-        model=model,
+        provider=usage.provider or ctx.provider_name,
+        model=used_model,
         purpose=purpose,
         input_tokens=usage.input_tokens,
         output_tokens=usage.output_tokens,
-        cost_usd=ctx.registry.cost(model, usage),
+        cost_usd=ctx.registry.cost(used_model, usage),
         created_at=utcnow(),
     )
     ctx.budget.record(entry)

@@ -53,7 +53,7 @@ from invio.graph.nodes.synthesize import (
     entries_from_items,
 )
 from invio.graph.nodes.synthesize import synthesize_digest as run_synthesis
-from invio.graph.ports import DeliveryReport, ProgressEvent, RunDeps
+from invio.graph.ports import DeliveryReport, ProgressEvent, RoleBinding, RunDeps
 from invio.graph.scope import ItemRef, RunScope
 from invio.graph.state import (
     ItemResult,
@@ -64,6 +64,8 @@ from invio.graph.state import (
     RunState,
     error_of,
 )
+from invio.llm.base import LLMProvider
+from invio.llm.fallback import FallbackProvider
 from invio.llm.retry import RetryingProvider
 from invio.retry import retrying
 from invio.sources.errors import FetchError, is_transient_fetch
@@ -192,9 +194,9 @@ async def load_job(state: RunState, deps: RunDeps, scope: RunScope) -> RunState:
     config = JobConfig.model_validate(raw)
     scope.config = config
     binding = deps.provider_for(config.llm)
-    # Every provider request of the run is retried on transient errors (research R4).
-    retrying_provider = RetryingProvider(binding.provider, policy=deps.retry, sleep=deps.sleep)
-    scope.binding = dataclasses.replace(binding, provider=retrying_provider)
+    scope.binding = dataclasses.replace(
+        binding, fast=_composed(binding.fast, deps), smart=_composed(binding.smart, deps)
+    )
     scope.budget = BudgetTracker(config.limits.max_llm_tokens_per_run)
     if scope.max_items is not None:
         # In memory only: the stored job config is never written. The cap can only go down.
@@ -204,6 +206,28 @@ async def load_job(state: RunState, deps: RunDeps, scope: RunScope) -> RunState:
             update={"limits": limits.model_copy(update={"max_items_per_run": capped})}
         )
     return {}
+
+
+def _composed(role: RoleBinding, deps: RunDeps) -> RoleBinding:
+    """``role`` with its provider wrapped: retries first, then the fallback, if any.
+
+    Every provider request of the run is retried on transient errors (research R4); a primary
+    that still fails with an outage or a rate limit hands the request to the fallback.
+    """
+    provider: LLMProvider = RetryingProvider(role.provider, policy=deps.retry, sleep=deps.sleep)
+    if (
+        role.fallback is not None
+        and role.fallback_name is not None
+        and role.fallback_model is not None
+    ):
+        provider = FallbackProvider(
+            provider,
+            RetryingProvider(role.fallback, policy=deps.retry, sleep=deps.sleep),
+            primary_name=role.provider_name,
+            fallback_name=role.fallback_name,
+            fallback_model=role.fallback_model,
+        )
+    return dataclasses.replace(role, provider=provider)
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -330,9 +354,9 @@ def _scoring_context(deps: RunDeps, scope: RunScope) -> ScoringContext:
         job_id=scope.job_id,
         run_id=scope.run_id,
         search=_required(scope.config, "config").search,
-        provider=binding.provider,
-        provider_name=binding.provider_name,
-        model=binding.fast_model,
+        provider=binding.fast.provider,
+        provider_name=binding.fast.provider_name,
+        model=binding.fast.model,
         registry=binding.registry,
         items=ItemRepository(session),
         usage=UsageRepository(session),
@@ -348,10 +372,12 @@ def _summary_context(deps: RunDeps, scope: RunScope) -> SummaryContext:
         run_id=scope.run_id,
         language=config.language,
         semantic_description=config.search.semantic_description,
-        provider=binding.provider,
-        provider_name=binding.provider_name,
-        fast_model=binding.fast_model,
-        smart_model=binding.smart_model,
+        provider=binding.fast.provider,
+        provider_name=binding.fast.provider_name,
+        fast_model=binding.fast.model,
+        smart_provider=binding.smart.provider,
+        smart_provider_name=binding.smart.provider_name,
+        smart_model=binding.smart.model,
         registry=binding.registry,
         items=ItemRepository(session),
         usage=UsageRepository(session),
@@ -428,9 +454,9 @@ async def synthesize_digest(state: RunState, deps: RunDeps, scope: RunScope) -> 
         run_id=scope.run_id,
         language=config.language,
         semantic_description=config.search.semantic_description,
-        provider=binding.provider,
-        provider_name=binding.provider_name,
-        smart_model=binding.smart_model,
+        provider=binding.smart.provider,
+        provider_name=binding.smart.provider_name,
+        smart_model=binding.smart.model,
         registry=binding.registry,
         usage=UsageRepository(session),
         budget=_required(scope.budget, "budget"),
