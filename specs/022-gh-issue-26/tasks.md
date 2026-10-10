@@ -378,18 +378,18 @@ green (quickstart §7).
   - `uv run pytest -m e2e`: local fixtures only, no keys, no internet, under 60 s;
   - the nightly MariaDB workflow and `INVIO_REQUIRE_TEST_DATABASE`;
   - how to run it against MariaDB locally.
-- [ ] T029 Measure and harden:
+- [X] T029 Measure and harden:
   - `time uv run pytest -m e2e` must be ≤ 60 s (note the measured time in the PR description);
   - run the suite 20× in a row (quickstart §5) to check determinism (SC-005);
   - run it offline (`unshare -rn` on Linux, or Wi-Fi off on macOS) to check SC-002.
-- [ ] T030 Mutation spot checks and the FR-018 triage. Apply each mutation from
+- [X] T030 Mutation spot checks and the FR-018 triage. Apply each mutation from
   contracts/e2e-harness.md "Mutation checks" locally (do not commit), confirm that the listed
   scenario fails, and revert (SC-006). For any real product bug found during T016–T027:
   - small and local → fix it in `src/invio/…`, with the scenario as its failing test;
   - larger → open a GitHub issue, link it in the PR, and keep issue #26 open until that fix
     lands.
   Never mark a scenario `skip` or `xfail`.
-- [ ] T031 Run the full quality gate locally:
+- [X] T031 Run the full quality gate locally:
   `uv run ruff check && uv run ruff format --check && uv run mypy src && uv run pytest -m "not e2e" && uv run pytest -m e2e`.
   Then fix lint and type issues in the new test files (fully annotated, no bare `Any` without a
   justifying comment).

@@ -50,8 +50,8 @@ def test_e2e_network_guard_blocks_external_hosts(
         socket.create_connection(("93.184.216.34", 80), timeout=1)
     with pytest.raises(ExternalNetworkError):
         socket.getaddrinfo("example.com", 80)
-    with pytest.raises(ExternalNetworkError):
-        socket.socket().connect(("::2", 80))
+    with pytest.raises(ExternalNetworkError), socket.socket() as sock:
+        sock.connect(("198.51.100.7", 80))
     server = LoopbackServer()
     server.routes["/"] = Route(body=b"ok")
     server.start()
