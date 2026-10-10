@@ -22,12 +22,14 @@ from invio.retry import RetrySettings, Sleep
 
 __all__ = [
     "DeliveryReport",
+    "FallbackBinding",
     "Notifier",
     "PageFetcher",
     "ProgressCounts",
     "ProgressEvent",
     "ProgressSnapshot",
     "ProviderBinding",
+    "RoleBinding",
     "RunDeps",
     "RunObserver",
     "SourceFetcher",
@@ -62,13 +64,35 @@ class Notifier(Protocol):
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class ProviderBinding:
-    """A provider with the model ids and registry a run uses with it."""
+class FallbackBinding:
+    """The provider and model a role falls back to when its provider is down or rate-limited."""
 
     provider: LLMProvider
     provider_name: str
-    fast_model: str
-    smart_model: str
+    model: str
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class RoleBinding:
+    """The provider and model of one role (``fast`` or ``smart``), with its optional fallback."""
+
+    provider: LLMProvider
+    provider_name: str
+    model: str
+    fallback: FallbackBinding | None = None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ProviderBinding:
+    """The providers and models of both roles and the registry a run prices calls with.
+
+    Built by ``RunDeps.provider_for``, which owns (and closes) the providers. ``load_job``
+    replaces each role's ``provider`` with the composed one (retries, then the fallback), so
+    the stages call ``provider`` only.
+    """
+
+    fast: RoleBinding
+    smart: RoleBinding
     registry: ModelRegistry
 
 
