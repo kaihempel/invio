@@ -371,6 +371,16 @@ INVIO_TEST_DATABASE_URL="mysql+pymysql://root@127.0.0.1:3306/invio_test?charset=
 Run them serially against MariaDB (no `pytest -n`): the migration tests downgrade and re-upgrade
 the shared test database.
 
+#### End-to-end tests
+
+`uv run pytest -m e2e` runs the whole chain (YAML job, `invio run-due`, digest, mail, archive) in
+a few seconds over local fixtures only: a loopback feed, an in-process SMTP sink and a fake LLM
+provider. It needs no API keys and no internet (any non-loopback connection fails the test), and
+CI enforces a 60 s budget. It uses SQLite unless `INVIO_TEST_DATABASE_URL` is set, so the command
+above for `db` tests also works for `-m "db or e2e"` on MariaDB. The nightly workflow
+(`nightly.yml`) does exactly that and sets `INVIO_REQUIRE_TEST_DATABASE=1`, which aborts the
+session instead of silently falling back to SQLite when no MariaDB URL is given.
+
 ### Job service
 
 `invio.services.jobs.JobService` manages jobs; use it instead of touching SQLAlchemy directly

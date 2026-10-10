@@ -340,12 +340,12 @@ MariaDB workflow that turns red on any failure. The push-time MariaDB job is unc
 **Independent Test**: CI is green on push, and a manual `workflow_dispatch` of **Nightly** is
 green (quickstart §7).
 
-- [ ] T024 [US5] Edit `.github/workflows/ci.yml`, job `checks` (contracts/ci-workflows.md):
+- [X] T024 [US5] Edit `.github/workflows/ci.yml`, job `checks` (contracts/ci-workflows.md):
   - change the step `Tests (pytest)` to `run: uv run pytest --cov -m "not e2e"`;
   - add a step right after it, `name: E2E suite (SQLite, 60 s budget)` with
     `run: timeout 60 uv run pytest -m e2e --cov --cov-append -rs`.
   Do NOT touch the jobs `mariadb` and `deploy-static` (FR-017).
-- [ ] T025 [P] [US5] Create `.github/workflows/nightly.yml` following contracts/ci-workflows.md:
+- [X] T025 [P] [US5] Create `.github/workflows/nightly.yml` following contracts/ci-workflows.md:
   - `---` header, `name: Nightly`;
   - `on: schedule: - cron: "17 2 * * *"` and `workflow_dispatch:`;
   - `permissions: contents: read`;
@@ -357,12 +357,12 @@ green (quickstart §7).
     `uv sync --locked`, and `name: Persistence and e2e tests on MariaDB` with
     `run: uv run pytest -m "db or e2e" -rs`.
   Lines must be ≤ 120 characters.
-- [ ] T026 [US5] Validate the workflows locally:
+- [X] T026 [US5] Validate the workflows locally:
   - `uv run --group deploy yamllint --strict .github/workflows/`;
   - `uv run pytest -m db --collect-only -q | grep -c test_e2e` prints `0` (FR-017);
   - `INVIO_REQUIRE_TEST_DATABASE=1 uv run pytest -m e2e` fails at once without a MariaDB URL
     (FR-016).
-- [ ] T027 [US5] Run the suite against a local MariaDB (quickstart §4, `docker run …
+- [X] T027 [US5] Run the suite against a local MariaDB (quickstart §4, `docker run …
   mariadb:11.4`) with `INVIO_REQUIRE_TEST_DATABASE=1 uv run pytest -m "db or e2e" -rs`. Fix any
   test-side DB assumptions in `tests/e2e_helpers.py`: unique job names, `clean_jobs` teardown,
   timezone-naive datetimes returned by MariaDB (compare as UTC).
@@ -373,7 +373,7 @@ green (quickstart §7).
 
 ## Phase 8: Polish & Cross-Cutting Concerns
 
-- [ ] T028 [P] Update `README.md` near the existing test instructions (around the
+- [X] T028 [P] Update `README.md` near the existing test instructions (around the
   `uv run pytest -m db` section). Add a short "End-to-end tests" paragraph:
   - `uv run pytest -m e2e`: local fixtures only, no keys, no internet, under 60 s;
   - the nightly MariaDB workflow and `INVIO_REQUIRE_TEST_DATABASE`;
