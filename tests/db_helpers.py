@@ -15,6 +15,8 @@ from invio.domain import Candidate, url_hash
 
 # Captured at import time: the autouse ``isolated_settings`` fixture strips INVIO_* variables.
 TEST_DATABASE_URL: str | None = os.environ.get("INVIO_TEST_DATABASE_URL") or None
+# The nightly job sets this: running ``db`` and ``e2e`` tests on SQLite would pass silently.
+REQUIRE_TEST_DATABASE: bool = os.environ.get("INVIO_REQUIRE_TEST_DATABASE") == "1"
 
 # MariaDB reports CHECK violations as OperationalError with these errnos
 # (4025 = ER_CONSTRAINT_FAILED, 3819 = MySQL's ER_CHECK_CONSTRAINT_VIOLATED).

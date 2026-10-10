@@ -103,6 +103,8 @@ select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF", "TID251"]
 "tests/test_notify*.py" = ["F811", "RUF001"]
 "tests/test_cli_notify.py" = ["F811", "RUF001"]
 "tests/test_archive*.py" = ["F811", "RUF001"]
+# Fixtures from ``tests/e2e_helpers.py`` are imported and used as parameters.
+"tests/test_e2e_*.py" = ["F811"]
 
 [tool.ruff.format]
 quote-style = "double"
@@ -136,6 +138,7 @@ markers = [
     "live: real calls to external LLM providers (skipped unless -m names live, e.g. -m live)",
     "browser: real headless-Chromium tests (skipped when Chromium cannot be launched)",
     "db: persistence tests that run on SQLite and, with INVIO_TEST_DATABASE_URL, on MariaDB",
+    "e2e: end-to-end scenarios over local fixtures (SQLite; MariaDB with INVIO_TEST_DATABASE_URL)",
 ]
 
 [tool.coverage.run]
