@@ -27,6 +27,7 @@ import importlib.util
 import logging
 import math
 import re
+import shutil
 import tempfile
 import threading
 from collections.abc import Callable, Iterable, Iterator, Mapping
@@ -540,12 +541,11 @@ def _unavailable(exc: Exception, url: str, description: str | None) -> Transcrip
 @contextmanager
 def _temp_dir(prefix: str) -> Iterator[Path]:
     """A private temporary directory, removed on exit; a failed removal is logged, not raised."""
-    directory = tempfile.TemporaryDirectory(prefix=prefix, ignore_cleanup_errors=True)
-    path = Path(directory.name)
+    path = Path(tempfile.mkdtemp(prefix=prefix))
     try:
         yield path
     finally:
-        directory.cleanup()
+        shutil.rmtree(path, ignore_errors=True)
         if path.exists():
             _log.warning("transcript.cleanup_failed", extra={"prefix": prefix})
 
