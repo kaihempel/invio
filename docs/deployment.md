@@ -328,7 +328,13 @@ What to know when operating it:
   `/var/lib/invio/cache/huggingface` (`XDG_CACHE_HOME` of the units, which is writable and
   persistent): about 0.5 GB for `small`. The host needs outbound HTTPS to the Hugging Face hub at
   that moment.
-* **Temporary audio** lives in the unit's private `/tmp` and is removed after each job.
+* **Temporary audio** lives in the unit's private `/tmp` and is removed after each job. A download
+  is capped at `INVIO_WHISPER_MAX_DURATION_MINUTES` × 48 kB/s; live and upcoming streams are never
+  downloaded (`live_stream`).
+* **Switch off.** With `invio_whisper_enabled: false` the extra is not installed, so a video without
+  subtitles logs `whisper_not_installed` (a warning for the first one of a run, INFO after that)
+  and is rated from title and description. Set `INVIO_WHISPER_MAX_PER_RUN: "0"` in
+  `invio_env_extra` to silence it (`transcription_disabled`, INFO).
 * **JavaScript runtime.** Current yt-dlp versions may need an external JavaScript runtime (for
   example Deno) to list YouTube's audio formats. Without one a video can fail with
   `no_audio_format` (permanent: rated from title and description); subtitles are usually

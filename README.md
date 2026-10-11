@@ -307,7 +307,8 @@ Rules of the fallback:
   a long video can still run past the run's deadline.
 * **Without the extra**, subtitle-backed videos work as usual; a video without subtitles is rated
   from its title and description and the log shows `whisper_not_installed` with the hint
-  `install it with: uv sync --extra whisper`.
+  `install it with: uv sync --extra whisper` (a warning for the first such video of a run, INFO
+  after that).
 * **Fallback off** (`INVIO_WHISPER_MAX_PER_RUN=0`): such a video is rated from title and description
   too (reason `transcription_disabled`); it is not deferred forever.
 * YouTube's audio formats may need an external JavaScript runtime for yt-dlp (for example Deno).
@@ -317,7 +318,7 @@ What a failed transcript means for the item:
 
 | Failure | Examples | Effect |
 |---|---|---|
-| permanent | private, deleted or region-locked video, `too_long`, `whisper_not_installed`, `transcription_disabled`, `no_audio_format`, `no_speech` | not a failure: the item is rated from its title and the video **description** (stored as the teaser when it had none, capped at 2000 characters) |
+| permanent | private, deleted or region-locked video, `too_long`, `live_stream` (live or upcoming), `whisper_not_installed`, `transcription_disabled`, `no_audio_format`, `no_speech` | not a failure: the item is rated from its title and the video **description** (stored as the teaser when it had none, capped at 2000 characters) |
 | transient | timeout, connection error, HTTP 429/5xx | retried like other fetch errors, then the item is `failed` and a later run tries again (up to the attempt limit) |
 | configuration | unreadable `INVIO_YOUTUBE_COOKIES_FILE` | the item fails (`cookies_unavailable`) |
 

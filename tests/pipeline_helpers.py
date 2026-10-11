@@ -47,6 +47,7 @@ from invio.scheduling import backoff
 from invio.sources.errors import TranscriptionDeferred, TranscriptUnavailable
 from invio.sources.transcript import Transcript
 from invio.sources.youtube import YoutubeSource
+from invio.sources.ytdlp import watch_url
 from tests.async_helpers import RecordingSleep
 from tests.db_helpers import make_candidate
 from tests.llm_helpers import FIXTURE_REGISTRY_DIR
@@ -473,6 +474,24 @@ class FakePorts:
 
 
 # --- Jobs and dependencies --------------------------------------------------------------------
+
+
+def watch(video_id: str) -> str:
+    """The canonical watch URL of ``video_id``."""
+    return watch_url(video_id)
+
+
+def video(number: int, **fields: Any) -> Candidate:
+    """A video candidate ``Video <number>`` (YouTube listings carry no teaser); lower first."""
+    values: dict[str, Any] = {
+        "title": f"Video {number}",
+        "type": "video",
+        "teaser": None,
+        "content_hash": None,
+        "published_at": datetime(2026, 10, 1, tzinfo=UTC) - timedelta(hours=number),
+    }
+    values.update(fields)
+    return make_candidate(watch(f"vid{number}"), **values)
 
 
 def make_candidates(count: int, *, prefix: str = "https://example.com/post") -> list[Candidate]:

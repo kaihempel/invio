@@ -3,7 +3,7 @@
 import threading
 import time
 from collections.abc import Callable, Mapping
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final
 
@@ -13,9 +13,12 @@ from invio.sources.transcript import (
     TranscriptBackends,
     YoutubeTranscripts,
 )
+from invio.sources.ytdlp import watch_url
+from tests.conftest import FakeClock
+from tests.youtube_helpers import FakeExtractor
 
 VIDEO_ID: Final = "abc123XYZ_-"
-URL: Final = f"https://www.youtube.com/watch?v={VIDEO_ID}"
+URL: Final = watch_url(VIDEO_ID)
 PROXY: Final = "http://user:secret@proxy.invalid:8080"
 RAW_MESSAGE: Final = "ERROR: [youtube] sensitive-library-text"
 NOW: Final = datetime(2026, 3, 10, 12, 0, tzinfo=UTC)
@@ -53,8 +56,8 @@ def info(
     }
 
 
-class FakeExtract:
-    """Records ``(url, options)`` and returns ``result`` or raises ``exc``."""
+class FakeExtract(FakeExtractor):
+    """:class:`FakeExtractor` whose default result is a video's :func:`info`."""
 
     def __init__(
         self,
@@ -63,20 +66,7 @@ class FakeExtract:
         exc: BaseException | None = None,
         gate: threading.Event | None = None,
     ) -> None:
-        self.result = info() if result is None else result
-        self.exc = exc
-        self.gate = gate
-        self.calls: list[tuple[str, Mapping[str, object]]] = []
-        self.threads: list[str] = []
-
-    def __call__(self, url: str, options: Mapping[str, object]) -> Mapping[str, object]:
-        self.calls.append((url, options))
-        self.threads.append(threading.current_thread().name)
-        if self.gate is not None:
-            self.gate.wait(10)
-        if self.exc is not None:
-            raise self.exc
-        return self.result
+        super().__init__(info() if result is None else result, exc=exc, gate=gate)
 
 
 class FakeSubtitles:
@@ -186,19 +176,6 @@ class FakeTranscriber:
                 self._active -= 1
 
 
-class FakeClock:
-    """A settable aware clock."""
-
-    def __init__(self, now: datetime = NOW) -> None:
-        self.now = now
-
-    def __call__(self) -> datetime:
-        return self.now
-
-    def advance(self, **delta: float) -> None:
-        self.now += timedelta(**delta)
-
-
 def make(
     *,
     extract: Callable[[str, Mapping[str, object]], Mapping[str, object]] | None = None,
@@ -217,7 +194,7 @@ def make(
         transcribe=transcriber if transcriber is not None else FakeTranscriber(),
         whisper_available=whisper if callable(whisper) else (lambda: whisper),
     )
-    return YoutubeTranscripts(backends=backends, clock=clock or FakeClock(), **kwargs)  # type: ignore[arg-type]
+    return YoutubeTranscripts(backends=backends, clock=clock or FakeClock(NOW), **kwargs)  # type: ignore[arg-type]
 
 
 async def fetch(

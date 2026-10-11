@@ -53,6 +53,7 @@ TranscriptionDeferred(Exception)         # reason "cap_reached" | "not_enough_ti
 | `transcription_disabled` | no usable subtitles and the fallback is switched off (`INVIO_WHISPER_MAX_PER_RUN=0`): the video is rated from title and description, never deferred forever | no |
 | `whisper_not_installed` | no usable subtitles and the `whisper` extra is missing; message carries `INSTALL_HINT = "install it with: uv sync --extra whisper"` | no |
 | `too_long` | no subtitles and duration > limit; message: `too_long: <url> (95 min > limit 90 min)` | no |
+| `live_stream` | no subtitles and the video is a live, upcoming or still-processing stream (`is_live`, `live_status`): its audio has no end, it is never downloaded | no |
 | `video_unavailable` | private, deleted, region/age-blocked/members-only, HTTP 404/410, or HTTP 403 confirmed by such a text marker | no |
 | `no_audio_format` | yt-dlp offers no audio-only format | no |
 | `no_speech` | transcription produced empty text | no |

@@ -15,7 +15,7 @@ from invio.domain import ItemStatus, RunStatus
 from invio.pipeline.run import run_job
 from invio.sources.errors import FetchError, TranscriptionDeferred, TranscriptUnavailable
 from tests.conftest import FakeClock
-from tests.db_helpers import make_candidate, make_item
+from tests.db_helpers import make_item
 from tests.pipeline_helpers import (
     Attempts,
     Env,
@@ -25,29 +25,14 @@ from tests.pipeline_helpers import (
     make_candidates,
     make_job_config,
     transcript_of,
+    video,
+    watch,
 )
 
 pytestmark = pytest.mark.usefixtures("clean_jobs")
 
 NextRun = Callable[[ScheduleConfig, datetime], datetime]
 TEXT = "spoken words of the video"
-
-
-def watch(video_id: str) -> str:
-    return f"https://www.youtube.com/watch?v={video_id}"
-
-
-def video(number: int, **fields: Any) -> Any:
-    """A video candidate ``Video <number>`` (YouTube listings carry no teaser)."""
-    values: dict[str, Any] = {
-        "title": f"Video {number}",
-        "type": "video",
-        "teaser": None,
-        "content_hash": None,
-        "published_at": datetime(2026, 10, 1, tzinfo=UTC) - timedelta(hours=number),
-    }
-    values.update(fields)
-    return make_candidate(watch(f"vid{number}"), **values)
 
 
 def _items(engine: Engine) -> dict[str, Item]:

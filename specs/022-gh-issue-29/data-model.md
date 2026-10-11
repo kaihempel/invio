@@ -31,7 +31,7 @@ are never used. Tracks without a VTT format are ignored.
 ## VideoMetadata (internal)
 
 What the single metadata extraction provides: `video_id`, `duration_seconds: int | None`,
-`tracks: list[SubtitleTrack]`, `description: str | None`. Built defensively from the yt-dlp
+`tracks: list[SubtitleTrack]`, `description: str | None`, `live: bool` (live, upcoming or post-live stream). Built defensively from the yt-dlp
 info mapping (wrong types → treated as missing).
 
 ## TranscriptUnavailable (error, `invio.sources.errors`)

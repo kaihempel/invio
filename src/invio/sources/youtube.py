@@ -27,9 +27,7 @@ listing URL; the library's message can contain the proxy URL (with credentials) 
 file path and is never copied into an error or a log line.
 """
 
-import asyncio
 import logging
-import os
 import re
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
@@ -55,9 +53,8 @@ from invio.sources.ytdlp import Extractor
 
 __all__ = ["Extractor", "ListingSummary", "YoutubeSource"]
 
-# Names the tests (and the network guard in tests/conftest.py) reach through this module.
+# The default extractor; tests and the network guard in tests/conftest.py patch it here.
 _yt_dlp_extract = ytdlp.extract_info
-_private_cookie_copy = ytdlp.private_cookie_copy
 
 _log = logging.getLogger("invio.sources.youtube")
 
@@ -207,13 +204,11 @@ class YoutubeSource:
         """Run the extractor for the listing ``url`` on the worker pool under the hard timeout."""
         if self._closed:
             raise RuntimeError("YoutubeSource is closed")
-        self._check_cookies(url)
+        ytdlp.check_cookies(self._cookies_file, url)
         options = self._options(max_items)
-        loop = asyncio.get_running_loop()
         try:
-            return await asyncio.wait_for(
-                loop.run_in_executor(self._executor, partial(self._extract, url, options)),
-                self._timeout,
+            return await ytdlp.run_in_pool(
+                self._executor, partial(self._extract, url, options), self._timeout
             )
         except FetchError:
             raise
@@ -225,17 +220,13 @@ class YoutubeSource:
             reason, status = ytdlp.classify_safely(exc)
             raise FetchError(reason, url=url, status=status) from None
 
-    def _check_cookies(self, url: str) -> None:
-        path = self._cookies_file
-        if path is not None and not (path.is_file() and os.access(path, os.R_OK)):
-            raise FetchError("cookies_unavailable", url=url)
-
     def _options(self, max_items: int) -> dict[str, object]:
         options = ytdlp.base_options(
             timeout=self._timeout, cookies_file=self._cookies_file, proxy=self._proxy
         )
-        options.update({"extract_flat": "in_playlist", "skip_download": True})
-        options["playlistend"] = max_items
+        options.update(
+            {"extract_flat": "in_playlist", "skip_download": True, "playlistend": max_items}
+        )
         return options
 
 

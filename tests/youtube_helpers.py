@@ -9,6 +9,7 @@ from pathlib import Path
 
 from invio.config.job import YoutubeChannelSource, YoutubePlaylistSource
 from invio.sources.youtube import YoutubeSource
+from invio.sources.ytdlp import watch_url
 
 NOW = datetime(2026, 3, 10, 12, 0, tzinfo=UTC)
 PROXY = "http://user:secret@proxy.invalid:8080"
@@ -105,4 +106,4 @@ def source(extract: FakeExtractor, **kwargs: object) -> YoutubeSource:
 
 
 def watch(vid: str) -> str:
-    return f"https://www.youtube.com/watch?v={vid}"
+    return watch_url(vid)

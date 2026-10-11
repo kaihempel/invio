@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from invio.sources import youtube as youtube_module
+from invio.sources import ytdlp
 from invio.sources.errors import FetchError
 from invio.sources.youtube import YoutubeSource
 from tests.youtube_helpers import (
@@ -65,8 +65,8 @@ def test_cookie_copies_are_private_separate_and_removed(tmp_path: Path) -> None:
     seen: list[Path] = []
 
     with (
-        youtube_module._private_cookie_copy(cookies) as first,
-        youtube_module._private_cookie_copy(cookies) as second,
+        ytdlp.private_cookie_copy(cookies) as first,
+        ytdlp.private_cookie_copy(cookies) as second,
     ):
         seen += [first, second]
         assert first != second
@@ -84,7 +84,7 @@ def test_cookie_copy_is_removed_when_the_body_fails(tmp_path: Path) -> None:
     cookies.write_text("x")
     seen: list[Path] = []
 
-    with pytest.raises(RuntimeError), youtube_module._private_cookie_copy(cookies) as copy:
+    with pytest.raises(RuntimeError), ytdlp.private_cookie_copy(cookies) as copy:
         seen.append(copy)
         raise RuntimeError
 
@@ -97,7 +97,7 @@ async def test_cookies_vanishing_before_the_copy_is_cookies_unavailable(
     cookies = tmp_path / "cookies-secret-name.txt"
     cookies.write_text("x")
     adapter = YoutubeSource(cookies_file=cookies, now=lambda: NOW)
-    monkeypatch.setattr(adapter, "_check_cookies", lambda url: cookies.unlink())
+    monkeypatch.setattr(ytdlp, "check_cookies", lambda path, url: cookies.unlink())
 
     with pytest.raises(FetchError) as info:
         await adapter.fetch(channel())

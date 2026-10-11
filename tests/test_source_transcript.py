@@ -18,6 +18,7 @@ from typing import ClassVar
 import pytest
 
 from invio.config.settings import Settings
+from invio.sources import transcript as transcript_module
 from invio.sources.errors import (
     FetchError,
     TranscriptionDeferred,
@@ -38,6 +39,7 @@ from invio.sources.transcript import (
     _yt_dlp_audio,
     _yt_dlp_subtitle,
 )
+from tests.conftest import FakeClock
 from tests.transcript_helpers import (
     NOW,
     PROXY,
@@ -45,7 +47,6 @@ from tests.transcript_helpers import (
     URL,
     VIDEO_ID,
     FakeAudio,
-    FakeClock,
     FakeExtract,
     FakeSubtitles,
     FakeTranscriber,
@@ -1027,6 +1028,72 @@ async def test_other_permanent_reasons_stay_at_info(caplog: pytest.LogCaptureFix
     assert record.levelno == logging.INFO
 
 
+async def test_whisper_not_installed_warns_once_per_adapter_then_logs_at_info(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    adapter = make(extract=no_subtitles(), whisper=False)
+
+    with caplog.at_level(logging.INFO, logger="invio.sources.transcript"):
+        for _ in range(3):
+            with pytest.raises(TranscriptUnavailable):
+                await fetch(adapter)
+
+    levels = [r.levelno for r in caplog.records if r.getMessage() == "transcript.unavailable"]
+    assert levels == [logging.WARNING, logging.INFO, logging.INFO]
+
+
+# --- live streams and the download size cap ---------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"live_status": "is_live"},
+        {"live_status": "is_upcoming"},
+        {"live_status": "post_live"},
+        {"is_live": True},
+    ],
+)
+async def test_a_live_or_upcoming_stream_is_never_downloaded(fields: dict[str, object]) -> None:
+    audio = FakeAudio()
+    adapter = make(extract=FakeExtract({**info(duration=None), **fields}), audio=audio)
+
+    with pytest.raises(TranscriptUnavailable) as caught:
+        await fetch(adapter)
+
+    assert caught.value.reason == "live_stream"
+    assert caught.value.description == "About X"
+    assert not is_transient_fetch(caught.value)
+    assert audio.calls == []
+
+
+@pytest.mark.parametrize("status", ["was_live", "not_live", None])
+async def test_a_finished_stream_or_plain_video_is_transcribed(status: str | None) -> None:
+    adapter = make(extract=FakeExtract({**info(), "live_status": status, "is_live": False}))
+
+    transcript = await fetch(adapter)
+
+    assert transcript.method == "transcription"
+
+
+async def test_subtitles_of_a_live_stream_are_still_used() -> None:
+    extract = FakeExtract(info(subtitles={"de": formats()}) | {"live_status": "post_live"})
+    adapter = make(extract=extract, subtitles=FakeSubtitles({"de": vtt("Hallo")}))
+
+    assert (await fetch(adapter)).method == "subtitles"
+
+
+async def test_the_audio_download_is_capped_in_size_by_the_duration_limit() -> None:
+    audio = FakeAudio()
+    adapter = make(extract=no_subtitles(), audio=audio, max_duration_minutes=30)
+
+    await fetch(adapter)
+
+    ((_, options, _),) = audio.calls
+    assert options["max_filesize"] == 30 * 60 * 48_000
+    assert options["allowed_extractors"] == ["youtube.*"]
+
+
 async def test_audio_longer_than_the_limit_reported_by_the_transcriber_is_too_long() -> None:
     adapter = make(
         extract=FakeExtract(info(duration=None)),
@@ -1179,7 +1246,7 @@ async def test_the_cap_is_not_asked_when_a_track_yields_text() -> None:
     ],
 )
 async def test_the_run_time_check(duration: int | None, minutes_left: int, defer: bool) -> None:
-    audio, clock = FakeAudio(), FakeClock()
+    audio, clock = FakeAudio(), FakeClock(NOW)
     adapter = make(extract=FakeExtract(info(duration=duration)), audio=audio, clock=clock)
     deadline = NOW + timedelta(minutes=minutes_left)
 
@@ -1193,21 +1260,21 @@ async def test_the_run_time_check(duration: int | None, minutes_left: int, defer
 
 
 async def test_without_a_deadline_there_is_no_run_time_check() -> None:
-    clock = FakeClock()
+    clock = FakeClock(NOW)
     adapter = make(extract=FakeExtract(info(duration=80 * 60)), clock=clock)
 
     assert (await fetch(adapter, deadline=None)).method == "transcription"
 
 
 async def test_the_run_time_check_uses_the_clock_when_the_job_starts() -> None:
-    clock, started, gate = FakeClock(), threading.Event(), threading.Event()
+    clock, started, gate = FakeClock(NOW), threading.Event(), threading.Event()
     durations = {"first": 10 * 60, "second": 20 * 60}
 
     def extract(url: str, options: Mapping[str, object]) -> Mapping[str, object]:
         return info(duration=durations["first" if "first" in url else "second"])
 
     def slow_first_download() -> None:
-        clock.advance(minutes=30)  # the first job takes half an hour
+        clock.advance(timedelta(minutes=30))  # the first job takes half an hour
         started.set()
         gate.wait(5)
 
@@ -1377,6 +1444,35 @@ def test_default_transcriber_loads_each_model_size_once(
     assert [m.args[0] for m in fake_faster_whisper.instances] == ["small", "tiny"]
 
 
+def test_default_transcriber_holds_the_model_lock_while_decoding(
+    fake_faster_whisper: type[FakeWhisperModel],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # the cached model is shared by every adapter in the process: its use must be serialised
+    held: list[bool] = []
+    original = FakeWhisperModel.transcribe
+
+    def transcribe(
+        self: FakeWhisperModel, audio: str, *, language: str | None, vad_filter: bool
+    ) -> tuple[Iterator[SimpleNamespace], SimpleNamespace]:
+        segments, info = original(self, audio, language=language, vad_filter=vad_filter)
+
+        def checked() -> Iterator[SimpleNamespace]:
+            for segment in segments:
+                held.append(transcript_module._MODEL_LOCK.locked())
+                yield segment
+
+        return checked(), info
+
+    monkeypatch.setattr(FakeWhisperModel, "transcribe", transcribe)
+
+    _whisper_transcribe(tmp_path / "a", "small", 5400)
+
+    assert held and all(held)
+    assert not transcript_module._MODEL_LOCK.locked()
+
+
 def test_default_transcriber_stops_before_the_segments_when_the_audio_is_too_long(
     fake_faster_whisper: type[FakeWhisperModel], tmp_path: Path
 ) -> None:
@@ -1542,7 +1638,7 @@ async def test_from_settings_reads_the_youtube_and_whisper_settings(tmp_path: Pa
             whisper_model_size="tiny",
             whisper_max_duration_minutes=5,
         ),
-        clock=FakeClock(),
+        clock=FakeClock(NOW),
     )
     adapter._extract = extract
     adapter._download_audio = audio

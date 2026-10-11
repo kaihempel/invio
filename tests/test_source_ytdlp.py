@@ -35,11 +35,50 @@ def test_parse_video_url(url: str, expected: str | None) -> None:
     assert ytdlp.parse_video_url(url) == expected
 
 
-def test_the_worker_bound_is_shared_by_both_adapters() -> None:
-    from invio.sources import transcript, youtube
+def test_check_cookies_accepts_none_and_a_readable_file(tmp_path: Path) -> None:
+    cookies = tmp_path / "cookies.txt"
+    cookies.write_text("x")
 
-    assert youtube._MAX_WORKERS is ytdlp.MAX_WORKERS
-    assert transcript._MAX_WORKERS is ytdlp.MAX_WORKERS
+    ytdlp.check_cookies(None, "https://www.youtube.com/watch?v=abc")
+    ytdlp.check_cookies(cookies, "https://www.youtube.com/watch?v=abc")
+
+
+@pytest.mark.parametrize("kind", ["missing", "directory"])
+def test_check_cookies_rejects_an_unusable_path_without_naming_it(
+    tmp_path: Path, kind: str
+) -> None:
+    path = tmp_path / "secret-cookies.txt"
+    if kind == "directory":
+        path.mkdir()
+
+    with pytest.raises(FetchError) as caught:
+        ytdlp.check_cookies(path, "https://www.youtube.com/watch?v=abc")
+
+    assert caught.value.reason == "cookies_unavailable"
+    assert "secret-cookies" not in str(caught.value)
+
+
+async def test_run_in_pool_returns_the_result_on_the_given_pool() -> None:
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(1, thread_name_prefix="invio-test") as pool:
+        name = await ytdlp.run_in_pool(pool, lambda: threading.current_thread().name, 5.0)
+
+    assert name.startswith("invio-test")
+
+
+async def test_run_in_pool_raises_timeout_error_for_a_hung_call() -> None:
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    release = threading.Event()
+    with ThreadPoolExecutor(1) as pool:
+        try:
+            with pytest.raises(TimeoutError):
+                await ytdlp.run_in_pool(pool, lambda: release.wait(10), 0.05)
+        finally:
+            release.set()
 
 
 def test_watch_url_is_canonical() -> None:

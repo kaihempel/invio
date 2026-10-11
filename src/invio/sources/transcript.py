@@ -7,10 +7,12 @@ yields text.
 
 Only when no track does, the adapter may transcribe the audio locally with ``faster-whisper``
 (the optional ``whisper`` extra). That fallback is bounded and optional: a video longer than the
-configured limit, a missing extra, a full per-run cap (``may_transcribe``) or a run that is out
-of time are reported without any download. Every transcription (download plus recognition) runs
-on a dedicated single-worker pool, so at most one runs per process; others wait. Temporary
-audio lives in a directory that the worker thread removes on success, error and interruption.
+configured limit, a live or upcoming stream, a missing extra, a full per-run cap
+(``may_transcribe``) or a run that is out of time are reported without any download. Every
+transcription (download plus recognition) runs on the adapter's single-worker pool, so at most
+one runs per adapter; others wait. The audio download is capped in size as well (``max_filesize``
+derived from the duration limit). Temporary audio lives in a directory that the worker thread
+removes on success, error and interruption.
 
 ``yt_dlp`` and ``faster_whisper`` are imported lazily, inside the default seam functions only:
 importing this module works without the extra. Failures are
@@ -24,9 +26,9 @@ import html
 import importlib.util
 import logging
 import math
-import os
 import re
 import tempfile
+import threading
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -66,7 +68,6 @@ DEADLINE_RESERVE: Final = timedelta(minutes=10)
 
 _log = logging.getLogger("invio.sources.transcript")
 
-_MAX_WORKERS: Final = ytdlp.MAX_WORKERS
 _MAX_TRACKS: Final = 4
 _TAG: Final = re.compile(r"<[^>]*>")
 _NON_CUE_BLOCKS: Final = frozenset({"NOTE", "STYLE", "REGION"})
@@ -80,6 +81,13 @@ _UNAVAILABLE_MARKERS: Final = (
     "this video is private",
 )
 _NO_AUDIO_MARKER: Final = "requested format is not available"
+# yt-dlp ``live_status`` values of a stream whose audio has no end (yet) or is still processed.
+_LIVE_STATUSES: Final = frozenset({"is_live", "is_upcoming", "post_live"})
+# Upper bound of the audio bit rate (384 kbit/s, above YouTube's best audio-only formats): the
+# duration limit times this rate caps the download size.
+_MAX_AUDIO_BYTES_PER_SECOND: Final = 48_000
+# Serialises every use of the process-wide cached Whisper model (``_model``) across adapters.
+_MODEL_LOCK: Final = threading.Lock()
 
 
 class AudioTooLong(Exception):
@@ -123,6 +131,7 @@ class VideoMetadata:
     duration_seconds: int | None
     tracks: list[SubtitleTrack]
     description: str | None
+    live: bool = False  # a live, upcoming or still-processing stream
 
 
 @dataclass(frozen=True, slots=True)
@@ -198,6 +207,7 @@ def _metadata(info: Mapping[str, object], video_id: str) -> VideoMetadata:
         duration_seconds=_duration(info.get("duration")),
         tracks=tracks,
         description=description if isinstance(description, str) and description.strip() else None,
+        live=info.get("is_live") is True or info.get("live_status") in _LIVE_STATUSES,
     )
 
 
@@ -298,11 +308,14 @@ class YoutubeTranscripts:
         )
         self._clock = clock if clock is not None else lambda: datetime.now(UTC)
         # threads are started lazily, on the first call
-        self._executor = ThreadPoolExecutor(_MAX_WORKERS, thread_name_prefix="invio-transcript")
-        # One worker: at most one download plus transcription runs per process, others queue.
-        # The cached Whisper model of ``_model`` is only safe because of that.
+        self._executor = ThreadPoolExecutor(
+            ytdlp.MAX_WORKERS, thread_name_prefix="invio-transcript"
+        )
+        # One worker: at most one download plus transcription runs per adapter, others queue.
         self._whisper_pool = ThreadPoolExecutor(1, thread_name_prefix="invio-whisper")
         self._closed = False
+        # the missing extra is a warning once, then INFO: it is the default deployment
+        self._missing_extra_reported = False
 
     @classmethod
     def from_settings(
@@ -347,12 +360,15 @@ class YoutubeTranscripts:
         if video_id is None:
             raise TranscriptUnavailable("unsupported_url", url=video_url)
         url = ytdlp.watch_url(video_id)
-        self._check_cookies(url)
+        ytdlp.check_cookies(self._cookies_file, url)
         try:
             return await self._retrieve(url, video_id, language, may_transcribe, deadline)
         except TranscriptUnavailable as err:
-            # a missing extra is an operator problem, the other reasons are facts about a video
-            level = logging.WARNING if err.reason == "whisper_not_installed" else logging.INFO
+            # a missing extra is an operator problem (said once), the others are facts about a video
+            level = logging.INFO
+            if err.reason == "whisper_not_installed" and not self._missing_extra_reported:
+                self._missing_extra_reported = True
+                level = logging.WARNING
             _log.log(
                 level, "transcript.unavailable", extra={"video_id": video_id, "reason": err.reason}
             )
@@ -425,13 +441,16 @@ class YoutubeTranscripts:
     ) -> Transcript:
         """The fallback: download the audio and transcribe it on the single whisper worker.
 
-        The guards run before any download, in this order: fallback switched off, video longer
-        than the limit, extra not installed, no slot left in the run. Waiting for the worker has
-        no timeout: the job is bounded by the duration limit, and a thread cannot be stopped.
+        The guards run before any download, in this order: fallback switched off, live or
+        upcoming stream (its audio has no end), video longer than the limit, extra not installed,
+        no slot left in the run. Waiting for the worker has no timeout: the job is bounded by the
+        duration limit and the download size cap, and a thread cannot be stopped.
         """
         description = meta.description
         if not self._transcription_enabled:
             raise TranscriptUnavailable("transcription_disabled", url=url, description=description)
+        if meta.live:
+            raise TranscriptUnavailable("live_stream", url=url, description=description)
         limit = self._max_duration_minutes * 60
         if meta.duration_seconds is not None and meta.duration_seconds > limit:
             raise self._too_long(url, meta.duration_seconds, description)
@@ -467,8 +486,9 @@ class YoutubeTranscripts:
             needed = timedelta(seconds=meta.duration_seconds or limit) + DEADLINE_RESERVE
             if self._clock() + needed > deadline:
                 raise TranscriptionDeferred("not_enough_time")
+        capped = {**options, "max_filesize": limit * _MAX_AUDIO_BYTES_PER_SECOND}
         with _temp_dir("invio-audio-") as tmp:
-            path = self._download_audio(url, options, tmp)
+            path = self._download_audio(url, capped, tmp)
             return self._transcribe(path, self._model_size, limit)
 
     def _too_long(self, url: str, seconds: float, description: str | None) -> TranscriptUnavailable:
@@ -482,13 +502,7 @@ class YoutubeTranscripts:
 
     async def _in_pool[T](self, call: Callable[[], T]) -> T:
         """Run the blocking ``call`` on the metadata pool under the hard timeout."""
-        loop = asyncio.get_running_loop()
-        return await asyncio.wait_for(loop.run_in_executor(self._executor, call), self._timeout)
-
-    def _check_cookies(self, url: str) -> None:
-        path = self._cookies_file
-        if path is not None and not (path.is_file() and os.access(path, os.R_OK)):
-            raise FetchError("cookies_unavailable", url=url)
+        return await ytdlp.run_in_pool(self._executor, call, self._timeout)
 
     def _options(self) -> dict[str, object]:
         return ytdlp.base_options(
@@ -562,7 +576,11 @@ def _yt_dlp_subtitle(
 
 
 def _yt_dlp_audio(url: str, options: Mapping[str, object], tmp: Path) -> Path:
-    """The default audio downloader: the best audio-only format, no post-processing."""
+    """The default audio downloader: the best audio-only format, no post-processing.
+
+    A format larger than ``options["max_filesize"]`` is skipped by yt-dlp and leaves no file:
+    reported as ``no_audio_format``.
+    """
     params = dict(options)
     params.update({"format": "bestaudio", "outtmpl": str(tmp / "audio.%(ext)s")})
     ytdlp.download(url, params)
@@ -595,7 +613,7 @@ class _Model(Protocol):
 def _model(size: str) -> _Model:
     """The Whisper model of ``size``, loaded once per process (CPU, int8).
 
-    Caching is safe because every transcription runs on the single ``invio-whisper`` worker.
+    Shared by every adapter in the process: only use it while holding ``_MODEL_LOCK``.
     """
     from faster_whisper import WhisperModel
 
@@ -608,10 +626,11 @@ def _whisper_transcribe(path: Path, model_size: str, max_seconds: int) -> tuple[
     Raises :class:`AudioTooLong` before reading any segment when the audio is longer than
     ``max_seconds`` and :class:`ImportError` when the ``whisper`` extra is missing.
     """
-    segments, info = _model(model_size).transcribe(str(path), language=None, vad_filter=True)
-    if info.duration > max_seconds:
-        raise AudioTooLong(info.duration)
-    text = " ".join(part for segment in segments if (part := segment.text.strip()))
+    with _MODEL_LOCK:  # the segments decode lazily: hold the lock until they are read
+        segments, info = _model(model_size).transcribe(str(path), language=None, vad_filter=True)
+        if info.duration > max_seconds:
+            raise AudioTooLong(info.duration)
+        text = " ".join(part for segment in segments if (part := segment.text.strip()))
     return text, info.language
 
 

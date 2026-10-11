@@ -194,8 +194,8 @@ def clean_jobs(db_engine: Engine) -> Iterator[None]:
 class FakeClock:
     """A settable clock: call it for ``now``; ``advance`` moves it forward."""
 
-    def __init__(self) -> None:
-        self.now = datetime(2026, 10, 4, 12, 0, tzinfo=UTC)
+    def __init__(self, now: datetime = datetime(2026, 10, 4, 12, 0, tzinfo=UTC)) -> None:
+        self.now = now
 
     def __call__(self) -> datetime:
         return self.now

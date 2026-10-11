@@ -10,7 +10,7 @@ import dataclasses
 import logging
 import urllib.error
 from collections.abc import Callable, Iterator, Mapping
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -26,30 +26,13 @@ from invio.pipeline.run import RunResult, run_job
 from invio.sources import transcript as transcript_module
 from invio.sources.transcript import SubtitleTrack, TranscriptBackends, YoutubeTranscripts
 from tests.conftest import FakeClock
-from tests.db_helpers import make_candidate
-from tests.pipeline_helpers import Env, FakePorts, build_env, make_job_config
+from tests.pipeline_helpers import Env, FakePorts, build_env, make_job_config, video, watch
 from tests.transcript_helpers import PROXY, RAW_MESSAGE, FakeAudio, FakeTranscriber, vtt
 
 pytestmark = pytest.mark.usefixtures("clean_jobs")
 
 NextRun = Callable[[ScheduleConfig, datetime], datetime]
 FEED = "https://example.com/feed.xml"
-
-
-def watch(video_id: str) -> str:
-    return f"https://www.youtube.com/watch?v={video_id}"
-
-
-def video(number: int) -> Any:
-    """Candidate ``Video <number>`` (no teaser, like a YouTube listing); lower numbers first."""
-    return make_candidate(
-        watch(f"vid{number}"),
-        title=f"Video {number}",
-        type="video",
-        teaser=None,
-        content_hash=None,
-        published_at=datetime(2026, 10, 1, tzinfo=UTC) - timedelta(hours=number),
-    )
 
 
 def video_info(

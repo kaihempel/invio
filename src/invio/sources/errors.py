@@ -100,7 +100,8 @@ class TranscriptUnavailable(FetchError):
     """No transcript could be had for a video; ``reason`` says why.
 
     Permanent reasons (``video_unavailable``, ``no_audio_format``, ``no_speech``,
-    ``unsupported_url``, ``too_long``, ``whisper_not_installed``, ``transcription_disabled``)
+    ``unsupported_url``, ``too_long``, ``live_stream``, ``whisper_not_installed``,
+    ``transcription_disabled``)
     and transient ones (``timeout``, ``connection_failed``, ``invalid_response``, retryable
     ``http_status``) follow :func:`is_transient_fetch`. ``description`` is the video's
     description, kept as an attribute so the item can still be rated; it never appears in

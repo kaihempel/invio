@@ -13,12 +13,14 @@ Both adapters apply the same secret-safety rules, so the code lives once, here:
 ``yt_dlp`` is imported lazily, only inside the functions that need it.
 """
 
+import asyncio
 import logging
 import os
 import re
 import shutil
 import tempfile
 from collections.abc import Callable, Iterator, Mapping
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from functools import cache
@@ -34,12 +36,14 @@ __all__ = [
     "Extractor",
     "NullLogger",
     "base_options",
+    "check_cookies",
     "classify_safely",
     "download",
     "extract_info",
     "failure_text",
     "parse_video_url",
     "private_cookie_copy",
+    "run_in_pool",
     "watch_url",
 ]
 
@@ -122,6 +126,22 @@ def base_options(
     if proxy:
         options["proxy"] = proxy
     return options
+
+
+def check_cookies(path: Path | None, url: str) -> None:
+    """Raise ``FetchError("cookies_unavailable")`` if a configured cookie file is not readable."""
+    if path is not None and not (path.is_file() and os.access(path, os.R_OK)):
+        raise FetchError("cookies_unavailable", url=url)
+
+
+async def run_in_pool[T](executor: ThreadPoolExecutor, call: Callable[[], T], timeout: float) -> T:
+    """Run the blocking ``call`` on the adapter's own ``executor`` under the hard ``timeout``.
+
+    On timeout the thread keeps running (a thread cannot be stopped); the pool size bounds how
+    many hung calls an adapter can hold.
+    """
+    loop = asyncio.get_running_loop()
+    return await asyncio.wait_for(loop.run_in_executor(executor, call), timeout)
 
 
 @contextmanager
