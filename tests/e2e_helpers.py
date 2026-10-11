@@ -8,15 +8,14 @@ and the ``no_external_network`` fixture turns any other connection into a test f
 import asyncio
 import dataclasses
 import http.server
-import ipaddress
 import json
 import os
 import re
-import socket
 import socketserver
 import threading
 from collections import Counter
 from collections.abc import Callable, Iterator, Sequence
+from contextlib import ExitStack
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from email.utils import format_datetime
@@ -44,6 +43,8 @@ from invio.pipeline.due import DueReport, run_due
 from invio.scheduling.next_run import compute_next_run
 from tests.conftest import FakeClock
 from tests.db_helpers import TEST_DATABASE_URL, uses_sqlite
+from tests.e2e_bootstrap.network_guard import ExternalNetworkError
+from tests.e2e_bootstrap.network_guard import install as install_network_guard
 from tests.http_helpers import LOOPBACK, LoopbackServer, Route
 from tests.pipeline_helpers import (
     RoutedFakeProvider,
@@ -65,6 +66,7 @@ __all__ = [
     "Observed",
     "archive_pages",
     "assert_no_external_resources",
+    "database_url_for",
     "e2e_env",
     "initial_articles",
     "mail_texts",
@@ -79,7 +81,6 @@ __all__ = [
 RECIPIENTS: tuple[str, str] = ("reader-1@example.com", "reader-2@example.com")
 ARCHIVE_BASE_URL = "https://archive.example.test/digests"
 SEMANTIC_DESCRIPTION = "Orchard keepers share field notes about growing apples."
-_LOOPBACK_NAMES = frozenset({"localhost", ""})
 
 
 # --- Articles and the feed ---------------------------------------------------------------------
@@ -207,25 +208,6 @@ def scenario_provider(articles: Sequence[E2EArticle]) -> RoutedFakeProvider:
 # --- Network guard -----------------------------------------------------------------------------
 
 
-class ExternalNetworkError(AssertionError):
-    """A test tried to reach a host outside loopback."""
-
-
-def _is_local(host: object) -> bool:
-    if host is None:
-        return True  # getaddrinfo(None, port) resolves the local host
-    if isinstance(host, bytes):
-        host = host.decode("ascii", "replace")
-    if not isinstance(host, str):
-        return False
-    if host in _LOOPBACK_NAMES:
-        return True
-    try:
-        return ipaddress.ip_address(host.split("%")[0]).is_loopback
-    except ValueError:
-        return False
-
-
 @pytest.fixture
 def no_external_network(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[str]]:
     """Fail on any connect or DNS lookup outside loopback; drop provider and SMTP credentials.
@@ -234,40 +216,16 @@ def no_external_network(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[str]]:
     test at teardown, unless the test clears the list on purpose.
     """
     blocked: list[str] = []
-    real_connect = socket.socket.connect
-    real_connect_ex = socket.socket.connect_ex
-    real_getaddrinfo = socket.getaddrinfo
-
-    def check(host: object) -> None:
-        if not _is_local(host):
-            blocked.append(str(host))
-            raise ExternalNetworkError(f"external network access blocked: {host}")
-
-    def check_address(sock: socket.socket, address: Any) -> None:
-        if sock.family != socket.AF_UNIX:
-            check(address[0])
-
-    def connect(self: socket.socket, address: Any) -> None:
-        check_address(self, address)
-        real_connect(self, address)
-
-    def connect_ex(self: socket.socket, address: Any) -> int:
-        check_address(self, address)
-        return real_connect_ex(self, address)
-
-    def getaddrinfo(host: Any, *args: Any, **kwargs: Any) -> Any:
-        check(host)
-        return real_getaddrinfo(host, *args, **kwargs)
-
-    monkeypatch.setattr(socket.socket, "connect", connect)
-    monkeypatch.setattr(socket.socket, "connect_ex", connect_ex)
-    monkeypatch.setattr(socket, "getaddrinfo", getaddrinfo)
+    uninstall = install_network_guard(blocked)
     for key in list(os.environ):
         if key.endswith("_API_KEY"):
             monkeypatch.delenv(key, raising=False)
     monkeypatch.delenv("INVIO_SMTP_USER", raising=False)
     monkeypatch.delenv("INVIO_SMTP_PASSWORD", raising=False)
-    yield blocked
+    try:
+        yield blocked
+    finally:
+        uninstall()
     assert not blocked, f"external network access was attempted: {blocked}"
 
 
@@ -433,63 +391,71 @@ def e2e_env(
     _server_engine: Engine | None,
     clean_jobs: None,
 ) -> Iterator[E2EEnv]:
-    """A fresh scenario environment; nothing is shared between tests."""
-    feed = E2EFeed(initial_articles(fake_clock()))
-    feed.start()
-    provider = scenario_provider(feed.articles)
-    database_url = database_url_for(tmp_path)
-    archive_dir = tmp_path / "archive"
-    engine = _server_engine if _server_engine is not None else create_db_engine(database_url)
-    if _server_engine is not None:
-        # run-due runs every due job of the shared database: start without leftovers.
-        with session_scope(session_factory(engine)) as session:
-            session.execute(delete(Job))
-    try:
-        with _serve() as mail:
-            monkeypatch.setenv("INVIO_DATABASE_URL", database_url)
-            monkeypatch.setenv("INVIO_ARCHIVE_DIR", str(archive_dir))
-            monkeypatch.setenv("INVIO_SMTP_HOST", mail.host)
-            monkeypatch.setenv("INVIO_SMTP_PORT", str(mail.port))
-            monkeypatch.setenv("INVIO_SMTP_SECURITY", "none")
-            monkeypatch.setenv("INVIO_SMTP_FROM", "invio@example.test")
-            monkeypatch.setenv("INVIO_HTTP_HOST_INTERVAL_SECONDS", "0.01")
-            get_settings.cache_clear()
-            patched_providers("ollama", provider)
+    """A fresh scenario environment; nothing is shared between tests.
 
-            async def due(limit: int | None, parallel: int) -> DueReport:
-                async with default_deps(get_settings(), allow_networks=LOOPBACK) as deps:
-                    fixed = dataclasses.replace(deps, clock=fake_clock)
-                    return await run_due(limit=limit, parallel=parallel, deps=fixed)
+    Every resource registers its cleanup right after it is created, so a failure during setup
+    still stops the servers and disposes the engine.
+    """
+    # ``_server_engine`` and ``clean_jobs`` matter on MariaDB only (a shared database whose jobs
+    # must not leak between tests); against SQLite they are a no-op for this suite.
+    with ExitStack() as stack:
+        feed = E2EFeed(initial_articles(fake_clock()))
+        stack.callback(feed.stop)  # stop() is safe on a server that never started
+        feed.start()
+        provider = scenario_provider(feed.articles)
+        database_url = database_url_for(tmp_path)
+        archive_dir = tmp_path / "archive"
+        if _server_engine is not None:
+            engine = _server_engine
+            # run-due runs every due job of the shared database: start without leftovers. The
+            # delete relies on the database's ON DELETE CASCADE to remove runs, items, digests
+            # and notifications (Core ``delete`` does not cascade in Python).
+            with session_scope(session_factory(engine)) as session:
+                session.execute(delete(Job))
+        else:
+            engine = create_db_engine(database_url)
+            stack.callback(engine.dispose)
+        mail = stack.enter_context(_serve())
+        monkeypatch.setenv("INVIO_DATABASE_URL", database_url)
+        monkeypatch.setenv("INVIO_ARCHIVE_DIR", str(archive_dir))
+        monkeypatch.setenv("INVIO_SMTP_HOST", mail.host)
+        monkeypatch.setenv("INVIO_SMTP_PORT", str(mail.port))
+        monkeypatch.setenv("INVIO_SMTP_SECURITY", "none")
+        monkeypatch.setenv("INVIO_SMTP_FROM", "invio@example.test")
+        monkeypatch.setenv("INVIO_HTTP_HOST_INTERVAL_SECONDS", "0.01")
+        get_settings.cache_clear()
+        patched_providers("ollama", provider)
 
-            # ``default_deps`` hands ``deliver_digest`` no clock (it defaults to the wall clock),
-            # so replacing ``RunDeps.clock`` alone would leave the mail footer's run time and
-            # the notification timestamps wall-clock dependent.
-            async def deliver(*args: Any, **kwargs: Any) -> Any:
-                return await deliver_digest(*args, **kwargs, clock=fake_clock)
+        async def due(limit: int | None, parallel: int) -> DueReport:
+            async with default_deps(get_settings(), allow_networks=LOOPBACK) as deps:
+                fixed = dataclasses.replace(deps, clock=fake_clock)
+                return await run_due(limit=limit, parallel=parallel, deps=fixed)
 
-            monkeypatch.setattr(deps_module, "deliver_digest", deliver)
-            monkeypatch.setattr(
-                run_due_module,
-                "_run_due",
-                lambda limit, parallel: asyncio.run(due(limit, parallel)),
-            )
-            job_name = f"e2e-{uuid4().hex[:8]}"
-            yield E2EEnv(
-                tmp=tmp_path,
-                database_url=database_url,
-                archive_dir=archive_dir,
-                job_name=job_name,
-                job_yaml=write_job_yaml(tmp_path / f"{job_name}.yaml", feed_url=feed.feed_url),
-                feed=feed,
-                mail=mail,
-                provider=provider,
-                clock=fake_clock,
-                assert_engine=engine,
-            )
-    finally:
-        feed.stop()
-        if _server_engine is None:
-            engine.dispose()
+        # ``default_deps`` hands ``deliver_digest`` no clock (it defaults to the wall clock),
+        # so replacing ``RunDeps.clock`` alone would leave the mail footer's run time and
+        # the notification timestamps wall-clock dependent.
+        async def deliver(*args: Any, **kwargs: Any) -> Any:
+            return await deliver_digest(*args, **kwargs, clock=fake_clock)
+
+        monkeypatch.setattr(deps_module, "deliver_digest", deliver)
+        monkeypatch.setattr(
+            run_due_module,
+            "_run_due",
+            lambda limit, parallel: asyncio.run(due(limit, parallel)),
+        )
+        job_name = f"e2e-{uuid4().hex[:8]}"
+        yield E2EEnv(
+            tmp=tmp_path,
+            database_url=database_url,
+            archive_dir=archive_dir,
+            job_name=job_name,
+            job_yaml=write_job_yaml(tmp_path / f"{job_name}.yaml", feed_url=feed.feed_url),
+            feed=feed,
+            mail=mail,
+            provider=provider,
+            clock=fake_clock,
+            assert_engine=engine,
+        )
 
 
 # --- Scenario steps and assertions -------------------------------------------------------------
@@ -563,7 +529,11 @@ class FakeOllamaServer:
 
             def do_POST(self) -> None:
                 length = int(self.headers.get("Content-Length", "0"))
-                body = json.loads(self.rfile.read(length) or b"{}")
+                try:
+                    body = json.loads(self.rfile.read(length) or b"{}")
+                except ValueError:
+                    self.send_error(400, "invalid JSON")
+                    return
                 data = json.dumps(owner._answer(body)).encode()
                 self.send_response(200 if self.path == "/api/chat" else 404)
                 self.send_header("Content-Type", "application/json; charset=utf-8")

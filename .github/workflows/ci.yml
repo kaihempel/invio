@@ -39,7 +39,7 @@ jobs:
         run: uv run pytest --cov -m "not e2e"
 
       - name: E2E suite (SQLite, 60 s budget)
-        run: timeout 60 uv run pytest -m e2e --cov --cov-append -rs
+        run: timeout --kill-after=5 60 uv run pytest -m e2e --cov --cov-append -rs
 
   deploy-static:
     # Static checks for deploy/: unit verification, YAML and Ansible lint and the unit contract tests.
