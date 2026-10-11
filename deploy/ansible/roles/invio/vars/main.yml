@@ -21,7 +21,8 @@ invio_llm_providers:
 # Memory ceilings: a drop-in is written only when the value differs from the shipped default.
 invio_memory_overrides:
   - unit: invio-run-due.service
-    value: "{{ invio_run_due_memory_max }}"
+    # local transcription needs more memory: its limit replaces the plain one while enabled
+    value: "{{ invio_whisper_run_due_memory_max if invio_whisper_enabled | bool else invio_run_due_memory_max }}"
     default: 1G
   - unit: invio-notify-retry.service
     value: "{{ invio_notify_retry_memory_max }}"

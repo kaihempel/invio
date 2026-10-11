@@ -19,6 +19,7 @@ from invio.pipeline import deps as deps_module
 from invio.pipeline.deps import default_deps
 from invio.scheduling.next_run import compute_next_run
 from invio.sources.http import NotModified, SafeHttpClient
+from invio.sources.transcript import YoutubeTranscripts
 from invio.sources.youtube import YoutubeSource
 from tests.http_helpers import FakeResolver, RecordingTransport
 from tests.llm_helpers import write_registry
@@ -100,6 +101,84 @@ class _RecordingYoutube:
 
     def close(self) -> None:
         self.closed += 1
+
+
+class _RecordingTranscripts:
+    """Stands in for ``YoutubeTranscripts``: records construction, calls and closing."""
+
+    instances: ClassVar[list["_RecordingTranscripts"]] = []
+
+    def __init__(self, **kwargs: Any) -> None:
+        self.kwargs = kwargs
+        self.closed = 0
+        _RecordingTranscripts.instances.append(self)
+
+    @classmethod
+    def from_settings(cls, settings: Settings, *, clock: Any = None) -> "_RecordingTranscripts":
+        return cls(settings=settings, clock=clock)
+
+    async def get_transcript(self, url: str, /, **kwargs: Any) -> str:
+        return f"transcript of {url}"
+
+    def close(self) -> None:
+        self.closed += 1
+
+
+@pytest.fixture
+def recording_transcripts(monkeypatch: pytest.MonkeyPatch) -> type[_RecordingTranscripts]:
+    _RecordingTranscripts.instances = []
+    monkeypatch.setattr(deps_module, "YoutubeTranscripts", _RecordingTranscripts)
+    return _RecordingTranscripts
+
+
+async def test_the_transcript_adapter_is_built_from_the_settings_and_wired(
+    recording_transcripts: type[_RecordingTranscripts],
+) -> None:
+    settings = _settings(whisper_max_per_run=5)
+
+    async with default_deps(settings, transport=RecordingTransport(_handler)) as deps:
+        (adapter,) = recording_transcripts.instances
+        assert adapter.kwargs["settings"] is settings
+        assert adapter.kwargs["clock"] is deps.clock  # the lock check and the deadline agree
+        assert deps.max_transcriptions_per_run == 5
+        assert await deps.fetch_transcript(
+            "u", language="en", may_transcribe=bool, deadline=None
+        ) == ("transcript of u")
+        assert adapter.closed == 0
+
+    assert adapter.closed == 1
+
+
+async def test_the_default_transcription_cap_is_three(
+    recording_transcripts: type[_RecordingTranscripts],
+) -> None:
+    async with default_deps(_settings(), transport=RecordingTransport(_handler)) as deps:
+        assert deps.max_transcriptions_per_run == 3
+
+
+async def test_the_transcript_adapter_is_closed_when_the_body_raises(
+    recording_transcripts: type[_RecordingTranscripts],
+) -> None:
+    with pytest.raises(RuntimeError, match="boom"):
+        async with default_deps(_settings(), transport=RecordingTransport(_handler)):
+            raise RuntimeError("boom")
+
+    (adapter,) = recording_transcripts.instances
+    assert adapter.closed == 1
+
+
+async def test_the_real_transcript_adapter_is_wired_and_closed() -> None:
+    async with default_deps(
+        _settings(whisper_max_per_run=0), transport=RecordingTransport(_handler)
+    ) as deps:
+        owner = deps.fetch_transcript.__self__  # type: ignore[attr-defined]
+        assert isinstance(owner, YoutubeTranscripts)
+        assert deps.max_transcriptions_per_run == 0
+
+    with pytest.raises(RuntimeError, match="closed"):
+        await owner.get_transcript(
+            "https://www.youtube.com/watch?v=abc", language="en", may_transcribe=bool
+        )
 
 
 @pytest.fixture

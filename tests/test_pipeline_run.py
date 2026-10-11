@@ -25,11 +25,13 @@ from tests.http_helpers import FakeResolver, RecordingTransport
 from tests.pipeline_helpers import (
     Env,
     FakePorts,
+    FakeTranscripts,
     RoutedFakeProvider,
     build_env,
     make_candidates,
     make_job_config,
     relevance_reply,
+    transcript_of,
 )
 
 pytestmark = pytest.mark.usefixtures("clean_jobs")
@@ -248,12 +250,23 @@ async def test_youtube_videos_reach_the_pipeline_as_video_items(
 ) -> None:
     listing = {"entries": [{"id": "vid1", "title": "Video 1"}, {"id": "vid2", "title": "Video 2"}]}
     config = make_job_config(sources=[{"type": "youtube_channel", "channel_id": "UC123"}])
-    ports = FakePorts(youtube={CHANNEL_LISTING: listing})
+    transcripts = FakeTranscripts(
+        {
+            "https://www.youtube.com/watch?v=vid1": transcript_of("spoken words of video one"),
+            "https://www.youtube.com/watch?v=vid2": transcript_of("spoken words of video two"),
+        }
+    )
+    ports = FakePorts(youtube={CHANNEL_LISTING: listing}, transcripts=transcripts)
     env = build_env(db_engine, fake_clock, recording_next_run, config=config, ports=ports)
 
     result = await run_job(env.job_id, deps=env.deps)
 
     items = _rows(db_engine, Item)
+    assert {i.title: i.raw_content for i in items} == {
+        "Video 1": "spoken words of video one",
+        "Video 2": "spoken words of video two",
+    }
+    assert env.ports.page_calls == {}
     assert {(i.title, i.type, i.url) for i in items} == {
         ("Video 1", "video", "https://www.youtube.com/watch?v=vid1"),
         ("Video 2", "video", "https://www.youtube.com/watch?v=vid2"),
@@ -384,6 +397,7 @@ async def test_s30_a_page_mode_web_item_is_fetched_unconditionally(
             session_factory=env.factory,
             fetch_source=real.fetch_source,
             fetch_page=real.fetch_page,
+            fetch_transcript=env.deps.fetch_transcript,
             provider_for=env.deps.provider_for,
             notify=env.deps.notify,
             next_run=env.deps.next_run,

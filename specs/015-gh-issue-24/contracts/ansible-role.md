@@ -49,6 +49,8 @@ that changes the host.
 | `invio_healthcheck_url` | unset |
 | `invio_env_extra` | `{}` (keys must match `^INVIO_[A-Z0-9_]+$` and must not be a key the role writes itself, including `INVIO_ENV_FILE`) |
 | `invio_run_due_memory_max` / `invio_notify_retry_memory_max` | `1G` / `256M` |
+| `invio_whisper_enabled` | `false` (opt-in local transcription of videos without subtitles: `uv sync --extra whisper`; see [022 deployment-whisper](../../022-gh-issue-29/contracts/deployment-whisper.md)) |
+| `invio_whisper_run_due_memory_max` | `3G` (the run-due `MemoryMax` instead of `invio_run_due_memory_max` while the switch is on) |
 | `invio_update_wait_timeout` | `11100` (seconds: 3 h + 5 min) |
 
 ## Task order (`tasks/main.yml`)

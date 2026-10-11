@@ -27,18 +27,13 @@ listing URL; the library's message can contain the proxy URL (with credentials) 
 file path and is never copied into an error or a log line.
 """
 
-import asyncio
 import logging
-import os
 import re
-import shutil
-import tempfile
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
-from functools import cache, partial
+from functools import partial
 from pathlib import Path
 from typing import Final, Literal, Self
 
@@ -50,22 +45,22 @@ from invio.config.job import (
 )
 from invio.config.settings import Settings
 from invio.domain import Candidate, url_hash
+from invio.sources import ytdlp
 from invio.sources.errors import FetchError
 from invio.sources.freshness import age_cutoff, clamp_or_expire
 from invio.sources.text import collapse
+from invio.sources.ytdlp import Extractor
 
 __all__ = ["Extractor", "ListingSummary", "YoutubeSource"]
 
-type Extractor = Callable[[str, Mapping[str, object]], Mapping[str, object]]
-"""``(listing_url, yt_dlp_options) -> info mapping``; blocking, runs in a worker thread."""
+# The default extractor; tests and the network guard in tests/conftest.py patch it here.
+_yt_dlp_extract = ytdlp.extract_info
 
 _log = logging.getLogger("invio.sources.youtube")
 
-_VIDEO_ID: Final = re.compile(r"[A-Za-z0-9_-]{1,64}")
+_VIDEO_ID: Final = ytdlp.VIDEO_ID
 _UPLOAD_DATE: Final = re.compile(r"[0-9]{8}")
-_SOCKET_TIMEOUT_CAP: Final = 20.0
-_CHAIN_DEPTH: Final = 8
-_MAX_WORKERS: Final = 4
+_MAX_WORKERS: Final = ytdlp.MAX_WORKERS
 # Flat listings keep private/deleted videos as placeholder entries with these titles.
 _PLACEHOLDER_TITLES: Final = frozenset({"[Private video]", "[Deleted video]"})
 _HIDDEN_AVAILABILITY: Final = frozenset(
@@ -105,7 +100,7 @@ class _Video:
 
     @property
     def url(self) -> str:
-        return f"https://www.youtube.com/watch?v={self.id}"
+        return ytdlp.watch_url(self.id)
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,22 +110,6 @@ class ListingSummary:
     title: str | None
     entry_count: int
     newest: datetime | None
-
-
-class _NullLogger:
-    """Swallows yt-dlp's own output (it may echo the proxy URL or cookie path)."""
-
-    def debug(self, msg: object) -> None:
-        pass
-
-    def info(self, msg: object) -> None:
-        pass
-
-    def warning(self, msg: object) -> None:
-        pass
-
-    def error(self, msg: object) -> None:
-        pass
 
 
 class YoutubeSource:
@@ -153,6 +132,7 @@ class YoutubeSource:
         self._cookies_file = cookies_file
         self._proxy = proxy
         self._timeout = timeout
+        # resolved here, not at import time, so a patched ``_yt_dlp_extract`` takes effect
         self._extract: Extractor = extract if extract is not None else _yt_dlp_extract
         self._now = now if now is not None else lambda: datetime.now(UTC)
         # threads are started lazily, on the first fetch
@@ -224,13 +204,11 @@ class YoutubeSource:
         """Run the extractor for the listing ``url`` on the worker pool under the hard timeout."""
         if self._closed:
             raise RuntimeError("YoutubeSource is closed")
-        self._check_cookies(url)
+        ytdlp.check_cookies(self._cookies_file, url)
         options = self._options(max_items)
-        loop = asyncio.get_running_loop()
         try:
-            return await asyncio.wait_for(
-                loop.run_in_executor(self._executor, partial(self._extract, url, options)),
-                self._timeout,
+            return await ytdlp.run_in_pool(
+                self._executor, partial(self._extract, url, options), self._timeout
             )
         except FetchError:
             raise
@@ -239,34 +217,16 @@ class YoutubeSource:
             raise FetchError("timeout", url=url) from None
         except Exception as exc:
             _log.warning("source.youtube_failed", extra={"error": type(exc).__name__})
-            reason, status = _classify_safely(exc)
+            reason, status = ytdlp.classify_safely(exc)
             raise FetchError(reason, url=url, status=status) from None
 
-    def _check_cookies(self, url: str) -> None:
-        path = self._cookies_file
-        if path is not None and not (path.is_file() and os.access(path, os.R_OK)):
-            raise FetchError("cookies_unavailable", url=url)
-
     def _options(self, max_items: int) -> dict[str, object]:
-        options: dict[str, object] = {
-            "extract_flat": "in_playlist",
-            "skip_download": True,
-            "quiet": True,
-            "no_warnings": True,
-            "noprogress": True,
-            "ignoreconfig": True,
-            "cachedir": False,
-            "socket_timeout": min(self._timeout, _SOCKET_TIMEOUT_CAP),
-            "retries": 0,
-            "extractor_retries": 0,
-            "allowed_extractors": ["youtube.*"],
-            "playlistend": max_items,
-            "logger": _NullLogger(),
-        }
-        if self._cookies_file is not None:
-            options["cookiefile"] = str(self._cookies_file)
-        if self._proxy:
-            options["proxy"] = self._proxy
+        options = ytdlp.base_options(
+            timeout=self._timeout, cookies_file=self._cookies_file, proxy=self._proxy
+        )
+        options.update(
+            {"extract_flat": "in_playlist", "skip_download": True, "playlistend": max_items}
+        )
         return options
 
 
@@ -286,42 +246,6 @@ def _newest_first(videos: list[_Video]) -> list[_Video]:
     dated = [(video.published, video) for video in videos if video.published is not None]
     dated.sort(key=lambda pair: pair[0], reverse=True)
     return [video for _, video in dated] + [video for video in videos if video.published is None]
-
-
-def _yt_dlp_extract(url: str, options: Mapping[str, object]) -> Mapping[str, object]:
-    """The default extractor: the only place that touches ``yt-dlp`` (imported lazily).
-
-    A ``cookiefile`` is replaced by a private copy, because ``YoutubeDL`` writes the cookie jar
-    back to that file on close.
-    """
-    import yt_dlp
-
-    params = dict(options)
-    with ExitStack() as stack:
-        cookies = params.get("cookiefile")
-        if isinstance(cookies, str):
-            try:
-                copy = stack.enter_context(_private_cookie_copy(Path(cookies)))
-            except OSError:
-                raise FetchError("cookies_unavailable", url=url) from None
-            params["cookiefile"] = str(copy)
-        with yt_dlp.YoutubeDL(params) as ydl:
-            info: object = ydl.extract_info(url, download=False)
-    if not isinstance(info, Mapping):
-        raise TypeError("yt-dlp returned no info mapping")
-    return info
-
-
-@contextmanager
-def _private_cookie_copy(path: Path) -> Iterator[Path]:
-    """Copy ``path`` into a new ``0700`` temporary directory as a ``0600`` file; remove both."""
-    with tempfile.TemporaryDirectory(prefix="invio-yt-", ignore_cleanup_errors=True) as tmp:
-        copy = Path(tmp) / "cookies.txt"
-        with path.open("rb") as src:
-            fd = os.open(copy, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-            with os.fdopen(fd, "wb") as dst:
-                shutil.copyfileobj(src, dst)
-        yield copy
 
 
 def _entries(info: object, url: str) -> list[object]:
@@ -381,98 +305,3 @@ def _published_at(entry: Mapping[object, object]) -> datetime | None:
         except ValueError:
             return None
     return None
-
-
-# --- error mapping ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True, slots=True)
-class _NetworkErrors:
-    http: type[BaseException]
-    transport: tuple[type[BaseException], ...]
-
-
-@cache
-def _network_errors() -> _NetworkErrors:
-    """yt-dlp's network exception classes, imported once (lazily, like ``yt-dlp`` itself)."""
-    from yt_dlp.networking.exceptions import HTTPError, ProxyError, TransportError
-
-    return _NetworkErrors(http=HTTPError, transport=(TransportError, ProxyError))
-
-
-def _chain(exc: BaseException) -> Iterator[BaseException]:
-    """``exc`` and what it wraps explicitly: ``__cause__``, yt-dlp's ``cause`` and ``exc_info``.
-
-    ``__context__`` is not followed: an exception that merely happened while another one was
-    being handled (inside yt-dlp's cleanup, say) says nothing about why the listing failed.
-    """
-    seen: set[int] = set()
-    pending: list[tuple[BaseException, int]] = [(exc, 0)]
-    while pending:
-        node, depth = pending.pop(0)
-        if id(node) in seen or depth > _CHAIN_DEPTH:
-            continue
-        seen.add(id(node))
-        yield node
-        inner: list[object] = [node.__cause__, getattr(node, "cause", None)]
-        exc_info = getattr(node, "exc_info", None)
-        if isinstance(exc_info, tuple) and len(exc_info) > 1:
-            inner.append(exc_info[1])
-        pending.extend((e, depth + 1) for e in inner if isinstance(e, BaseException))
-
-
-def _http_status(node: BaseException) -> int | None:
-    """Status of a yt-dlp ``HTTPError`` (``.status``) or a urllib ``HTTPError`` (``.code``)."""
-    from urllib.error import HTTPError as UrllibHTTPError
-
-    if isinstance(node, _network_errors().http):
-        status: object = getattr(node, "status", None)
-    elif isinstance(node, UrllibHTTPError):
-        status = node.code
-    else:
-        return None
-    return status if isinstance(status, int) and not isinstance(status, bool) else None
-
-
-def _classify_safely(exc: BaseException) -> tuple[str, int | None]:
-    """:func:`_classify`, falling back to ``invalid_response`` if classifying itself fails."""
-    try:
-        return _classify(exc)
-    except Exception as failure:  # e.g. an exception whose ``__str__`` raises
-        _log.debug("source.youtube_classify_failed", extra={"error": type(failure).__name__})
-        return "invalid_response", None
-
-
-def _classify(exc: BaseException) -> tuple[str, int | None]:
-    """Map a yt-dlp failure to ``(reason, status)`` without using its message text for output."""
-    from urllib.error import URLError
-
-    nodes = list(_chain(exc))
-    if any(isinstance(n, TimeoutError) for n in nodes):
-        return "timeout", None
-    for node in nodes:
-        status = _http_status(node)
-        if status is not None:
-            return "http_status", status
-    network = (*_network_errors().transport, URLError, ConnectionError)
-    if any(isinstance(n, network) for n in nodes):
-        return "connection_failed", None
-    text = " ".join(str(n) for n in nodes).lower()
-    if _has_code(text, "429") or "not a bot" in text:
-        return "http_status", 429
-    if _has_code(text, "403"):
-        return "http_status", 403
-    if (
-        _has_code(text, "404")
-        or "does not exist" in text
-        or "is private" in text
-        or "video unavailable" in text
-        or "playlist is unavailable" in text
-    ):
-        return "http_status", 404
-    return "invalid_response", None
-
-
-def _has_code(text: str, code: str) -> bool:
-    """``code`` as a standalone number (not part of an id such as ``UC4291``)."""
-    return re.search(rf"(?<![\w.-]){code}(?![\w.-])", text) is not None

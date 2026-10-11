@@ -44,12 +44,17 @@ START
 `process_item` subgraph:
 
 ```text
-START ─► route_kind ─┬─ article ─────────────► extract_text ─► score_relevance ─┬─ relevant ─► summarize_item ─► END
-                     └─ video ─► video_path ─┘                                   └─ otherwise ───────────────────► END
+START ─► route_kind ─┬─ article ─► extract_text ─┐
+                     └─ video ───► video_path ───┴─► score_relevance ─┬─ relevant ─► summarize_item ─► END
+                                                                      └─ otherwise ───────────────────► END
 ```
 
-`video_path` is a pass-through placeholder until #29. #29 replaces the node and keeps its
-contract: in `ItemState`, out `ItemState`, with `raw_content` set or left unchanged.
+`video_path` (#29) stores the video's transcript as `raw_content` and leads straight to
+`score_relevance` (edge `video_path → score_relevance`; it no longer passes through
+`extract_text`, which would fetch the watch page and overwrite the transcript). Its contract is
+kept: in `ItemState`, out `ItemUpdate`, with `raw_content` set or left unchanged. Outcomes, the
+`TranscriptFetcher` port and the deferral boundary are specified in
+[`specs/022-gh-issue-29/contracts/graph-video-path.md`](../../022-gh-issue-29/contracts/graph-video-path.md).
 
 ## Node contracts
 

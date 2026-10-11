@@ -45,5 +45,13 @@ invio_env_extra: {}
 invio_run_due_memory_max: 1G
 invio_notify_retry_memory_max: 256M
 
+# Opt-in local transcription of videos without subtitles (specs/022-gh-issue-29, #29).
+# true: the venv is synced with the "whisper" extra (faster-whisper) and the run-due service gets
+# invio_whisper_run_due_memory_max as its MemoryMax instead of invio_run_due_memory_max.
+# false: today's deployment; a later sync removes the extra again.
+invio_whisper_enabled: false
+# Roughly 3G for the default model "small"; 4G for "medium", 6G for "large-v3".
+invio_whisper_run_due_memory_max: 3G
+
 # Seconds to wait for a running service before an update (3 h TimeoutStartSec + 5 min).
 invio_update_wait_timeout: 11100

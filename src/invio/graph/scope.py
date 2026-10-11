@@ -80,3 +80,8 @@ class RunScope:
     observer: RunObserver | None = None  # progress sink; dropped after its first failure
     progress: ProgressCounts = field(default_factory=ProgressCounts)
     item_refs: dict[int, ItemRef] = field(default_factory=dict)
+    # Item ids that hold one of the run's local-transcription slots (a retry of the same item
+    # does not take a second one; a deferral for lack of time gives the slot back).
+    transcriptions: set[int] = field(default_factory=set)
+    # Item ids released by their transcription deferral: persist must not release them again.
+    deferred: set[int] = field(default_factory=set)

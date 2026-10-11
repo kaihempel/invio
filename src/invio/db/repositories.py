@@ -418,6 +418,11 @@ class ItemRepository:
         item.status = ItemStatus.EXTRACTED
         self._session.flush()
 
+    def set_teaser(self, item: Item, teaser: str) -> None:
+        """Store ``teaser`` (status unchanged), flush."""
+        item.teaser = teaser
+        self._session.flush()
+
     def mark_failed(self, item: Item, error: str) -> None:
         """Set status FAILED and last_error, flush (relevance unchanged)."""
         item.status = ItemStatus.FAILED

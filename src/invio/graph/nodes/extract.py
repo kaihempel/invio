@@ -1,4 +1,4 @@
-"""Item page extraction: fetch an item's page, store its text, and the video-path placeholder.
+"""Item page extraction: fetch an item's page and store its text.
 
 ``extract_item`` is the body of the ``extract_text`` node of the ``process_item`` subgraph. The
 page arrives through the injected :class:`~invio.graph.ports.PageFetcher` (unconditional GET, so
@@ -14,12 +14,11 @@ import logging
 from invio.db.models import Item
 from invio.db.repositories import ItemRepository
 from invio.graph.ports import PageFetcher
-from invio.graph.state import ItemState, ItemUpdate
 from invio.retry import RetrySettings, Sleep, retrying
 from invio.sources.errors import is_transient_fetch
 from invio.sources.extract import ExtractionError, extract_text
 
-__all__ = ["extract_item", "video_path"]
+__all__ = ["extract_item"]
 
 logger = logging.getLogger("invio.graph")
 
@@ -58,12 +57,3 @@ async def extract_item(
         return False
     items.set_extracted(item, result.text)
     return True
-
-
-async def video_path(state: ItemState) -> ItemUpdate:
-    """Pass-through placeholder of the video path: the item continues to ``extract_text``.
-
-    Replaced by #29; must keep the ItemState in/out contract (in ``ItemState``, out
-    ``ItemUpdate``, with ``raw_content`` set or left unchanged).
-    """
-    return {"stage": "extract_text"}

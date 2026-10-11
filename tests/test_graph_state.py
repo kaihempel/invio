@@ -90,6 +90,10 @@ async def _notify(digest_id: int) -> DeliveryReport:
     return DeliveryReport(sent=1, failed=0)
 
 
+async def _fetch_transcript(url: str, /, **kwargs: Any) -> Any:
+    raise AssertionError("not called")
+
+
 def _provider_for(config: LLMConfig) -> ProviderBinding:
     raise AssertionError("not called")
 
@@ -103,6 +107,7 @@ def _deps(**overrides: Any) -> RunDeps:
         "session_factory": sessionmaker(create_engine("sqlite://")),
         "fetch_source": _fetch_source,
         "fetch_page": _fetch_page,
+        "fetch_transcript": _fetch_transcript,
         "provider_for": _provider_for,
         "notify": _notify,
         "next_run": _next_run,
@@ -125,6 +130,16 @@ def test_run_deps_defaults() -> None:
 def test_run_deps_rejects_concurrency_below_one(concurrency: int) -> None:
     with pytest.raises(ValueError, match="concurrency"):
         _deps(concurrency=concurrency)
+
+
+def test_run_deps_transcription_cap_defaults_to_three_and_allows_zero() -> None:
+    assert _deps().max_transcriptions_per_run == 3
+    assert _deps(max_transcriptions_per_run=0).max_transcriptions_per_run == 0
+
+
+def test_run_deps_rejects_a_negative_transcription_cap() -> None:
+    with pytest.raises(ValueError, match="max_transcriptions_per_run"):
+        _deps(max_transcriptions_per_run=-1)
 
 
 @pytest.mark.parametrize("ttl", [timedelta(0), timedelta(seconds=-1)])

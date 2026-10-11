@@ -63,6 +63,69 @@
           - invio_memory_default.stdout == invio_memory_before.stdout
         quiet: true
 
+    # --- Opt-in local transcription (FR-018, SC-010, specs/022 W6) -----------------------------
+    - name: Converge with the local transcription switched on
+      ansible.builtin.include_role:
+        name: invio
+      vars:
+        invio_whisper_enabled: true
+
+    - name: Read the drop-in and the effective limit with the switch on
+      ansible.builtin.stat:
+        path: /etc/systemd/system/invio-run-due.service.d/50-invio-role.conf
+      register: invio_whisper_dropin
+
+    - name: Read the effective MemoryMax with the switch on
+      ansible.builtin.command:
+        argv: [systemctl, show, -p, MemoryMax, --value, invio-run-due.service]
+      register: invio_whisper_memory
+      changed_when: false
+
+    - name: Try to import faster_whisper in the venv with the switch on
+      ansible.builtin.command:
+        argv: [/opt/invio/.venv/bin/python, -c, import faster_whisper]
+      register: invio_whisper_import
+      changed_when: false
+      failed_when: false
+
+    - name: Check the memory limit and the extra with the switch on
+      ansible.builtin.assert:
+        that:
+          - invio_whisper_dropin.stat.exists
+          - invio_whisper_memory.stdout == '3221225472'
+          - invio_whisper_import.rc == 0
+        quiet: true
+
+    - name: Converge with the switch off again
+      ansible.builtin.include_role:
+        name: invio
+
+    - name: Check that the drop-in is gone with the switch off
+      ansible.builtin.stat:
+        path: /etc/systemd/system/invio-run-due.service.d/50-invio-role.conf
+      register: invio_whisper_dropin_gone
+
+    - name: Read the effective MemoryMax with the switch off
+      ansible.builtin.command:
+        argv: [systemctl, show, -p, MemoryMax, --value, invio-run-due.service]
+      register: invio_whisper_memory_off
+      changed_when: false
+
+    - name: Try to import faster_whisper with the switch off
+      ansible.builtin.command:
+        argv: [/opt/invio/.venv/bin/python, -c, import faster_whisper]
+      register: invio_whisper_import_off
+      changed_when: false
+      failed_when: false
+
+    - name: Check the default limit and the removed extra with the switch off
+      ansible.builtin.assert:
+        that:
+          - not invio_whisper_dropin_gone.stat.exists
+          - invio_whisper_memory_off.stdout == '1073741824'
+          - invio_whisper_import_off.rc != 0
+        quiet: true
+
     # --- Update path (FR-021, US6, quickstart #15, #16, #25) -----------------------------------
     - name: Resolve the parent of the commit under test
       ansible.builtin.command:

@@ -20,7 +20,14 @@ from invio.graph.state import ItemState
 from invio.pipeline.run import run_job
 from tests.conftest import FakeClock
 from tests.db_helpers import make_candidate, make_item
-from tests.pipeline_helpers import Env, build_env, make_job_config
+from tests.pipeline_helpers import (
+    Env,
+    FakePorts,
+    FakeTranscripts,
+    build_env,
+    make_job_config,
+    transcript_of,
+)
 
 pytestmark = pytest.mark.usefixtures("clean_jobs")
 
@@ -37,6 +44,7 @@ RUN_NODES = {
     "notify",
     "finalize",
 }
+PAGE_TEXT = "paragraph 1 spoken in the video"
 ITEM_NODES = {"route_kind", "extract_text", "video_path", "score_relevance", "summarize_item"}
 
 
@@ -86,7 +94,8 @@ def test_the_item_subgraph_has_the_documented_nodes(
     assert set(drawn.nodes) - {"__start__", "__end__"} == ITEM_NODES
     successors = {(e.source, e.target) for e in drawn.edges}
     assert {("route_kind", "extract_text"), ("route_kind", "video_path")} <= successors
-    assert ("video_path", "extract_text") in successors
+    assert ("video_path", "score_relevance") in successors
+    assert ("video_path", "extract_text") not in successors
     assert ("extract_text", "score_relevance") in successors
     assert ("score_relevance", "summarize_item") in successors
     assert ("summarize_item", "__end__") in successors
@@ -148,38 +157,36 @@ async def _stream_nodes(env: Env, kind: str, number: int) -> tuple[list[str], di
 async def test_s24_a_video_item_takes_the_video_path_and_ends_like_an_article(
     db_engine: Engine, fake_clock: FakeClock, recording_next_run: NextRun
 ) -> None:
-    env = _env(db_engine, fake_clock, recording_next_run, sources={})
+    transcripts = FakeTranscripts({"https://example.com/post-2": transcript_of(PAGE_TEXT)})
+    ports = FakePorts(transcripts=transcripts)
+    env = _env(db_engine, fake_clock, recording_next_run, sources={}, ports=ports)
     article_nodes, article = await _stream_nodes(env, "article", 1)
     video_nodes, video = await _stream_nodes(env, "video", 2)
 
     assert article_nodes == ["route_kind", "extract_text", "score_relevance", "summarize_item"]
-    assert video_nodes == [
-        "route_kind",
-        "video_path",
-        "extract_text",
-        "score_relevance",
-        "summarize_item",
-    ]
+    assert video_nodes == ["route_kind", "video_path", "score_relevance", "summarize_item"]
     assert dataclasses.replace(video["relevance"], item_id=0) == dataclasses.replace(
         article["relevance"], item_id=0
     )
     assert video["summary"].status == article["summary"].status == ItemStatus.SUMMARIZED
 
 
-async def test_s24_a_video_candidate_is_summarized_from_its_page_text(
+async def test_s24_a_video_candidate_is_summarized_from_its_transcript(
     db_engine: Engine, fake_clock: FakeClock, recording_next_run: NextRun
 ) -> None:
     candidates = [make_candidate("https://example.com/watch-1", title="Talk 1", type="video")]
-    env = _env(db_engine, fake_clock, recording_next_run, candidates=candidates)
+    transcripts = FakeTranscripts({"https://example.com/watch-1": transcript_of(PAGE_TEXT)})
+    ports = FakePorts({"https://example.com/feed.xml": candidates}, transcripts=transcripts)
+    env = _env(db_engine, fake_clock, recording_next_run, ports=ports)
 
     result = await run_job(env.job_id, deps=env.deps)
 
     assert result.status == RunStatus.SUCCEEDED
-    assert env.ports.page_calls["https://example.com/watch-1"] == 1
+    assert env.ports.page_calls == {}  # the page is not fetched: the transcript is the content
     assert result.stats["summarized"] == 1
     with session_scope(env.factory) as session:
         (item,) = session.query(Item).all()
-        # No special status for a video: summarized from the page text like an article.
+        # No special status for a video: summarized from the transcript like an article.
         assert (item.type, item.status) == ("video", ItemStatus.SUMMARIZED)
-        assert item.raw_content and "paragraph 1" in item.raw_content
+        assert item.raw_content == PAGE_TEXT
         assert result.digest is not None and list(result.digest.item_ids) == [item.id]

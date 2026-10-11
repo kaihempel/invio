@@ -68,7 +68,8 @@ from invio.llm.base import LLMProvider
 from invio.llm.fallback import FallbackProvider
 from invio.llm.retry import RetryingProvider
 from invio.retry import retrying
-from invio.sources.errors import FetchError, is_transient_fetch
+from invio.sources.errors import FetchError, TranscriptUnavailable, is_transient_fetch
+from invio.sources.text import collapse
 
 __all__ = [
     "LockExpiredError",
@@ -92,6 +93,7 @@ __all__ = [
     "score_relevance",
     "summarize",
     "synthesize_digest",
+    "video_transcript",
 ]
 
 logger = logging.getLogger("invio.graph")
@@ -399,6 +401,65 @@ async def extract_text(state: ItemState, deps: RunDeps, scope: RunScope) -> Item
     return {"stage": "extract_text"}
 
 
+TEASER_CHARS: Final = 2000  # longest description kept as the teaser of a video without transcript
+
+
+async def video_transcript(state: ItemState, deps: RunDeps, scope: RunScope) -> ItemUpdate:
+    """Store the video's transcript as its content (the ``video_path`` node).
+
+    A permanent ``TranscriptUnavailable`` is no failure: the item is rated from its title and
+    teaser, and an empty teaser is filled with the video's description. Transient errors (after
+    the retries), a plain ``FetchError`` (``cookies_unavailable``) and ``TranscriptionDeferred``
+    propagate to the item error boundary.
+    """
+    session = work_session(deps, scope)
+    items = ItemRepository(session)
+    item = _load_item(items, state["item_id"])
+    item_id = item.id
+    language = _required(scope.config, "config").language
+
+    def may_transcribe() -> bool:
+        if item_id in scope.transcriptions:
+            return True  # a retry of the item that holds a slot
+        if len(scope.transcriptions) < deps.max_transcriptions_per_run:
+            scope.transcriptions.add(item_id)
+            return True
+        return False
+
+    try:
+        transcript = await retrying(
+            lambda: deps.fetch_transcript(
+                item.url, language=language, may_transcribe=may_transcribe, deadline=scope.token
+            ),
+            policy=deps.retry,
+            retry_on=is_transient_fetch,
+            what="transcript",
+            sleep=deps.sleep,
+        )
+    except TranscriptUnavailable as err:
+        if is_transient_fetch(err):
+            raise
+        logger.info(
+            "extract.transcript_unavailable", extra={"item_id": item_id, "reason": err.reason}
+        )
+        if not item.teaser and err.description:
+            teaser = collapse(err.description)[:TEASER_CHARS]
+            if teaser:
+                items.set_teaser(item, teaser)
+        return {"stage": "extract_text"}
+    items.set_extracted(item, transcript.text)
+    logger.info(
+        "extract.transcript",
+        extra={
+            "item_id": item_id,
+            "method": transcript.method,
+            "language": transcript.language,
+            "chars": len(transcript.text),
+        },
+    )
+    return {"stage": "extract_text"}
+
+
 async def score_relevance(state: ItemState, deps: RunDeps, scope: RunScope) -> ItemUpdate:
     """Rate the item with the ``fast`` model."""
     item = _load_item(ItemRepository(work_session(deps, scope)), state["item_id"])
@@ -518,6 +579,7 @@ async def persist(state: RunState, deps: RunDeps, scope: RunScope) -> RunState:
         budget=_required(scope.budget, "budget"),
         dry_run=scope.dry_run,
         fallback_digest=scope.synthesis is not None and scope.synthesis.fallback,
+        deferred=frozenset(scope.deferred),
     )
     if digest is None and config.notification.send_if_empty and not scope.dry_run:
         # No summarized item: an empty digest is stored only when the job asks for it, and

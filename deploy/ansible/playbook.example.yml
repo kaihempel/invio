@@ -33,3 +33,8 @@
     # invio_db_admin_user: root
     # invio_db_admin_password: "{{ vault_invio_db_admin_password }}"
     # invio_run_due_memory_max: 2G
+    # Local transcription of videos without subtitles (optional; installs the whisper extra and
+    # raises the run-due MemoryMax to invio_whisper_run_due_memory_max). Tune it with
+    # invio_env_extra, for example INVIO_WHISPER_MODEL_SIZE or INVIO_WHISPER_MAX_PER_RUN.
+    # invio_whisper_enabled: true
+    # invio_whisper_run_due_memory_max: 3G

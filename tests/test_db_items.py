@@ -181,3 +181,16 @@ def test_set_extracted_stores_text_and_status(db_session: Session) -> None:
 
     assert item.raw_content == "Full article text, ünïcode ✓"
     assert item.status == ItemStatus.EXTRACTED
+
+
+def test_set_teaser_stores_the_text_and_keeps_the_status(db_session: Session) -> None:
+    from invio.db.repositories import ItemRepository
+
+    item = make_item(db_session, make_job(db_session), teaser=None, status=ItemStatus.NEW)
+
+    ItemRepository(db_session).set_teaser(item, "About the video, ünïcode ✓")
+    db_session.expire(item)
+
+    assert item.teaser == "About the video, ünïcode ✓"
+    assert item.status == ItemStatus.NEW
+    assert item.raw_content is None
