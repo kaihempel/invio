@@ -1,8 +1,164 @@
 # invio
 
-CLI-based AI research system.
+**Last Updated:** 2026-10-11
 
-## Development quickstart
+invio runs scheduled research jobs. Each job fetches new items from RSS feeds, web pages,
+sitemaps and YouTube channels or playlists, filters them by keywords, lets an LLM score and
+summarise the relevant ones against the job's description, and e-mails a digest. Runs start from
+systemd timers, keep their history and token usage in the database, and can also write every
+digest to a static HTML archive.
+
+## Architecture
+
+```mermaid
+flowchart LR
+  timer["systemd timers<br/>invio-run-due, invio-notify-retry"] --> cli
+  operator["operator shell"] --> cli
+  cli["CLI: src/invio/cli (Typer)"] --> svc["Job service: services/jobs.py, runs.py"]
+  cli --> due["pipeline/due.py: run-due"]
+  due --> run["pipeline/run.py: run_job, deps.py wiring"]
+  svc --> db
+  run --> graph["LangGraph research graph: graph/build.py, graph/nodes/"]
+  graph --> sources["Sources: sources/ (rss, web, sitemap, youtube, transcript)"]
+  graph --> llm["LLM layer: llm/factory.py, fallback.py"]
+  llm --> providers["Providers: mistral, openai, anthropic, google, ollama"]
+  llm --> registry["Model registry: llm/models.d/*.yaml"]
+  graph --> db[("MariaDB: db/ (SQLAlchemy, Alembic)")]
+  run --> notify["notify/: digest render, SMTP mail, archive"]
+  notify --> smtp["SMTP server"]
+  notify --> archive["INVIO_ARCHIVE_DIR (static HTML)"]
+```
+
+## Quick start
+
+This takes about ten minutes and needs an API key for one LLM provider. The example job uses
+OpenAI with Anthropic as fallback, so both keys are needed to run it. `--dry-run` sends no mail,
+so SMTP is not needed for the first run. Commands run from the repository root.
+
+**1. Install the dependencies**
+
+```bash
+uv sync                      # creates .venv with the runtime and dev dependencies
+uv run invio --version
+```
+
+**2. Configure**
+
+```bash
+cp .env.example .env         # then edit .env (never commit it)
+```
+
+Set at least these in `.env` (the file is read from the working directory; see
+[docs/configuration.md](docs/configuration.md) for every setting):
+
+```bash
+INVIO_DATABASE_URL=sqlite:///invio.db                # local trial; MariaDB in production
+INVIO_OPENAI_API_KEY=your-openai-api-key
+INVIO_ANTHROPIC_API_KEY=your-anthropic-api-key       # the example job's fallback provider
+INVIO_HTTP_CONTACT=you@example.com                   # sent to site owners in the User-Agent
+```
+
+`INVIO_DATABASE_URL` is needed by every command that touches jobs or runs. A provider key is
+needed only for the provider a command uses. The SMTP settings (`INVIO_SMTP_HOST`,
+`INVIO_SMTP_FROM`, ...) are needed to send real digests.
+
+**3. Create the database schema**
+
+```bash
+uv run invio db upgrade      # applies the migrations; prints "database at revision 0004"
+```
+
+**4. Check the LLM provider**
+
+```bash
+uv run invio llm test openai     # one tiny request: key, model and connectivity (exit 0 = ok)
+```
+
+**5. Import the sample job**
+
+[docs/job.example.yaml](docs/job.example.yaml) is a complete job (OpenAI models with an
+Anthropic fallback). Copy it:
+
+```bash
+cp docs/job.example.yaml job.yaml
+```
+
+In `job.yaml`, set `notification.to` to your own address. Then import it:
+
+```bash
+uv run invio job import job.yaml --name ai-agents   # without --name the job is named "job"
+uv run invio job show ai-agents                     # status, next run, configuration
+```
+
+Import validates the file and saves it; invalid files are rejected with one line per problem.
+`--replace` overwrites a job of the same name.
+
+**6. Run it once**
+
+```bash
+uv run invio job run ai-agents --dry-run   # fetch, filter, summarise; print the digest, send nothing
+uv run invio run list                      # newest runs first
+uv run invio run show 1                    # statistics, token usage and every stored error
+```
+
+When the dry run looks right, run it for real. It sends the digest to `notification.to`:
+
+```bash
+uv run invio job run ai-agents
+```
+
+Exit codes: `0` succeeded, `1` failed or could not start, `2` partial (some sources or items
+failed).
+
+**7. Let the timers run it**
+
+`uv run invio run-due` starts every enabled job that is due. The systemd timers run it every
+15 minutes, see [docs/deployment.md](docs/deployment.md).
+
+### Command overview
+
+Run every command as `uv run invio <command>`, or `invio <command>` once installed.
+`invio <command> --help` shows all options.
+
+| Command | Purpose | Example |
+|---|---|---|
+| `invio --version` | Print the version | `invio --version` |
+| `invio db upgrade` | Apply schema migrations | `invio db upgrade` |
+| `invio job list` | List jobs with status and next run | `invio job list` |
+| `invio job show` | Status and configuration of one job | `invio job show ai-agents` |
+| `invio job create` | Wizard, or `--from-file` for a YAML file | `invio job create --from-file job.yaml --name ai-agents` |
+| `invio job edit` | Edit a job's YAML in `$VISUAL` / `$EDITOR` | `invio job edit ai-agents` |
+| `invio job enable` / `disable` | Schedule again / stop scheduling (history kept) | `invio job disable ai-agents` |
+| `invio job delete` | Delete a job and its run history (`-y` skips the prompt) | `invio job delete ai-agents -y` |
+| `invio job export` | Write a job as YAML (stdout or `-o`) | `invio job export ai-agents -o ai-agents.yaml` |
+| `invio job import` | Import a YAML file without prompts | `invio job import job.yaml --name ai-agents` |
+| `invio job suggest` | Let a model draft keywords and a description for a topic | `invio job suggest "LLM agent frameworks" --yaml` |
+| `invio job run` | Run a job once now (`--dry-run`, `--max-items`, `-v`) | `invio job run ai-agents --dry-run` |
+| `invio run list` | List runs, newest first (`--job`, `--limit`) | `invio run list --job ai-agents` |
+| `invio run show` | One run: statistics, tokens and errors | `invio run show 1` |
+| `invio run-due` | Run every due job (used by the systemd timer) | `invio run-due --limit 5` |
+| `invio source discover` | Find feeds, sitemaps and channels a URL offers | `invio source discover https://example.com` |
+| `invio llm test` | Check a provider key and model with one request | `invio llm test anthropic` |
+| `invio notify retry` | Re-send failed and interrupted notifications | `invio notify retry` |
+| `invio usage` | Token usage and cost (`--by`, `--since`, `--json`) | `invio usage --by day --since 2026-10-01` |
+
+`invio source discover URL --add-to JOB` appends a found source to a job (`--pick N` chooses
+which one).
+
+## Documentation
+
+| Document | Contents |
+|---|---|
+| [docs/configuration.md](docs/configuration.md) | Every job file field, every `INVIO_*` setting, the model registry |
+| [docs/deployment.md](docs/deployment.md) | Ansible or manual install, systemd timers, logs, updates |
+| [docs/operations.md](docs/operations.md) | Runbook: updates, migrations, journal, stuck locks, notification retry, provider outages |
+| [docs/troubleshooting.md](docs/troubleshooting.md) | YouTube blocks, SMTP errors, rate limits, exceeded budgets, empty digests |
+| [docs/backup.md](docs/backup.md) | Database dumps, restore test, what to keep |
+| [docs/security.md](docs/security.md) | Secrets, prompt-injection mitigations, SSRF guard, robots.txt |
+
+## Developer reference
+
+### Development quickstart
 
 Requirements: [uv](https://docs.astral.sh/uv/) (Python 3.12 is installed by uv if missing).
 
@@ -13,7 +169,7 @@ cp .env.example .env         # local configuration (never commit .env)
 uv run pre-commit install    # optional: run checks on every commit
 ```
 
-### Checks (same as CI)
+#### Checks (same as CI)
 
 ```bash
 uv run ruff check
@@ -25,7 +181,7 @@ uv run pytest                # `-m browser` for the headless-Chromium tests only
 The `browser` tests need Chromium (`uv run playwright install chromium`); they are skipped when
 it cannot be launched. CI installs it.
 
-### Adding a CLI command
+#### Adding a CLI command
 
 Create `src/invio/cli/commands/<name>.py` exposing a module-level `typer.Typer` named `app`:
 
@@ -45,7 +201,7 @@ dashes, e.g. `run_now.py` -> `invio run-now`), so the example above runs as
 `invio <name> greet --name you`. No other file needs to change. Modules whose name starts
 with `_` are ignored, so use them for shared helpers.
 
-### Configuration & logging
+#### Configuration & logging
 
 Settings come from `INVIO_*` environment variables or a `.env` file in the working directory
 (see `.env.example`; real environment variables win over `.env`). Set `INVIO_ENV_FILE` to load
@@ -85,7 +241,7 @@ with run_context(job="digest") as run_id:
     logging.getLogger(__name__).info("started", extra={"sources": 3})
 ```
 
-### Fetching sources safely
+#### Fetching sources safely
 
 Source fetchers get web content only through `invio.sources.http.SafeHttpClient`; importing
 `httpx2` or `urllib.request` in `src/invio/sources/` outside the client modules fails `ruff check`.
@@ -135,7 +291,7 @@ async with SafeHttpClient(HttpClientConfig.from_settings()) as client:
 | `INVIO_HTTP_HOST_INTERVAL_SECONDS` | `1` |
 | `INVIO_HTTP_RESPECT_ROBOTS` | `true` |
 
-### Web page sources
+#### Web page sources
 
 A `web` source tracks a page that has no feed (`invio.sources.web.WebPageSource`). It fetches the
 page through the safe client above, takes the readable text of the page (script, style, noscript,
@@ -204,7 +360,7 @@ against a hostile server. CORS preflight requests (`OPTIONS`) are sent by the br
 passing the guard; they carry no body and the page never sees their answer. robots.txt is
 checked for the page URL only. Use it for sites you trust to some degree.
 
-### YouTube sources
+#### YouTube sources
 
 `youtube_channel` and `youtube_playlist` list the latest videos with
 [yt-dlp](https://github.com/yt-dlp/yt-dlp) used as a library, in metadata-only mode: the flat
@@ -254,7 +410,7 @@ sources:
   other transient source errors.
 * You are responsible for complying with YouTube's terms of use for your usage.
 
-### Video transcripts
+#### Video transcripts
 
 A `video` item is summarized from its **transcript**, not from the YouTube watch page. When the
 item is processed, invio reads the video's metadata once with yt-dlp and takes the best
@@ -327,7 +483,7 @@ subtitle and audio downloads too. Log lines carry the video id and a reason code
 message, the proxy URL or the cookie path. The deployment switch for the Ansible role is described
 in [docs/deployment.md](docs/deployment.md).
 
-### Article text extraction
+#### Article text extraction
 
 `invio.sources.extract.extract_text(html, url)` turns the HTML of an article page that was
 already fetched into its main text for summaries, without navigation, cookie banners, sidebars
@@ -351,7 +507,7 @@ raises `ExtractionError` with `reason == "too_short"` and the redacted URL. HTML
 `max_input_chars` raises `reason == "too_large"` before parsing. Extraction is synchronous and
 CPU-bound: call it via `asyncio.to_thread` from async code.
 
-## Job files
+### Job files
 
 A job file is a YAML description of one research job: schedule, notification, sources, search,
 LLM and limits. See [docs/job.example.yaml](docs/job.example.yaml) for a complete example and
@@ -396,7 +552,7 @@ Regenerate the schema after changing the models (a test fails when it is stale):
 uv run python -m invio.config.job
 ```
 
-## Database
+### Database
 
 Invio stores jobs, runs, items, digests, notifications and LLM usage in MariaDB (production) or
 SQLite (development and tests) through SQLAlchemy 2.x. Configure the engine in
@@ -415,7 +571,7 @@ INVIO_DATABASE_URL=sqlite:////absolute/path/invio.sqlite   # development only
 - The schema is versioned with Alembic; the migrations ship inside the package.
 
 ```bash
-uv run invio db upgrade       # apply migrations; prints "database at revision 0003"
+uv run invio db upgrade       # apply migrations; prints "database at revision 0004"
 ```
 
 DDL is not transactional on MariaDB: if an upgrade fails midway, earlier steps stay applied and
@@ -445,7 +601,7 @@ INVIO_TEST_DATABASE_URL="mysql+pymysql://root@127.0.0.1:3306/invio_test?charset=
 Run them serially against MariaDB (no `pytest -n`): the migration tests downgrade and re-upgrade
 the shared test database.
 
-#### End-to-end tests
+##### End-to-end tests
 
 `uv run pytest -m e2e` runs the whole chain (YAML job, `invio run-due`, digest, mail, archive) in
 a few seconds over local fixtures only: a loopback feed, an in-process SMTP sink and a fake LLM
@@ -455,7 +611,7 @@ above for `db` tests also works for `-m "db or e2e"` on MariaDB. The nightly wor
 (`nightly.yml`) does exactly that and sets `INVIO_REQUIRE_TEST_DATABASE=1`, which aborts the
 session instead of silently falling back to SQLite when no MariaDB URL is given.
 
-### Job service
+#### Job service
 
 `invio.services.jobs.JobService` manages jobs; use it instead of touching SQLAlchemy directly
 (records and errors never expose SQLAlchemy types).
@@ -486,7 +642,7 @@ warning). Disabling a job with a broken stored config still pauses it, then rais
 Record repositories for runs, items, digests, notifications and LLM usage live in
 `invio.db.repositories`; they flush but never commit (use `session_scope`).
 
-### Managing jobs
+#### Managing jobs
 
 `invio job` manages jobs through `JobService`; every command needs `INVIO_DATABASE_URL`.
 
@@ -516,7 +672,7 @@ already exists, invalid name, aborted, declined preview or delete, aborted edit;
 file or stored config, missing or unusable setting (database URL, model registry), or an
 interactive command without a terminal.
 
-### Drafting a search: `invio job suggest`
+#### Drafting a search: `invio job suggest`
 
 ```bash
 invio job suggest TOPIC [--language CODE] [--provider NAME] [--model ID] [--yaml]
@@ -570,7 +726,7 @@ or an invalid answer after the repair), aborted (`aborted; nothing saved`) or th
 declined (`job not created`); `2` empty or over-long topic, unknown language, unknown provider,
 missing API key, unregistered model or provider without models, unreadable model registry.
 
-### Finding sources: `invio source discover`
+#### Finding sources: `invio source discover`
 
 ```bash
 invio source discover URL [--add-to JOB [--pick N]]
@@ -599,7 +755,7 @@ cancelled); `1` nothing found, job not found, `--pick` out of range, several can
 `--pick` in a script; `2` invalid usage, configuration or stored job, or a job that no longer
 validates with the new source (nothing is saved).
 
-## LLM layer
+### LLM layer
 
 `invio.llm` is the provider-neutral LLM contract used by pipeline nodes. A provider offers
 `complete(system, user, *, model, temperature, max_tokens)` and
@@ -624,7 +780,7 @@ variable), `LLMUnavailableError` (also a request timeout) and `LLMInvalidOutputE
 configuration problems raise `LLMConfigError`. Every call logs one `llm.call` line (provider,
 model, tokens, `cost_usd`, `duration_ms`, `repaired`) and never logs prompts, answers or keys.
 
-### Per-role providers and fallback
+#### Per-role providers and fallback
 
 `llm.provider` is the default provider of both roles. A role entry is either a model id of that
 provider (the short form) or a mapping that can name its own provider and fallback, so `fast`
@@ -671,7 +827,7 @@ several roles or fallbacks name it.
 There is no circuit breaker: during a long outage every call runs the primary's full retry
 policy before it reaches the fallback, so a run gets slower but still completes.
 
-### Mistral
+#### Mistral
 
 Set `INVIO_MISTRAL_API_KEY` (see `.env.example`) and name `provider: mistral` in a job's `llm`
 section. The shipped, version-pinned models are listed in `src/invio/llm/models.d/mistral.yaml`
@@ -686,7 +842,7 @@ means the provider rejected the request itself. Each retry logs one `llm.retry` 
 Structured requests send the schema in strict mode (`additionalProperties: false` on every
 object).
 
-### OpenAI
+#### OpenAI
 
 Set `INVIO_OPENAI_API_KEY` (see `.env.example`) and name `provider: openai` in a job's `llm`
 section. The shipped, dated model snapshots (no aliases, non-reasoning models only, so
@@ -699,7 +855,7 @@ empty or cut-off (incomplete) answers raise `LLMUnavailableError`. Structured re
 strict JSON schema (closed objects, every property required). OpenAI rejects output limits
 below 16 tokens, so smaller `max_tokens` values are sent as 16.
 
-### Anthropic
+#### Anthropic
 
 Set `INVIO_ANTHROPIC_API_KEY` (see `.env.example`) and name `provider: anthropic` in a job's
 `llm` section. The shipped models are listed in `src/invio/llm/models.d/anthropic.yaml`
@@ -718,7 +874,7 @@ cut-off (`max_tokens`) answers raise `LLMUnavailableError`. Only the `x-api-key`
 sent, to `https://api.anthropic.com`: `ANTHROPIC_AUTH_TOKEN` and `ANTHROPIC_BASE_URL` are
 ignored.
 
-### Google
+#### Google
 
 Set `INVIO_GOOGLE_API_KEY` (see `.env.example`) and name `provider: google` in a job's `llm`
 section. The shipped models are listed in `src/invio/llm/models.d/google.yaml`
@@ -743,7 +899,7 @@ quota raises `LLMQuotaError` without retrying. Only the Gemini Developer API is 
 key as the `x-goog-api-key` header: `GOOGLE_API_KEY`, `GEMINI_API_KEY`, `GOOGLE_GEMINI_BASE_URL`
 and `GOOGLE_GENAI_USE_VERTEXAI` are ignored.
 
-### Ollama
+#### Ollama
 
 Local models run cost-free through an [Ollama](https://ollama.com) server: name
 `provider: ollama` in a job's `llm` section. No API key is needed; the server URL is
@@ -783,7 +939,7 @@ skipped when no server answers at `INVIO_OLLAMA_BASE_URL`. Stopping the server a
 `invio llm test ollama` again shows the quick failure (`Error: LLMUnavailableError: Ollama server
 unreachable ...`, exit 1).
 
-### Common provider notes
+#### Common provider notes
 
 The HTTP client is created per event loop. Call `await provider.aclose()` before the loop ends
 to close its connections (the CLI does this); the provider stays usable afterwards.
@@ -837,7 +993,7 @@ use `structured_with_repair`), plus one `models.d/<name>.yaml` file. Modules are
 automatically; no shared file changes. A provider beyond the five in the job schema also needs
 the `LLMProvider` enum in `invio.config.job` extended.
 
-### Digest synthesis
+#### Digest synthesis
 
 `invio.graph.nodes.synthesize.synthesize_digest(entries, ctx)` turns the run's summarized items
 into the Markdown digest with one `smart` call per run (`entries_from_items` builds the entries
@@ -850,7 +1006,7 @@ fails or its answer is unusable, a plain fallback digest listing all items is bu
 `run_status_after_synthesis` turns a `succeeded` run into `partial`; credential and
 configuration errors propagate. Headings exist in English and German; other languages get
 English headings (the model still writes in the job's language).
-### Runs, statistics and the token budget
+#### Runs, statistics and the token budget
 
 A run is saved all-or-nothing by `invio.graph.nodes.persist.finalize_run`: the item updates of
 the LLM nodes, their `llm_usage` rows, the digest and the run's final status and statistics are
@@ -892,7 +1048,7 @@ always runs and is counted. Limits and known behaviour:
   by the recovery (the run is no longer `running`): nothing is replayed and the stored status is
   kept.
 
-### Running a job
+#### Running a job
 
 `invio.pipeline.run.run_job(job_id, dry_run=False)` runs one job end to end. It returns a
 `RunResult` (`job_id`, `run_id`, final `status`, `dry_run`, `digest`, `stats`, `errors`,
@@ -943,7 +1099,7 @@ stays as it is, and no item, digest or `llm_usage` row is kept: the work is roll
 only the run row remains, with `stats["dry_run"] = true` and the token figures of the calls
 that were made.
 
-#### `invio job run`
+##### `invio job run`
 
 ```
 invio job run <name> [--dry-run] [--max-items N] [--verbose|-v]
@@ -970,7 +1126,7 @@ only), the statistics table and the `Tokens: in .. · out .. · total .. · cost
 - Titles and URLs come from the network: control characters and ANSI escapes are stripped, URLs
   are shown without query string and fragment.
 
-#### Run history
+##### Run history
 
 `invio run list [--job NAME] [--limit N]` lists runs newest first (id, job, start, duration,
 status, found/new/relevant; dry runs are marked `(dry)`). `invio run show <id>` prints one run:
@@ -980,7 +1136,7 @@ appears as a `notify` entry with its counts. The list is written by
 `finalize` into `runs.stats["errors"]`, so it survives later retries and dry runs. A run from
 before this feature has no such list: `show` says "item errors are not available for this run".
 
-#### Usage and cost: `invio usage`
+##### Usage and cost: `invio usage`
 
 ```
 invio usage [--job NAME] [--since YYYY-MM-DD] [--by provider|model|job|day] [--json]
@@ -1004,7 +1160,7 @@ Known limitations: the lock has no heartbeat, so a run longer than `INVIO_RUN_LO
 be overtaken by another one; a source type without an adapter would be
 skipped with a `source.unsupported` log line (every type has one now); video items use the text of their page until #29.
 
-### Scheduled runs: `invio run-due`
+#### Scheduled runs: `invio run-due`
 
 ```text
 invio run-due [--limit N] [--parallel N]
@@ -1060,7 +1216,7 @@ Persistent=true
 WantedBy=timers.target
 ```
 
-## Notifications
+### Notifications
 
 `invio.notify.deliver_digest(session_factory, digest_id, settings=...)` e-mails a stored digest
 to the job's `notification.to` recipients. Each distinct address gets its own mail
@@ -1087,7 +1243,7 @@ failed, `1` a notification failed or was given up, `2` configuration error (data
 host or sender). A crashed first attempt may have reached the recipient before the row was
 marked, so recovering a stale `pending` row can send a duplicate mail.
 
-### Digest archive
+#### Digest archive
 
 With `archive.enabled: true` in the job file, every non-empty digest is also written as a
 self-contained HTML page below `INVIO_ARCHIVE_DIR` (default `/var/lib/invio/archive`):
@@ -1111,7 +1267,7 @@ file system. With `archive.base_url` set, the mail footer links to
 page exists). Serving the directory is up to a web server, see
 [docs/deployment.md](docs/deployment.md#digest-archive).
 
-## Deployment
+### Deployment
 
 invio runs unattended on a Debian 12 or 13 server with systemd: a timer starts `invio run-due`
 every 15 minutes and another retries failed notifications hourly, both as the locked-down `invio`
@@ -1120,7 +1276,7 @@ run (database, account, env file, uv and Python, code, migration, timers); the s
 hand, the update procedure and the troubleshooting notes are in
 [docs/deployment.md](docs/deployment.md). The units and the example env file are in `deploy/`.
 
-## Layout
+### Layout
 
 ```
 src/invio/

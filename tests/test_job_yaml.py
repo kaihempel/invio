@@ -810,7 +810,7 @@ def test_cross_field_schedule_line(tmp_path: Path, schedule: str, message: str) 
             "notification.to[1]",
         ),
         ("any: [LangGraph, agent]", "any: [LangGraph, '']", "search.keywords.any[1]"),
-        ("    fast: gpt-small", "    fast: ''", "llm.models.fast"),
+        ("    fast: gpt-4.1-mini-2025-04-14", "    fast: ''", "llm.models.fast"),
         ("schema_version: 1", "schema_version: 1\nfoo: 1", "foo: Extra inputs are not permitted"),
     ],
 )
