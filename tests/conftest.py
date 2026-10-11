@@ -17,13 +17,26 @@ from invio.db import migrate
 from invio.db.models import Base, Job
 from invio.db.session import create_db_engine, session_factory, session_scope
 from invio.sources import youtube as youtube_module
-from tests.db_helpers import TEST_DATABASE_URL, uses_sqlite
+from tests.db_helpers import REQUIRE_TEST_DATABASE, TEST_DATABASE_URL, uses_sqlite
 from tests.deploy_helpers import is_unwanted_deploy_skip
 from tests.youtube_helpers import FakeYoutubeDL
 
 if TYPE_CHECKING:
     from invio.config.job import ScheduleConfig
     from invio.services.jobs import JobService
+
+
+def pytest_sessionstart(session: pytest.Session) -> None:
+    """Exit before collection when ``INVIO_REQUIRE_TEST_DATABASE=1`` but no MariaDB URL is set.
+
+    The nightly workflow sets the variable so that its ``db`` and ``e2e`` tests never run on
+    SQLite without anyone noticing.
+    """
+    if REQUIRE_TEST_DATABASE and uses_sqlite():
+        pytest.exit(
+            "INVIO_REQUIRE_TEST_DATABASE=1 but INVIO_TEST_DATABASE_URL is not a MariaDB URL",
+            returncode=1,
+        )
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
