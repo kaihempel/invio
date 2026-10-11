@@ -47,7 +47,9 @@ def test_the_example_sets_a_job_wide_fallback_for_both_roles() -> None:
     llm = load_yaml(EXAMPLE).llm
 
     assert llm.role("fast") == RoleSelection(
-        OPENAI, "gpt-small", LLMTarget(provider=ANTHROPIC, model="claude-haiku-4-5-20251001")
+        OPENAI,
+        "gpt-4.1-mini-2025-04-14",
+        LLMTarget(provider=ANTHROPIC, model="claude-haiku-4-5-20251001"),
     )
     assert llm.role("smart").fallback == LLMTarget(provider=ANTHROPIC, model="claude-sonnet-4-6")
 
@@ -226,7 +228,7 @@ def test_fallback_models_needs_both_roles(job_data: dict[str, Any]) -> None:
 
 def test_the_long_form_round_trips_through_yaml() -> None:
     text = EXAMPLE.read_text(encoding="utf-8").replace(
-        "    smart: gpt-large\n",
+        "    smart: gpt-4.1-2025-04-14\n",
         "    smart:\n      provider: mistral\n      model: mistral-large\n"
         "      fallback: {provider: openai, model: gpt-large}\n",
         1,

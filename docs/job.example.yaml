@@ -39,8 +39,8 @@ search:
 llm:
   provider: openai
   models:
-    fast: gpt-small
-    smart: gpt-large
+    fast: gpt-4.1-mini-2025-04-14
+    smart: gpt-4.1-2025-04-14
   fallback_provider: anthropic
   fallback_models:              # used when the provider is down or rate-limited
     fast: claude-haiku-4-5-20251001
@@ -51,7 +51,7 @@ llm:
 #     smart:
 #       provider: anthropic
 #       model: claude-sonnet-4-6
-#       fallback: {provider: openai, model: gpt-large}
+#       fallback: {provider: openai, model: gpt-4.1-2025-04-14}
 limits:
   max_items_per_source: 20
   max_items_per_run: 100
