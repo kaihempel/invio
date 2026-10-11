@@ -14,9 +14,10 @@ import httpx2
 import pytest
 from sqlalchemy import select
 
-from invio.db.models import Item
+from invio.db.models import Digest, Item
 from invio.db.session import session_factory, session_scope
 from tests.e2e_helpers import (
+    ARCHIVE_BASE_URL,
     RECIPIENTS,
     E2EArticle,
     E2EEnv,
@@ -41,6 +42,18 @@ def outcome_line(stdout: str, job_name: str, status: str) -> re.Match[str] | Non
     statuses, so a plain substring check proves nothing)."""
     pattern = rf"^ran\s+{re.escape(job_name)}\s+run \d+\s+{status}\b"
     return re.search(pattern, stdout, re.MULTILINE)
+
+
+def summary_line(succeeded: int, partial: int) -> str:
+    """The ``run-due`` summary for one due job that ran (no other job may have run)."""
+    return f"due 1 · ran 1 ({succeeded} succeeded, {partial} partial, 0 failed)"
+
+
+def digest_bodies(env: E2EEnv) -> list[str]:
+    """The stored digest bodies of the job, oldest first."""
+    with session_scope(session_factory(env.assert_engine)) as session:
+        stmt = select(Digest.body).where(Digest.job_id == env.job_id()).order_by(Digest.id)
+        return list(session.scalars(stmt))
 
 
 def test_e2e_network_guard_blocks_external_hosts(
@@ -68,30 +81,36 @@ def test_e2e_first_run_delivers_digest_mail_and_archive(e2e_env: E2EEnv) -> None
     result = run_scenario_a(env)
 
     assert outcome_line(result.stdout, env.job_name, "succeeded"), result.stdout
+    assert summary_line(succeeded=1, partial=0) in result.stdout, result.stdout
     seen = env.snapshot()
     assert [status for status, _errors in seen.runs] == ["succeeded"]
     assert seen.runs[0][1] == ()
     assert set(seen.items) == {A1, A2, A3, X1}
+    assert seen.item_count == 4
     ids = {title: seen.items[title][1] for title in (A1, A2, A3)}
     assert len(seen.digests) == 1
     assert set(seen.digests[0]) == set(ids.values())
     assert seen.items[X1][1] not in seen.digests[0]
 
-    link = re.compile(
-        rf"https://archive\.example\.test/digests/{re.escape(env.slug)}/[\w.-]+\.html"
-    )
+    (page,) = archive_pages(env)
+    assert page.name == "2026-10-04-1200.html"  # the run's (fake) UTC start minute
+    (body,) = digest_bodies(env)
+    assert "Matters." in body  # the fake provider's summary
     for recipient in RECIPIENTS:
         (text,) = mail_texts(env, recipient)
+        assert body.strip() in text.replace("\r\n", "\n")  # the mail carries the digest
         assert all(title in text for title in (A1, A2, A3))
         assert X1 not in text
-        assert link.search(text), text
+        assert "Items found: 4 · Included: 3 · Run time: 0s" in text
+        assert f"{ARCHIVE_BASE_URL}/{env.slug}/{page.name}" in text, text
     assert len(env.mail.messages) == len(RECIPIENTS)
+    assert all(mail["Subject"] == "invio e2e digest" for mail in env.mail.messages)
 
-    (page,) = archive_pages(env)
-    for index in (env.archive_dir / env.slug / "index.html", env.archive_dir / "index.html"):
-        assert index.is_file()
-    assert f'href="{page.name}"' in (env.archive_dir / env.slug / "index.html").read_text("utf-8")
-    assert f'href="{env.slug}/index.html"' in (env.archive_dir / "index.html").read_text("utf-8")
+    job_index = (env.archive_dir / env.slug / "index.html").read_text("utf-8")
+    global_index = (env.archive_dir / "index.html").read_text("utf-8")
+    assert f'href="{page.name}"' in job_index
+    assert f'href="{env.slug}/index.html"' in global_index
+    assert "1 page · latest 2026-10-04 12:00 UTC" in global_index
     for path in env.archive_dir.rglob("*.html"):
         assert_no_external_resources(path)
 
@@ -113,9 +132,11 @@ def test_e2e_rerun_without_new_articles_sends_nothing(e2e_env: E2EEnv) -> None:
 
     assert rerun.exit_code == 0, rerun.output
     assert outcome_line(rerun.stdout, env.job_name, "succeeded"), rerun.stdout
+    assert summary_line(succeeded=1, partial=0) in rerun.stdout, rerun.stdout
     after = env.snapshot()
     assert [status for status, _errors in after.runs] == ["succeeded", "succeeded"]
     assert after.items == before.items
+    assert after.item_count == before.item_count == 4
     assert after.digests == before.digests
     assert after.notifications == before.notifications
     assert after.mails == before.mails
@@ -147,6 +168,7 @@ def test_e2e_new_article_is_the_only_item_processed(e2e_env: E2EEnv) -> None:
     after = env.snapshot()
     assert [status for status, _errors in after.runs] == ["succeeded", "succeeded"]
     assert set(after.items) == set(before.items) | {a4.title}
+    assert after.item_count == 5
     assert after.relevance_calls - before.relevance_calls == {a4.title: 1}
     assert after.summarize_calls - before.summarize_calls == {a4.title: 1}
     assert len(after.digests) == 2
@@ -161,10 +183,15 @@ def test_e2e_new_article_is_the_only_item_processed(e2e_env: E2EEnv) -> None:
 
     assert len(after.pages) == 2
     older, newer = (Path(page).name for page in after.pages)
-    for index in (env.archive_dir / env.slug / "index.html",):
-        html = index.read_text("utf-8")
-        assert html.index(f'href="{newer}"') < html.index(f'href="{older}"')
-    assert "2 pages" in (env.archive_dir / "index.html").read_text("utf-8")
+    assert (older, newer) == ("2026-10-04-1200.html", "2026-10-05-1200.html")
+    job_index = (env.archive_dir / env.slug / "index.html").read_text("utf-8")
+    assert f'href="{older}"' in job_index
+    assert f'href="{newer}"' in job_index
+    assert job_index.index(f'href="{newer}"') < job_index.index(f'href="{older}"')
+    # The global index lists jobs: one entry for this job, counting both pages, newest named.
+    global_index = (env.archive_dir / "index.html").read_text("utf-8")
+    assert global_index.count(f'href="{env.slug}/index.html"') == 1
+    assert "2 pages · latest 2026-10-05 12:00 UTC" in global_index
 
 
 def test_e2e_one_failing_item_gives_partial_run_and_still_mails(
@@ -180,7 +207,9 @@ def test_e2e_one_failing_item_gives_partial_run_and_still_mails(
     result = run_scenario_a(env)
 
     assert outcome_line(result.stdout, env.job_name, "partial"), result.stdout
+    assert summary_line(succeeded=0, partial=1) in result.stdout, result.stdout
     seen = env.snapshot()
+    assert seen.item_count == 4
     ((status, errors),) = seen.runs
     assert status == "partial"
     (error,) = errors
@@ -196,6 +225,7 @@ def test_e2e_one_failing_item_gives_partial_run_and_still_mails(
         assert A1 in text
         assert A3 in text
         assert A2 not in text
+    assert seen.mails == len(RECIPIENTS)
     assert len(seen.pages) == 1
     assert seen.locked_until is None
     # The regular slot, not the retry time: a partial run is not a failed run.

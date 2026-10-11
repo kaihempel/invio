@@ -37,6 +37,8 @@ from invio.config.settings import get_settings
 from invio.db.models import Digest, Item, Job, Notification, Run
 from invio.db.session import create_db_engine, session_factory, session_scope
 from invio.notify.archive import slugify_job_name
+from invio.notify.email import deliver_digest
+from invio.pipeline import deps as deps_module
 from invio.pipeline.deps import default_deps
 from invio.pipeline.due import DueReport, run_due
 from invio.scheduling.next_run import compute_next_run
@@ -53,6 +55,7 @@ from tests.pipeline_helpers import (
 from tests.smtp_helpers import SmtpServer, _serve, parts
 
 __all__ = [
+    "ARCHIVE_BASE_URL",
     "RECIPIENTS",
     "E2EArticle",
     "E2EEnv",
@@ -297,6 +300,7 @@ class Observed:
 
     runs: tuple[tuple[str, tuple[dict[str, Any], ...]], ...]  # (status, errors), oldest first
     items: dict[str, tuple[str, int]]  # title -> (status, id)
+    item_count: int  # stored rows: a duplicate title would collapse in ``items``
     digests: tuple[tuple[int, ...], ...]  # item ids per digest, oldest first
     notifications: int
     mails: int
@@ -344,7 +348,10 @@ class E2EEnv:
         """Create the schema (SQLite only; MariaDB is migrated once) and the job."""
         if uses_sqlite():
             self._ok("db", "upgrade")
-        self._ok("job", "create", "--from-file", str(self.job_yaml), "--name", self.job_name)
+        created = self._ok(
+            "job", "create", "--from-file", str(self.job_yaml), "--name", self.job_name
+        )
+        assert created.stdout.startswith(f"created job '{self.job_name}'"), created.stdout
 
     def make_due(self) -> None:
         """Make the job due one minute ago and release any lock."""
@@ -382,10 +389,8 @@ class E2EEnv:
                 (run.status.value, tuple((run.stats or {}).get("errors", [])))
                 for run in session.scalars(select(Run).where(Run.job_id == job_id).order_by(Run.id))
             )
-            items = {
-                item.title: (item.status.value, item.id)
-                for item in session.scalars(select(Item).where(Item.job_id == job_id))
-            }
+            stored = session.scalars(select(Item).where(Item.job_id == job_id)).all()
+            items = {item.title: (item.status.value, item.id) for item in stored}
             digests = tuple(
                 tuple(digest.item_ids)
                 for digest in session.scalars(
@@ -399,6 +404,7 @@ class E2EEnv:
         return Observed(
             runs=runs,
             items=items,
+            item_count=len(stored),
             digests=digests,
             notifications=notifications,
             mails=len(self.mail.messages),
@@ -455,6 +461,13 @@ def e2e_env(
                     fixed = dataclasses.replace(deps, clock=fake_clock)
                     return await run_due(limit=limit, parallel=parallel, deps=fixed)
 
+            # ``default_deps`` hands ``deliver_digest`` no clock (it defaults to the wall clock),
+            # so replacing ``RunDeps.clock`` alone would leave the mail footer's run time and
+            # the notification timestamps wall-clock dependent.
+            async def deliver(*args: Any, **kwargs: Any) -> Any:
+                return await deliver_digest(*args, **kwargs, clock=fake_clock)
+
+            monkeypatch.setattr(deps_module, "deliver_digest", deliver)
             monkeypatch.setattr(
                 run_due_module,
                 "_run_due",

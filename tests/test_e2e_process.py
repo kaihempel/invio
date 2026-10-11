@@ -119,7 +119,9 @@ def test_e2e_installed_command_runs_scenario_a(
                 )
             invio("run-due")
 
-            assert wait_until(lambda: len(mail.handler.received) >= len(RECIPIENTS), 5.0)
+            assert wait_until(
+                lambda: len(mail.handler.received) >= len(RECIPIENTS), MAIL_DEADLINE_SECONDS
+            )
             with session_scope(session_factory(engine)) as session:
                 runs = session.scalars(select(Run)).all()
                 digests = session.scalars(select(Digest)).all()
