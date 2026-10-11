@@ -124,6 +124,8 @@ class Settings(BaseSettings):
 
     # Transcription
     whisper_model_size: WhisperModelSize = "small"
+    whisper_max_duration_minutes: int = Field(default=90, ge=1)
+    whisper_max_per_run: int = Field(default=3, ge=0)  # 0 turns the fallback off
 
     # HTTP client for sources
     http_contact: HttpContact = "admin@example.invalid"

@@ -37,6 +37,7 @@ invio = "invio.cli.main:app"
 
 [project.optional-dependencies]
 render = ["playwright>=1.63"]
+whisper = ["faster-whisper>=1.2"]
 
 [build-system]
 requires = ["uv_build>=0.12,<0.13"]
@@ -120,9 +121,17 @@ module = ["feedparser", "feedparser.*"]
 ignore_missing_imports = true
 
 # yt-dlp has no complete type information; it is imported lazily and only inside
-# invio.sources.youtube (default extractor and error mapper).
+# invio.sources.youtube, invio.sources.ytdlp and invio.sources.transcript (default extractors
+# and error mapper).
 [[tool.mypy.overrides]]
 module = ["yt_dlp", "yt_dlp.*"]
+ignore_missing_imports = true
+
+# faster-whisper is an optional extra (``uv sync --extra whisper``) without complete type
+# information; it is imported lazily and only inside invio.sources.transcript (default
+# transcriber).
+[[tool.mypy.overrides]]
+module = ["faster_whisper", "faster_whisper.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

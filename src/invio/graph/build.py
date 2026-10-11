@@ -10,6 +10,10 @@ Topology (contracts/graph.md)::
 
     route_kind -> extract_text | video_path -> score_relevance -> summarize_item | END
 
+``video_path`` stores the video's transcript as its content and leads straight to
+``score_relevance`` (specs/022-gh-issue-29/contracts/graph-video-path.md); a video whose local
+transcription is deferred leaves the subgraph and is released for the next run.
+
 The graph is compiled once per run, without a checkpointer, because its nodes close over the
 per-run dependencies (:class:`~invio.graph.ports.RunDeps`) and the per-run
 :class:`~invio.graph.scope.RunScope`. Every node is ``async`` so LangGraph keeps it on the
@@ -34,7 +38,6 @@ from invio.db.repositories import ItemRepository
 from invio.domain import ItemStatus
 from invio.graph import stages
 from invio.graph.budget import BudgetExceeded
-from invio.graph.nodes.extract import video_path
 from invio.graph.nodes.llm_calls import failure_message
 from invio.graph.nodes.relevance import RelevanceOutcome
 from invio.graph.nodes.summarize_item import SummaryOutcome
@@ -51,7 +54,7 @@ from invio.graph.state import (
     error_of,
 )
 from invio.llm.base import LLMAuthError, LLMConfigError, LLMError
-from invio.sources.errors import FetchError
+from invio.sources.errors import FetchError, TranscriptionDeferred
 from invio.sources.extract import ExtractionError
 
 __all__ = ["build_graph", "build_item_graph", "item_failure_message", "new_scope"]
@@ -120,6 +123,9 @@ def build_item_graph(deps: RunDeps, scope: RunScope) -> ItemGraph:
     async def extract(state: ItemState) -> ItemUpdate:
         return await stages.extract_text(state, deps, scope)
 
+    async def video(state: ItemState) -> ItemUpdate:
+        return await stages.video_transcript(state, deps, scope)
+
     async def score(state: ItemState) -> ItemUpdate:
         return await stages.score_relevance(state, deps, scope)
 
@@ -136,12 +142,12 @@ def build_item_graph(deps: RunDeps, scope: RunScope) -> ItemGraph:
     graph = StateGraph(ItemState)
     graph.add_node("route_kind", route_kind)
     graph.add_node("extract_text", _recording("extract_text", deps, scope, extract))
-    graph.add_node("video_path", video_path)
+    graph.add_node("video_path", _recording("extract_text", deps, scope, video))
     graph.add_node("score_relevance", _recording("score_relevance", deps, scope, score))
     graph.add_node("summarize_item", _recording("summarize_item", deps, scope, summarize))
     graph.add_edge(START, "route_kind")
     graph.add_conditional_edges("route_kind", by_kind, ["extract_text", "video_path"])
-    graph.add_edge("video_path", "extract_text")
+    graph.add_edge("video_path", "score_relevance")
     graph.add_edge("extract_text", "score_relevance")
     graph.add_conditional_edges("score_relevance", if_relevant, ["summarize_item", END])
     graph.add_edge("summarize_item", END)
@@ -300,6 +306,8 @@ def build_graph(deps: RunDeps, scope: RunScope) -> RunGraph:
             # The item is left unchanged; persist releases it (#19 R4).
             logger.info("item.budget_stopped", extra={"item_id": item_id})
             return {}
+        except TranscriptionDeferred as deferral:
+            return _release_deferred(item_id, deferral)
         except _RunAborted:
             return {}
         except RUN_FATAL_ITEM_ERRORS as err:
@@ -355,6 +363,32 @@ def build_graph(deps: RunDeps, scope: RunScope) -> RunGraph:
                 message=message,
             ),
         )
+
+    def _release_deferred(item_id: int, deferral: TranscriptionDeferred) -> RunState:
+        """Hand the item back to the next run (attempt undone); it is neither processed nor failed.
+
+        ``scope.deferred`` keeps persist from releasing it a second time after a budget stop.
+        """
+        stage = scope.item_stage.get(item_id, "extract_text")
+        if scope.failure is not None:
+            return {}  # the run is failing already: leave the (possibly broken) session alone
+        try:
+            if scope.session is None:
+                raise LookupError("the work session is not open")
+            items = ItemRepository(scope.session)
+            item = items.get(item_id)
+            if item is None:
+                raise LookupError(f"item {item_id} vanished")
+            items.release([item])
+        except (SQLAlchemyError, LookupError) as db_err:
+            return _fatal(stage, db_err, scope, item_id=item_id)
+        scope.deferred.add(item_id)
+        if deferral.reason == "not_enough_time":
+            scope.transcriptions.discard(item_id)  # the cap counts transcriptions that ran
+        logger.info(
+            "item.transcription_deferred", extra={"item_id": item_id, "reason": deferral.reason}
+        )
+        return {}
 
     def _fail_item(item_id: int, err: Exception) -> RunState:
         stage = scope.item_stage.get(item_id, "extract_text")

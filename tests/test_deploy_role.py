@@ -156,6 +156,30 @@ def test_role_unit_lists_match_the_shipped_units() -> None:
         assert unit["Timer"]["Unit"] == [timer.replace(".timer", ".service")]
 
 
+def _ansible_env(*, native: bool = False) -> jinja2.Environment:
+    """A Jinja environment with the Ansible filters and tests the role's expressions use."""
+    from jinja2.nativetypes import NativeEnvironment
+
+    env: jinja2.Environment = (NativeEnvironment if native else jinja2.Environment)(
+        undefined=jinja2.StrictUndefined
+    )
+    env.filters["bool"] = lambda v: (
+        v if isinstance(v, bool) else str(v).strip().lower() in ("true", "yes", "on", "1")
+    )
+    return env
+
+
+def _override(service: str) -> dict[str, Any]:
+    (override,) = [o for o in ROLE_VARS["invio_memory_overrides"] if o["unit"] == service]
+    return override
+
+
+def _effective_memory(service: str, **variables: Any) -> str:
+    """The limit the role would give ``service``: the override rendered over the defaults."""
+    template = _override(service)["value"]
+    return str(_ansible_env().from_string(template).render({**DEFAULTS, **variables}))
+
+
 @pytest.mark.parametrize(
     ("service", "default_var"),
     [
@@ -168,10 +192,81 @@ def test_memory_defaults_equal_the_unit_so_no_drop_in_is_written_by_default(
 ) -> None:
     # G9/R11: a default install must not write a drop-in, so the three values must agree.
     (shipped,) = parse_unit(SYSTEMD / service)["Service"]["MemoryMax"]
-    (override,) = [o for o in ROLE_VARS["invio_memory_overrides"] if o["unit"] == service]
-    assert override["default"] == shipped
+    assert _override(service)["default"] == shipped
     assert str(DEFAULTS[default_var]) == shipped
-    assert override["value"] == "{{ " + default_var + " }}"
+    assert _effective_memory(service) == shipped
+
+
+# --- opt-in Whisper switch (FR-018, SC-010; contracts/deployment-whisper.md W1-W4) --------------
+
+RUN_DUE = "invio-run-due.service"
+
+
+def test_w1_whisper_defaults_match_the_contract_and_leave_the_shipped_unit_alone() -> None:
+    assert DEFAULTS["invio_whisper_enabled"] is False
+    assert DEFAULTS["invio_whisper_run_due_memory_max"] == "3G"
+    documented = {name for names, _ in _contract_section("### Defaults") for name in names}
+    assert {"invio_whisper_enabled", "invio_whisper_run_due_memory_max"} <= documented
+    (shipped,) = parse_unit(SYSTEMD / RUN_DUE)["Service"]["MemoryMax"]
+    assert shipped == "1G"  # the switch never edits the shipped unit
+
+
+def test_w2_with_the_switch_off_the_run_due_limit_is_the_shipped_default() -> None:
+    # equal to the override's default: units.yml then writes no drop-in (and removes a stale one)
+    assert _effective_memory(RUN_DUE) == _override(RUN_DUE)["default"] == "1G"
+    # the whisper limit is ignored while the switch is off
+    assert _effective_memory(RUN_DUE, invio_whisper_run_due_memory_max="6G") == "1G"
+    assert _effective_memory(RUN_DUE, invio_run_due_memory_max="2G") == "2G"
+
+
+def test_w3_with_the_switch_on_the_drop_in_carries_the_whisper_limit() -> None:
+    on = _effective_memory(RUN_DUE, invio_whisper_enabled=True)
+    assert on == "3G" != _override(RUN_DUE)["default"]  # differs from the default: drop-in
+    assert (
+        _effective_memory(
+            RUN_DUE, invio_whisper_enabled=True, invio_whisper_run_due_memory_max="4G"
+        )
+        == "4G"
+    )
+    # it replaces invio_run_due_memory_max instead of adding to it
+    assert (
+        _effective_memory(RUN_DUE, invio_whisper_enabled=True, invio_run_due_memory_max="2G")
+        == "3G"
+    )
+    # the notify-retry service is never affected
+    assert _effective_memory("invio-notify-retry.service", invio_whisper_enabled=True) == "256M"
+
+
+def _sync_argv(**variables: Any) -> list[str]:
+    (task,) = [
+        t
+        for t in _task_file("install.yml")
+        if "ansible.builtin.command" in t
+        and "sync" in yaml.safe_dump(t["ansible.builtin.command"]["argv"])
+    ]
+    argv = task["ansible.builtin.command"]["argv"]
+    if isinstance(argv, str):
+        argv = _ansible_env(native=True).from_string(argv).render({**DEFAULTS, **variables})
+    assert isinstance(argv, list)
+    return [str(part) for part in argv]
+
+
+def test_w4_the_extra_is_synced_only_when_the_switch_is_on() -> None:
+    off = _sync_argv()
+    on = _sync_argv(invio_whisper_enabled=True)
+
+    assert "--extra" not in off and "whisper" not in off
+    assert on[on.index("--extra") + 1] == "whisper"
+    for argv in (off, on):  # unchanged otherwise, still locked
+        assert argv[:6] == [
+            "/usr/local/bin/uv",
+            "sync",
+            "--locked",
+            "--no-dev",
+            "--no-editable",
+            "--compile-bytecode",
+        ]
+    assert [part for part in on if part not in ("--extra", "whisper")] == off
 
 
 def test_service_account_matches_the_units() -> None:
@@ -502,6 +597,42 @@ def test_validate_names_a_missing_required_variable(tmp_path: Path, name: str) -
     ],
 )
 def test_validate_rejects_bad_input_naming_the_variable(
+    tmp_path: Path, override: dict[str, Any], named: str
+) -> None:
+    _assert_fails_naming(run_validate(tmp_path, {**VALID, **override}), named)
+
+
+@needs_ansible
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"invio_whisper_enabled": True},
+        {"invio_whisper_enabled": False, "invio_whisper_run_due_memory_max": "512M"},
+        {"invio_whisper_enabled": True, "invio_whisper_run_due_memory_max": "4G"},
+    ],
+    ids=["on", "off-custom-limit", "on-custom-limit"],
+)
+def test_w5_validate_accepts_the_whisper_variables(
+    tmp_path: Path, override: dict[str, Any]
+) -> None:
+    result = run_validate(tmp_path, {**VALID, **override})
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@needs_ansible
+@pytest.mark.parametrize(
+    ("override", "named"),
+    [
+        ({"invio_whisper_enabled": "yes please"}, "invio_whisper_enabled"),
+        ({"invio_whisper_enabled": "true"}, "invio_whisper_enabled"),
+        ({"invio_whisper_enabled": 1}, "invio_whisper_enabled"),
+        ({"invio_whisper_run_due_memory_max": "3 GB"}, "invio_whisper_run_due_memory_max"),
+        ({"invio_whisper_run_due_memory_max": ""}, "invio_whisper_run_due_memory_max"),
+        ({"invio_whisper_run_due_memory_max": "3G\nX"}, "invio_whisper_run_due_memory_max"),
+    ],
+    ids=["words", "string-true", "number", "unit-with-space", "empty", "newline"],
+)
+def test_w5_validate_rejects_bad_whisper_variables_naming_them(
     tmp_path: Path, override: dict[str, Any], named: str
 ) -> None:
     _assert_fails_naming(run_validate(tmp_path, {**VALID, **override}), named)

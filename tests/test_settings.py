@@ -67,6 +67,8 @@ def test_defaults_without_any_configuration() -> None:
     assert settings.youtube_cookies_file is None
     assert settings.youtube_proxy is None
     assert settings.whisper_model_size == "small"
+    assert settings.whisper_max_duration_minutes == 90
+    assert settings.whisper_max_per_run == 3
 
 
 def test_secrets_are_not_leaked_in_repr_str_or_dump(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -170,6 +172,41 @@ def test_blank_youtube_values_passed_directly_are_unset() -> None:
 
     assert settings.youtube_cookies_file is None
     assert settings.youtube_proxy is None
+
+
+def test_whisper_limits_are_read_from_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("INVIO_WHISPER_MODEL_SIZE", "medium")
+    monkeypatch.setenv("INVIO_WHISPER_MAX_DURATION_MINUTES", "45")
+    monkeypatch.setenv("INVIO_WHISPER_MAX_PER_RUN", "0")
+
+    settings = Settings()
+
+    assert settings.whisper_model_size == "medium"
+    assert settings.whisper_max_duration_minutes == 45
+    assert settings.whisper_max_per_run == 0
+
+
+@pytest.mark.parametrize("raw", ["0", "-5", "abc", "1.5"])
+def test_invalid_whisper_duration_is_rejected(monkeypatch: pytest.MonkeyPatch, raw: str) -> None:
+    monkeypatch.setenv("INVIO_WHISPER_MAX_DURATION_MINUTES", raw)
+
+    with pytest.raises(ValidationError, match="whisper_max_duration_minutes"):
+        Settings()
+
+
+@pytest.mark.parametrize("raw", ["-1", "abc"])
+def test_invalid_whisper_per_run_is_rejected(monkeypatch: pytest.MonkeyPatch, raw: str) -> None:
+    monkeypatch.setenv("INVIO_WHISPER_MAX_PER_RUN", raw)
+
+    with pytest.raises(ValidationError, match="whisper_max_per_run"):
+        Settings()
+
+
+def test_unknown_whisper_model_size_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("INVIO_WHISPER_MODEL_SIZE", "huge")
+
+    with pytest.raises(ValidationError, match="whisper_model_size"):
+        Settings()
 
 
 def test_youtube_timeout_defaults_to_sixty_seconds() -> None:

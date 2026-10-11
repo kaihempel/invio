@@ -146,3 +146,13 @@
       invio_run_due_memory_max and invio_notify_retry_memory_max must look like 512M or 2G,
       and invio_update_wait_timeout must be a positive number of seconds
     quiet: true
+
+- name: Check the local transcription switch and its memory limit
+  ansible.builtin.assert:
+    that:
+      - invio_whisper_enabled is boolean
+      - invio_whisper_run_due_memory_max | string is match('^[0-9]+[KMGT]?$')
+    fail_msg: >-
+      invio_whisper_enabled must be true or false (a boolean, not a quoted string) and
+      invio_whisper_run_due_memory_max must look like 3G or 4096M
+    quiet: true

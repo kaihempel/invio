@@ -1,4 +1,4 @@
-"""The extract node and the video path: page text for an item, too short pages, hard limits."""
+"""The extract node: page text for an item, too short pages, hard limits."""
 
 import pytest
 from sqlalchemy.orm import Session
@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 from invio.db.models import Item
 from invio.db.repositories import ItemRepository
 from invio.domain import ItemStatus
-from invio.graph.nodes.extract import extract_item, video_path
+from invio.graph.nodes.extract import extract_item
 from invio.sources.errors import FetchError, TooLargeError
 from invio.sources.extract import MAX_INPUT_CHARS, ExtractionError
 from tests.db_helpers import make_item, make_job
@@ -98,9 +98,3 @@ async def test_fetch_errors_propagate_unchanged(db_session: Session, error: Exce
         await extract_item(stored, fetch_page=_Pages(error), items=ItemRepository(db_session))
 
     assert raised.value is error
-
-
-async def test_video_path_passes_the_item_state_through() -> None:
-    state = {"item_id": 4, "kind": "video"}
-
-    assert await video_path(state) == {"stage": "extract_text"}  # type: ignore[arg-type]

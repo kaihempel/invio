@@ -3,7 +3,8 @@
 * :class:`RoutedFakeProvider`: an ``LLMProvider`` whose answers are routed by purpose (told apart
   by the system prompt of the node that sent the request) and, per item, by title. Fan-out makes
   the order of requests nondeterministic, so a single scripted queue cannot serve a run.
-* :class:`FakePorts`: fake source and page fetch ports plus a :class:`RecordingNotifier`.
+* :class:`FakePorts`: fake source, page and transcript fetch ports plus a
+  :class:`RecordingNotifier`.
 * :func:`make_job_config`, :func:`store_job`, :func:`make_deps`, :func:`snapshot`.
 """
 
@@ -43,6 +44,8 @@ from invio.llm.fake import FakeReply, FakeScriptExhaustedError, FakeStep
 from invio.llm.registry import ModelRegistry, load_registry
 from invio.retry import RetrySettings, Sleep
 from invio.scheduling import backoff
+from invio.sources.errors import TranscriptionDeferred, TranscriptUnavailable
+from invio.sources.transcript import Transcript
 from invio.sources.youtube import YoutubeSource
 from tests.async_helpers import RecordingSleep
 from tests.db_helpers import make_candidate
@@ -304,6 +307,56 @@ def fixture_article() -> str:
     return (ARTICLES_DIR / "news_article.html").read_text(encoding="utf-8")
 
 
+class FakeTranscripts:
+    """A ``TranscriptFetcher``: records its calls and answers per video URL.
+
+    ``outcomes`` maps a URL to a :class:`Transcript`, an exception or :class:`Attempts`; an
+    unknown URL is a permanent ``TranscriptUnavailable("video_unavailable")``. A URL in
+    ``needs_fallback`` behaves like a video without subtitles: the fake asks ``may_transcribe``
+    (the port's slot check) and raises ``TranscriptionDeferred("cap_reached")`` when it says no.
+    """
+
+    def __init__(
+        self,
+        outcomes: Mapping[str, Any] | None = None,
+        *,
+        needs_fallback: Sequence[str] = (),
+    ) -> None:
+        self.outcomes = dict(outcomes or {})
+        self.needs_fallback = set(needs_fallback)
+        self.calls: list[tuple[str, str, datetime | None]] = []
+        self.call_counts: Counter[str] = Counter()
+        self.transcribed: list[str] = []
+
+    async def __call__(
+        self,
+        url: str,
+        /,
+        *,
+        language: str,
+        may_transcribe: Callable[[], bool],
+        deadline: datetime | None,
+    ) -> Transcript:
+        self.calls.append((url, language, deadline))
+        self.call_counts[url] += 1
+        outcome = _resolve(
+            self.outcomes.get(url, TranscriptUnavailable("video_unavailable", url=url))
+        )
+        if url in self.needs_fallback:
+            if not may_transcribe():
+                raise TranscriptionDeferred("cap_reached")
+            self.transcribed.append(url)
+        if isinstance(outcome, BaseException):
+            raise outcome
+        transcript: Transcript = outcome
+        return transcript
+
+
+def transcript_of(text: str = "spoken words of the video", language: str = "en") -> Transcript:
+    """A subtitle-based :class:`Transcript`."""
+    return Transcript(text, language, "subtitles")
+
+
 class FakePorts:
     """Fake ``fetch_source`` and ``fetch_page`` ports, and a recording notifier.
 
@@ -324,7 +377,9 @@ class FakePorts:
         trace: list[str] | None = None,
         youtube: Mapping[str, Any] | None = None,
         youtube_cookies_file: Path | None = None,
+        transcripts: FakeTranscripts | None = None,
     ) -> None:
+        self.transcripts = transcripts or FakeTranscripts()
         self.trace = trace if trace is not None else []
         # YouTube sources run through a real ``YoutubeSource`` over a fake extractor; the map
         # is keyed by canonical listing URL and holds a yt-dlp info mapping, an exception or
@@ -517,6 +572,7 @@ def make_deps(
     provider_for: Callable[[LLMConfig], ProviderBinding] | None = None,
     lock_ttl: timedelta = timedelta(hours=2),
     retry_delay: Callable[[int], timedelta] = backoff.retry_delay,
+    max_transcriptions_per_run: int = 3,
 ) -> RunDeps:
     """``RunDeps`` over the fake ports and ``provider`` (fixture registry, no waiting)."""
     registry = fixture_registry()
@@ -536,6 +592,7 @@ def make_deps(
         session_factory=factory,
         fetch_source=ports.fetch_source,
         fetch_page=ports.fetch_page,
+        fetch_transcript=ports.transcripts,
         provider_for=provider_for or bind,
         notify=ports.notifier,
         next_run=next_run,
@@ -545,6 +602,7 @@ def make_deps(
         retry=retry or RetrySettings(jitter=False),
         lock_ttl=lock_ttl,
         sleep=sleep or RecordingSleep(),
+        max_transcriptions_per_run=max_transcriptions_per_run,
     )
 
 
@@ -579,6 +637,7 @@ def build_env(
     locked_until: datetime | None = None,
     next_run_at: datetime | None = DEFAULT_NEXT_RUN_AT,
     provider_for: Callable[[LLMConfig], ProviderBinding] | None = None,
+    max_transcriptions_per_run: int = 3,
 ) -> Env:
     """Store a job and wire fake ports, a routed provider and ``RunDeps`` around it.
 
@@ -611,6 +670,7 @@ def build_env(
         sleep=sleep,
         next_run=next_run,
         provider_for=provider_for,
+        max_transcriptions_per_run=max_transcriptions_per_run,
     )
     return Env(factory, job_id, ports, provider, deps, sleep, job_config, trace)
 

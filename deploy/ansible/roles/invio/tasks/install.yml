@@ -177,13 +177,11 @@
 
 - name: Install the locked dependencies into the venv
   ansible.builtin.command:
-    argv:
-      - /usr/local/bin/uv
-      - sync
-      - --locked
-      - --no-dev
-      - --no-editable
-      - --compile-bytecode
+    # "--extra whisper" only when the local transcription is switched on; without it the sync
+    # also removes a previously installed extra.
+    argv: >-
+      {{ ['/usr/local/bin/uv', 'sync', '--locked', '--no-dev', '--no-editable', '--compile-bytecode']
+         + (['--extra', 'whisper'] if invio_whisper_enabled | bool else []) }}
     chdir: /opt/invio
   environment:
     UV_PROJECT_ENVIRONMENT: /opt/invio/.venv

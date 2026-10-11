@@ -106,6 +106,8 @@ class RunDraft:
     fallback_digest: bool = False
     # Store the digest even when its ``item_ids`` are empty (``notification.send_if_empty``).
     store_empty_digest: bool = False
+    # Items already released by a transcription deferral: not "unprocessed" (no second release).
+    deferred: frozenset[int] = frozenset()
 
 
 def unprocessed(result: RunDraft) -> list[Item]:
@@ -113,7 +115,8 @@ def unprocessed(result: RunDraft) -> list[Item]:
 
     Final: skipped by the keyword filter, rated ``skipped_irrelevant`` or ``failed``, or
     summarized or failed in the summary stage. An item rated ``relevant`` but not summarized, or
-    not rated at all, is unprocessed (a budget stop left it). Call it before the items are
+    not rated at all, is unprocessed (a budget stop left it). An item that a transcription
+    deferral already released is not (it is back to ``new``). Call it before the items are
     released: it reads their status.
     """
     rated = {
@@ -130,6 +133,7 @@ def unprocessed(result: RunDraft) -> list[Item]:
         item
         for item in result.taken
         if item.status != ItemStatus.SKIPPED_KEYWORD
+        and item.id not in result.deferred
         and item.id not in rated
         and item.id not in summarized
     ]

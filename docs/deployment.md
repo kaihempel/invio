@@ -94,6 +94,8 @@ Optional (defaults in `defaults/main.yml`):
 | `invio_log_level`, `invio_healthcheck_url` | `INFO`, unset |
 | `invio_env_extra` | `{}`: more `INVIO_*` settings, key to value; keys the role writes itself are rejected |
 | `invio_run_due_memory_max`, `invio_notify_retry_memory_max` | `1G`, `256M` (applied as a drop-in) |
+| `invio_whisper_enabled` | `false`: opt-in local transcription of videos without subtitles (see [Local transcription](#local-transcription-optional)) |
+| `invio_whisper_run_due_memory_max` | `3G`: the run-due `MemoryMax` while the switch is on (replaces `invio_run_due_memory_max`) |
 | `invio_update_wait_timeout` | `11100` seconds to wait for a running service before an update |
 
 `invio_user` and `invio_group` are fixed to `invio` by the unit files.
@@ -168,7 +170,10 @@ role uses.
      uv sync --locked --no-dev --no-editable --compile-bytecode
    ```
 
-   Create `/var/cache/invio-uv` first (`root:root`, mode `0700`).
+   Create `/var/cache/invio-uv` first (`root:root`, mode `0700`). For the optional local
+   transcription of videos without subtitles add `--extra whisper` to the `uv sync` command and
+   raise `MemoryMax` of `invio-run-due.service` with a drop-in (see
+   [Local transcription](#local-transcription-optional)).
 
 6. Configuration:
 
@@ -286,6 +291,60 @@ journalctl -u invio-run-due -o cat | deploy/scripts/check-journal-json.py
 Result lines that commands print to stdout (for example `nothing to retry`) are plain text by
 design (stdout is the command's result, stderr is for logs). Use `--allow-no-json` for services
 that may print only such a line.
+
+### Local transcription (optional)
+
+Videos with subtitles need nothing special. For videos **without** subtitles invio can transcribe
+the audio locally with faster-whisper (README, "Video transcripts"). It is off by default and the
+deployment stays exactly as described above until you switch it on:
+
+```yaml
+invio_whisper_enabled: true
+# invio_whisper_run_due_memory_max: 3G      # default; see the table below
+invio_env_extra:
+  INVIO_WHISPER_MODEL_SIZE: small            # tiny, base, small, medium, large-v3
+  INVIO_WHISPER_MAX_PER_RUN: "3"             # 0 turns the fallback off
+  INVIO_WHISPER_MAX_DURATION_MINUTES: "90"
+```
+
+With the switch on the role runs `uv sync --locked ... --extra whisper` and gives
+`invio-run-due.service` the limit `invio_whisper_run_due_memory_max` through the usual
+`50-invio-role.conf` drop-in; switching it off syncs without the extra again (which removes it) and
+removes the drop-in. The sandbox, `TimeoutStartSec` and the notify-retry service are not changed,
+and the role manages no new env keys (the `INVIO_WHISPER_*` settings go through `invio_env_extra`).
+
+| Model (`INVIO_WHISPER_MODEL_SIZE`) | `invio_whisper_run_due_memory_max` |
+|---|---|
+| `small` (default) | `3G` |
+| `medium` | `4G` |
+| `large-v3` | `6G` |
+
+These are estimates; `systemctl show -p MemoryPeak invio-run-due.service` after a real
+transcription shows the actual peak (keep it comfortably below the limit).
+
+What to know when operating it:
+
+* **Model cache.** The model is downloaded on the first transcription into
+  `/var/lib/invio/cache/huggingface` (`XDG_CACHE_HOME` of the units, which is writable and
+  persistent): about 0.5 GB for `small`. The host needs outbound HTTPS to the Hugging Face hub at
+  that moment.
+* **Temporary audio** lives in the unit's private `/tmp` and is removed after each job.
+* **JavaScript runtime.** Current yt-dlp versions may need an external JavaScript runtime (for
+  example Deno) to list YouTube's audio formats. Without one a video can fail with
+  `no_audio_format` (permanent: rated from title and description); subtitles are usually
+  unaffected.
+* **Shutdown.** A running transcription cannot be interrupted: the process waits for it when it
+  exits, so stopping the service (or a deployment update) can take up to the duration of the
+  current video. The role waits for running services before an update (`invio_update_wait_timeout`).
+* **Time limits.** `TimeoutStartSec=3h` of `invio-run-due.service` covers *all* due jobs of one
+  start, while the run-time check of a transcription only knows its own job's lock deadline
+  (`INVIO_RUN_LOCK_SECONDS`, default 2 h). With several transcription-heavy jobs keep
+  `INVIO_WHISPER_MAX_PER_RUN` low or stagger the schedules.
+* The run-time check of a transcription assumes roughly real-time speed (transcribing is not
+  slower than the audio plays). `medium` and `large-v3` on a CPU are slower than that: lower
+  `INVIO_WHISPER_MAX_DURATION_MINUTES`, raise `INVIO_RUN_LOCK_SECONDS` (`run_lock_seconds`) or use a
+  smaller model, otherwise a long video can run past the run's deadline.
+* Keep `INVIO_WHISPER_MAX_PER_RUN` below `INVIO_MAX_PARALLEL_ITEMS`.
 
 ### Sandbox and limits
 

@@ -19,6 +19,7 @@ from invio.graph.state import RunStage
 from invio.llm.base import LLMProvider
 from invio.llm.registry import ModelRegistry
 from invio.retry import RetrySettings, Sleep
+from invio.sources.transcript import Transcript
 
 __all__ = [
     "DeliveryReport",
@@ -33,6 +34,7 @@ __all__ = [
     "RunDeps",
     "RunObserver",
     "SourceFetcher",
+    "TranscriptFetcher",
 ]
 
 
@@ -46,6 +48,25 @@ class PageFetcher(Protocol):
     """Fetch the HTML of an item page; raises ``FetchError`` when it fails."""
 
     async def __call__(self, url: str) -> str: ...
+
+
+class TranscriptFetcher(Protocol):
+    """Fetch the transcript of a video.
+
+    Raises ``TranscriptUnavailable`` (a ``FetchError``) when there is none and
+    ``TranscriptionDeferred`` when the video is left for a later run. ``may_transcribe`` asks the
+    run for a local-transcription slot; ``deadline`` is the run's deadline (``None``: no check).
+    """
+
+    async def __call__(
+        self,
+        url: str,
+        /,
+        *,
+        language: str,
+        may_transcribe: Callable[[], bool],
+        deadline: datetime | None,
+    ) -> Transcript: ...
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -103,12 +124,14 @@ class RunDeps:
     session_factory: sessionmaker[Session]
     fetch_source: SourceFetcher
     fetch_page: PageFetcher
+    fetch_transcript: TranscriptFetcher
     provider_for: Callable[[LLMConfig], ProviderBinding]
     notify: Notifier
     next_run: Callable[[ScheduleConfig, datetime], datetime]
     clock: Callable[[], datetime]
     retry_delay: Callable[[int], timedelta]  # delay after the n-th consecutive failed run
     concurrency: int = 4
+    max_transcriptions_per_run: int = 3  # per-run cap of local transcriptions; 0: none
     retry: RetrySettings = field(default_factory=RetrySettings)
     lock_ttl: timedelta = timedelta(hours=2)
     sleep: Sleep = asyncio.sleep
@@ -116,6 +139,10 @@ class RunDeps:
     def __post_init__(self) -> None:
         if self.concurrency < 1:
             raise ValueError(f"concurrency must be >= 1, got {self.concurrency}")
+        if self.max_transcriptions_per_run < 0:
+            raise ValueError(
+                f"max_transcriptions_per_run must be >= 0, got {self.max_transcriptions_per_run}"
+            )
         if self.lock_ttl <= timedelta(0):
             raise ValueError("lock_ttl must be > 0")
 

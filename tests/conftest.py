@@ -2,7 +2,7 @@
 
 import logging
 import os
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -16,6 +16,7 @@ from invio.config.settings import get_settings
 from invio.db import migrate
 from invio.db.models import Base, Job
 from invio.db.session import create_db_engine, session_factory, session_scope
+from invio.sources import transcript as transcript_module
 from invio.sources import youtube as youtube_module
 from tests.db_helpers import TEST_DATABASE_URL, uses_sqlite
 from tests.deploy_helpers import is_unwanted_deploy_skip
@@ -289,11 +290,17 @@ def fake_ydl(monkeypatch: pytest.MonkeyPatch) -> FakeYoutubeDL:
 
 @pytest.fixture(autouse=True)
 def _no_real_yt_dlp(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Network guard: the default extractor fails unless the test replaces ``YoutubeDL``."""
+    """Network guard: the default yt-dlp and Whisper seams fail unless the test replaces them.
+
+    A test of a default seam replaces ``yt_dlp.YoutubeDL`` (``fake_ydl``) or calls the function
+    it imported by name, which this guard does not affect.
+    """
     if "fake_ydl" in request.fixturenames:
         return
 
-    def forbidden(url: str, options: Mapping[str, object]) -> Mapping[str, object]:
-        raise AssertionError("the real yt-dlp extractor must not run in tests")
+    def forbidden(*args: object, **kwargs: object) -> Any:
+        raise AssertionError("the real yt-dlp / Whisper seams must not run in tests")
 
     monkeypatch.setattr(youtube_module, "_yt_dlp_extract", forbidden)
+    for name in ("_yt_dlp_extract", "_yt_dlp_subtitle", "_yt_dlp_audio", "_whisper_transcribe"):
+        monkeypatch.setattr(transcript_module, name, forbidden)

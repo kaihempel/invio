@@ -208,8 +208,9 @@ checked for the page URL only. Use it for sites you trust to some degree.
 
 `youtube_channel` and `youtube_playlist` list the latest videos with
 [yt-dlp](https://github.com/yt-dlp/yt-dlp) used as a library, in metadata-only mode: the flat
-listing never downloads media and never fetches a transcript (that is #29). Each video becomes a
-`video` item with the canonical `https://www.youtube.com/watch?v=<id>` URL.
+listing never downloads media. Each video becomes a `video` item with the canonical
+`https://www.youtube.com/watch?v=<id>` URL; its spoken content is fetched later, when the item is
+processed (see [Video transcripts](#video-transcripts)).
 
 ```yaml
 sources:
@@ -252,6 +253,78 @@ sources:
   carry a short reason code, never yt-dlp's message. 429 and network errors are retried like
   other transient source errors.
 * You are responsible for complying with YouTube's terms of use for your usage.
+
+### Video transcripts
+
+A `video` item is summarized from its **transcript**, not from the YouTube watch page. When the
+item is processed, invio reads the video's metadata once with yt-dlp and takes the best
+subtitle track:
+
+1. subtitles in the job's `language`, uploaded by the channel (manual), then the video's own
+   automatic captions in that language;
+2. then English, manual before the video's own automatic captions;
+3. then any other manual track, then the video's own automatic captions in any other language;
+4. last, YouTube's automatic *translation* into the job's language (never other translations).
+
+At most four tracks are tried per video.
+
+A track in another language is still used: a job in German with a Spanish-only video gets the
+Spanish text, and the summary is written in the job's language by the model. The WebVTT file is
+converted to plain text (no timestamps, tags or the repeated lines of YouTube's rolling captions).
+**As long as any track yields text, no audio is downloaded.**
+
+Only when there is no usable subtitle, invio can transcribe the audio on your machine with
+[faster-whisper](https://github.com/SYSTRAN/faster-whisper) (CPU, int8). This is **optional** and
+off unless the `whisper` extra is installed:
+
+```bash
+uv sync --extra whisper    # installs faster-whisper; the first use downloads the model (~0.5 GB for "small")
+```
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `INVIO_WHISPER_MODEL_SIZE` | `small` | `tiny`, `base`, `small`, `medium` or `large-v3` (larger: slower, more accurate, more memory) |
+| `INVIO_WHISPER_MAX_DURATION_MINUTES` | `90` | videos longer than this are never downloaded or transcribed (`>= 1`) |
+| `INVIO_WHISPER_MAX_PER_RUN` | `3` | at most this many local transcriptions per run; `0` switches the fallback off for good (`>= 0`) |
+
+Rules of the fallback:
+
+* **Bounded.** A video over the duration limit, a run that already used its transcriptions, or a
+  run that is running out of time never starts a download. At most one transcription runs at any
+  time per process; the others wait. Temporary audio files are removed after every job, also after
+  an error.
+* **Per-run cap.** Videos beyond `INVIO_WHISPER_MAX_PER_RUN` are *deferred*: they are released like
+  items left by a token budget stop (back to `new`, attempt not counted) and the next run takes
+  them. Keep the cap below `INVIO_MAX_PARALLEL_ITEMS`: a waiting transcription occupies one of
+  the parallel item slots.
+* **Run-time check.** A transcription only starts when the video still fits before the run's
+  deadline (the job lock expiry, `INVIO_RUN_LOCK_SECONDS`): `now + video duration + 10 minutes`
+  (the reserve is for scoring, the digest and delivery) must be before it. Otherwise the video is
+  deferred as above. **The check assumes roughly real-time speed**, i.e. transcribing is not
+  slower than the audio plays. That holds for `small` on a multi-core CPU, but `medium` and
+  `large-v3` on a CPU are slower: with them lower `INVIO_WHISPER_MAX_DURATION_MINUTES`, raise
+  `INVIO_RUN_LOCK_SECONDS` (the run's `run_lock_seconds` setting) or use a smaller model, otherwise
+  a long video can still run past the run's deadline.
+* **Without the extra**, subtitle-backed videos work as usual; a video without subtitles is rated
+  from its title and description and the log shows `whisper_not_installed` with the hint
+  `install it with: uv sync --extra whisper`.
+* **Fallback off** (`INVIO_WHISPER_MAX_PER_RUN=0`): such a video is rated from title and description
+  too (reason `transcription_disabled`); it is not deferred forever.
+* YouTube's audio formats may need an external JavaScript runtime for yt-dlp (for example Deno).
+  If none is available, a missing audio format is reported as `no_audio_format`.
+
+What a failed transcript means for the item:
+
+| Failure | Examples | Effect |
+|---|---|---|
+| permanent | private, deleted or region-locked video, `too_long`, `whisper_not_installed`, `transcription_disabled`, `no_audio_format`, `no_speech` | not a failure: the item is rated from its title and the video **description** (stored as the teaser when it had none, capped at 2000 characters) |
+| transient | timeout, connection error, HTTP 429/5xx | retried like other fetch errors, then the item is `failed` and a later run tries again (up to the attempt limit) |
+| configuration | unreadable `INVIO_YOUTUBE_COOKIES_FILE` | the item fails (`cookies_unavailable`) |
+
+Proxy, cookies file and timeout are the `INVIO_YOUTUBE_*` settings of the YouTube source; they apply to
+subtitle and audio downloads too. Log lines carry the video id and a reason code, never yt-dlp's
+message, the proxy URL or the cookie path. The deployment switch for the Ansible role is described
+in [docs/deployment.md](docs/deployment.md).
 
 ### Article text extraction
 

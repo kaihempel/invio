@@ -2,7 +2,8 @@
 
 :func:`default_deps` builds the real adapters from the settings and closes them when the
 ``async with`` block ends: the database engine, the HTTP client, the web source (and its
-browser) and every provider that :attr:`RunDeps.provider_for` created. ``provider_for`` builds
+browser), the video transcript adapter (and its worker pools) and every provider that
+:attr:`RunDeps.provider_for` created. ``provider_for`` builds
 one provider per provider name and run, shared by the roles and fallbacks that name it.
 """
 
@@ -46,6 +47,7 @@ from invio.sources.http import HttpClientConfig, NotModified, SafeHttpClient
 from invio.sources.netguard import Resolver
 from invio.sources.rss import RssFeedSource
 from invio.sources.sitemap import SitemapUrlSource
+from invio.sources.transcript import YoutubeTranscripts
 from invio.sources.web import WebPageSource
 from invio.sources.youtube import YoutubeSource
 
@@ -73,7 +75,9 @@ async def default_deps(
     providers: list[LLMProvider] = []
     web: WebPageSource | None = None
     youtube = YoutubeSource.from_settings(settings)
+    transcripts: YoutubeTranscripts | None = None
     try:
+        transcripts = YoutubeTranscripts.from_settings(settings, clock=utcnow)
         client = SafeHttpClient(
             HttpClientConfig.from_settings(settings),
             allow_networks=allow_networks,
@@ -153,16 +157,20 @@ async def default_deps(
                 session_factory=factory,
                 fetch_source=fetch_source,
                 fetch_page=fetch_page,
+                fetch_transcript=transcripts.get_transcript,
                 provider_for=provider_for,
                 notify=notify,
                 next_run=compute_next_run,
                 clock=utcnow,
                 retry_delay=retry_delay,
                 concurrency=settings.max_parallel_items,
+                max_transcriptions_per_run=settings.whisper_max_per_run,
                 lock_ttl=timedelta(seconds=settings.run_lock_seconds),
             )
     finally:
         youtube.close()
+        if transcripts is not None:
+            transcripts.close()
         await _close_all(web, providers, engine)
 
 
