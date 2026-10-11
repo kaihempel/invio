@@ -7,20 +7,12 @@ refuses loopback), so this wrapper allows ``127.0.0.0/8`` by default. Only
 later do ``from invio.pipeline.deps import default_deps`` get the wrapper.
 
 With ``INVIO_E2E_BLOCK_EXTERNAL_NETWORK=1`` the loopback-only socket guard is installed too;
-refusals are echoed to stderr. With ``COVERAGE_PROCESS_START`` set, coverage starts here.
+refusals are echoed to stderr.
 """
 
 import functools
 import os
 from ipaddress import ip_network
-
-if "COVERAGE_PROCESS_START" in os.environ:
-    try:
-        import coverage
-    except ImportError:
-        pass
-    else:
-        coverage.process_startup()
 
 if os.environ.get("INVIO_E2E_BLOCK_EXTERNAL_NETWORK") == "1":
     import network_guard

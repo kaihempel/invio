@@ -16,6 +16,7 @@ from sqlalchemy import select
 
 from invio.db.models import Digest, Item
 from invio.db.session import session_factory, session_scope
+from tests.e2e_bootstrap.network_guard import is_local
 from tests.e2e_helpers import (
     ARCHIVE_BASE_URL,
     RECIPIENTS,
@@ -76,6 +77,32 @@ def test_e2e_network_guard_blocks_external_hosts(
     no_external_network.clear()  # the attempts above were the point of this test
 
 
+@pytest.mark.parametrize(
+    ("host", "local"),
+    [
+        (None, True),
+        ("", True),
+        ("localhost", True),
+        ("LOCALHOST", True),
+        ("localhost.", True),
+        (b"localhost", True),
+        ("127.0.0.1", True),
+        ("127.8.9.10", True),
+        ("::1", True),
+        ("::1%lo0", True),
+        ("::ffff:127.0.0.1", True),
+        ("example.com", False),
+        ("localhost.example.com", False),
+        ("93.184.216.34", False),
+        ("::ffff:93.184.216.34", False),
+        ("2001:db8::1", False),
+        (1234, False),
+    ],
+)
+def test_e2e_network_guard_is_local(host: object, local: bool) -> None:
+    assert is_local(host) is local
+
+
 def test_e2e_first_run_delivers_digest_mail_and_archive(e2e_env: E2EEnv) -> None:
     env = e2e_env
     result = run_scenario_a(env)
@@ -97,7 +124,7 @@ def test_e2e_first_run_delivers_digest_mail_and_archive(e2e_env: E2EEnv) -> None
     (body,) = digest_bodies(env)
     assert "Matters." in body  # the fake provider's summary
     for recipient in RECIPIENTS:
-        (text,) = mail_texts(env, recipient)
+        (text,) = mail_texts(env.mail, recipient)
         assert body.strip() in text.replace("\r\n", "\n")  # the mail carries the digest
         assert all(title in text for title in (A1, A2, A3))
         assert X1 not in text
@@ -175,7 +202,7 @@ def test_e2e_new_article_is_the_only_item_processed(e2e_env: E2EEnv) -> None:
     assert after.digests[1] == (after.items[a4.title][1],)
 
     for recipient in RECIPIENTS:
-        old, new = mail_texts(env, recipient)
+        old, new = mail_texts(env.mail, recipient)
         assert a4.title in new
         assert not any(title in new for title in (A1, A2, A3))
         assert a4.title not in old
@@ -221,7 +248,7 @@ def test_e2e_one_failing_item_gives_partial_run_and_still_mails(
     assert set(digest) == {seen.items[A1][1], seen.items[A3][1]}
 
     for recipient in RECIPIENTS:
-        (text,) = mail_texts(env, recipient)
+        (text,) = mail_texts(env.mail, recipient)
         assert A1 in text
         assert A3 in text
         assert A2 not in text

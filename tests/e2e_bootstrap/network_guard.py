@@ -32,12 +32,15 @@ def is_local(host: object) -> bool:
         host = host.decode("ascii", "replace")
     if not isinstance(host, str):
         return False
-    if host in _LOOPBACK_NAMES:
+    if host.lower().rstrip(".") in _LOOPBACK_NAMES:
         return True
     try:
-        return ipaddress.ip_address(host.split("%")[0]).is_loopback
+        address = ipaddress.ip_address(host.split("%")[0])
     except ValueError:
         return False
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+        return address.ipv4_mapped.is_loopback  # ::ffff:127.0.0.1
+    return address.is_loopback
 
 
 def install(blocked: list[str], *, echo_stderr: bool = False) -> Callable[[], None]:
@@ -84,8 +87,8 @@ def install(blocked: list[str], *, echo_stderr: bool = False) -> Callable[[], No
         check(host)
         return real_gethostbyname_ex(host)
 
-    socket.socket.connect = connect  # type: ignore[method-assign]
-    socket.socket.connect_ex = connect_ex  # type: ignore[method-assign]
+    socket.socket.connect = connect  # type: ignore[method-assign,assignment]
+    socket.socket.connect_ex = connect_ex  # type: ignore[method-assign,assignment]
     socket.getaddrinfo = getaddrinfo
     socket.gethostbyname = gethostbyname
     socket.gethostbyname_ex = gethostbyname_ex

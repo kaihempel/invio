@@ -193,7 +193,7 @@ the future.
   `env.setup_job()`, `env.make_due()`, `result = env.run_due()`, assert `result.exit_code == 0`,
   return the result. US2 and US3 reuse it.
 - [X] T015 [US1] Add assertion helpers in `tests/e2e_helpers.py`:
-  - `mail_texts(env, recipient) -> list[str]`: the plain-text parts via
+  - `mail_texts(sink, recipient) -> list[str]`: the plain-text parts via
     `tests.smtp_helpers.parts`;
   - `archive_pages(env) -> list[Path]`;
   - `assert_no_external_resources(path)`: fail on `<script src=`, `<link` with
@@ -236,8 +236,7 @@ the future.
   - Locate the command with `Path(sys.executable).parent / "invio"`, and assert that it exists.
   - Build the env from scratch: `PATH`, `HOME=tmp_path`,
     `PYTHONPATH=<repo>/tests/e2e_bootstrap`, the `INVIO_*` settings as in T012 plus
-    `INVIO_OLLAMA_BASE_URL=<stub>` and `INVIO_LOG_LEVEL=WARNING`, and pass through
-    `COVERAGE_PROCESS_START` if present. Assert that no key ends in `_API_KEY` and that neither
+    `INVIO_OLLAMA_BASE_URL=<stub>` and `INVIO_LOG_LEVEL=WARNING`. Assert that no key ends in `_API_KEY` and that neither
     `INVIO_SMTP_USER` nor `INVIO_SMTP_PASSWORD` is set.
   - Run `subprocess.run([invio, ...], env=env, capture_output=True, text=True, timeout=20)` for
     `db upgrade` (SQLite only), `job create --from-file … --name …` and `run-due`, after setting

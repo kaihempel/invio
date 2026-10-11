@@ -41,7 +41,7 @@ The existing `SmtpServer` from `tests/smtp_helpers.py` (no AUTH).
 | Stand-in | Used by | Behaviour |
 |---|---|---|
 | `RoutedFakeProvider` (`tests/pipeline_helpers.py`), registered as `ollama` | scenarios A–D | relevance by title (`relevant` / `fail_at`), fixed summary, fixed digest text; `titles_for(purpose)` records calls |
-| `FakeOllamaServer` (new, `tests/e2e_helpers.py`) | separate-process smoke test | `POST /api/chat`, reply chosen by the `format` schema (`score` → relevance, `headline` → summary, none → digest); fixed answers, all relevant |
+| `FakeOllamaServer` (new, `tests/e2e_helpers.py`) | separate-process smoke test | `POST /api/chat`, reply chosen by the `format` schema (`score` → relevance, `headline` → summary, none → digest); relevance and summary answer by the prompt's `<title>` like the in-process provider, so X1 is filtered |
 
 ### E2EEnv (scenario environment)
 
@@ -49,8 +49,6 @@ One per test; nothing is shared between tests (FR-005).
 
 | Field | Content |
 |---|---|
-| `tmp` | the test's `tmp_path` |
-| `database_url` | SQLite: `sqlite:///<tmp>/e2e.sqlite`; MariaDB: `INVIO_TEST_DATABASE_URL` |
 | `archive_dir` | `<tmp>/archive` |
 | `job_name` | `e2e-<scenario>-<short uuid>` (unique, so MariaDB leftovers cannot collide) |
 | `job_yaml` | `<tmp>/<job_name>.yaml`, rendered from the template below |

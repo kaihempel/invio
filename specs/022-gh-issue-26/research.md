@@ -166,8 +166,7 @@ and its allow-host handling is per-test rather than per-fixture.
 - **Environment**: built from scratch, not inherited. It contains `PATH`, `HOME=tmp`,
   `PYTHONPATH=<bootstrap>`, the `INVIO_*` settings for the database, SMTP, archive, Ollama URL and
   HTTP interval, and `INVIO_LOG_LEVEL=WARNING`. No `*_API_KEY` and no mail credentials (FR-019).
-  If `COVERAGE_PROCESS_START` is set, it is passed through, so the subprocess shows up in coverage
-  when pytest-cov enables it.
+  The subprocess is not measured for coverage: the in-process scenarios cover the same code.
 - **Time**: the subprocess uses the real clock. Before `run-due`, `next_run_at` is set in the
   past relative to real UTC now. Assertions count rows, mails and pages, never exact names.
 - **Database**: on SQLite, the subprocess runs its own `invio db upgrade` against its file. On

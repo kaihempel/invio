@@ -97,10 +97,15 @@ Uses the `FakeOllamaServer`, the bootstrap `PYTHONPATH` and a clean environment 
 and runs `<venv>/bin/invio` for `db upgrade` (SQLite only), `job create` and `run-due`:
 
 1. each process exits 0 within 20 s (subprocess timeout)
-2. 1 run `succeeded`, 1 digest, 1 mail per recipient (bounded wait), 1 archive page
-3. the Ollama stub received ≥ 1 request per purpose; the feed server got `/feed.xml`
-4. the subprocess environment contains no `*_API_KEY` and no `INVIO_SMTP_USER` /
+2. 1 run `succeeded` and 4 stored items for the job; 1 digest with exactly A1–A3 (X1 filtered)
+3. 1 mail per recipient that names A1–A3 and not X1; 1 archive page; `next_run_at` in the future
+4. the Ollama stub received ≥ 1 request per purpose; the feed server got `/feed.xml`
+5. the subprocess environment contains no `*_API_KEY` and no `INVIO_SMTP_USER` /
    `INVIO_SMTP_PASSWORD` (asserted on the env the test builds)
+
+A second test (`test_e2e_process_guard_blocks_external_hosts`) starts a Python process with the
+same bootstrap and `INVIO_E2E_BLOCK_EXTERNAL_NETWORK=1`; a lookup of `example.com` must exit
+non-zero with the refusal on stderr, so the subprocess guard is proven active.
 
 ## Schedule check (scenarios A, B, D)
 

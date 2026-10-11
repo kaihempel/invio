@@ -11,7 +11,6 @@ import http.server
 import json
 import os
 import re
-import socketserver
 import threading
 from collections import Counter
 from collections.abc import Callable, Iterator, Sequence
@@ -20,7 +19,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from email.utils import format_datetime
 from pathlib import Path
-from typing import Any, Literal, Self
+from typing import Any, Literal
 from uuid import uuid4
 from xml.sax.saxutils import escape
 
@@ -35,6 +34,7 @@ from invio.config.job import JobConfig
 from invio.config.settings import get_settings
 from invio.db.models import Digest, Item, Job, Notification, Run
 from invio.db.session import create_db_engine, session_factory, session_scope
+from invio.llm.fake import FakeReply
 from invio.notify.archive import slugify_job_name
 from invio.notify.email import deliver_digest
 from invio.pipeline import deps as deps_module
@@ -45,8 +45,9 @@ from tests.conftest import FakeClock
 from tests.db_helpers import TEST_DATABASE_URL, uses_sqlite
 from tests.e2e_bootstrap.network_guard import ExternalNetworkError
 from tests.e2e_bootstrap.network_guard import install as install_network_guard
-from tests.http_helpers import LOOPBACK, LoopbackServer, Route
+from tests.http_helpers import LOOPBACK, LoopbackServer, Route, _Server
 from tests.pipeline_helpers import (
+    _TITLE,
     RoutedFakeProvider,
     article_html,
     digest_reply,
@@ -63,7 +64,6 @@ __all__ = [
     "E2EFeed",
     "ExternalNetworkError",
     "FakeOllamaServer",
-    "Observed",
     "archive_pages",
     "assert_no_external_resources",
     "database_url_for",
@@ -72,7 +72,7 @@ __all__ = [
     "mail_texts",
     "no_external_network",
     "run_scenario_a",
-    "scenario_provider",
+    "scenario_engine",
     "write_job_yaml",
 ]
 
@@ -176,6 +176,29 @@ class E2EFeed:
 # --- Fake provider -----------------------------------------------------------------------------
 
 
+def _article(articles: Sequence[E2EArticle], title: str) -> E2EArticle:
+    for candidate in articles:
+        if candidate.title == title:
+            return candidate
+    raise AssertionError(f"provider asked about an unknown title: {title!r}")
+
+
+def relevance_answer(articles: Sequence[E2EArticle], title: str) -> FakeReply | RuntimeError:
+    """0.9 for a relevant article, 0.1 for an off-topic one, an error for ``fail_at``."""
+    found = _article(articles, title)
+    if found.fail_at == "relevance":
+        return RuntimeError("boom secret")
+    return relevance_reply(0.9 if found.relevant else 0.1)
+
+
+def summary_answer(articles: Sequence[E2EArticle], title: str) -> FakeReply:
+    """A valid item summary whose headline is the article title."""
+    _article(articles, title)
+    reply = summary_reply()
+    text = json.loads(reply.text) | {"headline": title}
+    return dataclasses.replace(reply, text=json.dumps(text))
+
+
 def scenario_provider(articles: Sequence[E2EArticle]) -> RoutedFakeProvider:
     """A routed provider that answers by article title.
 
@@ -184,25 +207,12 @@ def scenario_provider(articles: Sequence[E2EArticle]) -> RoutedFakeProvider:
     a title appears in a mail only when its item made it into the digest.
     """
 
-    def article(title: str) -> E2EArticle:
-        for candidate in articles:
-            if candidate.title == title:
-                return candidate
-        raise AssertionError(f"provider asked about an unknown title: {title!r}")
+    def relevance(title: str) -> Any:  # a RuntimeError step injects a bug (not an LLMError)
+        return relevance_answer(articles, title)
 
-    def relevance(title: str) -> Any:
-        found = article(title)
-        if found.fail_at == "relevance":
-            return RuntimeError("boom secret")
-        return relevance_reply(0.9 if found.relevant else 0.1)
-
-    def summary(title: str) -> Any:
-        article(title)
-        reply = summary_reply()
-        text = json.loads(reply.text) | {"headline": title}
-        return dataclasses.replace(reply, text=json.dumps(text))
-
-    return RoutedFakeProvider(relevance=relevance, summarize=summary)
+    return RoutedFakeProvider(
+        relevance=relevance, summarize=lambda title: summary_answer(articles, title)
+    )
 
 
 # --- Network guard -----------------------------------------------------------------------------
@@ -273,8 +283,6 @@ class Observed:
 class E2EEnv:
     """One scenario's world: database, feed, SMTP sink, provider, clock and the CLI."""
 
-    tmp: Path
-    database_url: str
     archive_dir: Path
     job_name: str
     job_yaml: Path
@@ -376,9 +384,27 @@ class E2EEnv:
 
 def database_url_for(tmp_path: Path) -> str:
     """The MariaDB test URL when configured, else a SQLite file in ``tmp_path``."""
-    if TEST_DATABASE_URL is not None and not uses_sqlite():
-        return TEST_DATABASE_URL
-    return f"sqlite:///{tmp_path}/e2e.sqlite"
+    if uses_sqlite():
+        return f"sqlite:///{tmp_path}/e2e.sqlite"
+    assert TEST_DATABASE_URL is not None
+    return TEST_DATABASE_URL
+
+
+def scenario_engine(stack: ExitStack, server_engine: Engine | None, database_url: str) -> Engine:
+    """The engine a scenario reads its outcomes with.
+
+    On MariaDB the shared ``server_engine``, emptied of jobs first: ``run-due`` runs every due job
+    of the database. The delete relies on the database's ON DELETE CASCADE to remove runs, items,
+    digests and notifications (Core ``delete`` does not cascade in Python). On SQLite a new engine
+    for ``database_url``, disposed when ``stack`` closes.
+    """
+    if server_engine is not None:
+        with session_scope(session_factory(server_engine)) as session:
+            session.execute(delete(Job))
+        return server_engine
+    engine = create_db_engine(database_url)
+    stack.callback(engine.dispose)
+    return engine
 
 
 @pytest.fixture
@@ -405,16 +431,7 @@ def e2e_env(
         provider = scenario_provider(feed.articles)
         database_url = database_url_for(tmp_path)
         archive_dir = tmp_path / "archive"
-        if _server_engine is not None:
-            engine = _server_engine
-            # run-due runs every due job of the shared database: start without leftovers. The
-            # delete relies on the database's ON DELETE CASCADE to remove runs, items, digests
-            # and notifications (Core ``delete`` does not cascade in Python).
-            with session_scope(session_factory(engine)) as session:
-                session.execute(delete(Job))
-        else:
-            engine = create_db_engine(database_url)
-            stack.callback(engine.dispose)
+        engine = scenario_engine(stack, _server_engine, database_url)
         mail = stack.enter_context(_serve())
         monkeypatch.setenv("INVIO_DATABASE_URL", database_url)
         monkeypatch.setenv("INVIO_ARCHIVE_DIR", str(archive_dir))
@@ -445,8 +462,6 @@ def e2e_env(
         )
         job_name = f"e2e-{uuid4().hex[:8]}"
         yield E2EEnv(
-            tmp=tmp_path,
-            database_url=database_url,
             archive_dir=archive_dir,
             job_name=job_name,
             job_yaml=write_job_yaml(tmp_path / f"{job_name}.yaml", feed_url=feed.feed_url),
@@ -470,11 +485,9 @@ def run_scenario_a(env: E2EEnv) -> Result:
     return result
 
 
-def mail_texts(env: E2EEnv, recipient: str) -> list[str]:
-    """The plain-text bodies of the mails sent to ``recipient``."""
-    return [
-        parts(mail.message)[0] for mail in env.mail.handler.received if recipient in mail.rcpt_tos
-    ]
+def mail_texts(sink: SmtpServer, recipient: str) -> list[str]:
+    """The plain-text bodies of the mails ``sink`` received for ``recipient``."""
+    return [parts(mail.message)[0] for mail in sink.handler.received if recipient in mail.rcpt_tos]
 
 
 def archive_pages(env: E2EEnv) -> list[Path]:
@@ -503,20 +516,17 @@ def assert_no_external_resources(path: Path) -> None:
 # --- Ollama stub for the separate-process test -------------------------------------------------
 
 
-class _QuietServer(http.server.ThreadingHTTPServer):
-    def server_bind(self) -> None:
-        socketserver.TCPServer.server_bind(self)  # skip the reverse DNS lookup of HTTPServer
-        self.server_name, self.server_port = "127.0.0.1", self.server_address[1]
-
-
 class FakeOllamaServer:
-    """A stub of Ollama's ``POST /api/chat`` that answers by the requested ``format`` schema.
+    """A stub of Ollama's ``POST /api/chat`` that answers like :func:`scenario_provider`.
 
-    ``score`` in the schema gets a relevance answer (always relevant), ``headline`` an item
-    summary, anything else the digest text. ``requests`` records ``(purpose, model)``.
+    The purpose comes from the requested ``format`` schema (``score``: relevance, ``headline``:
+    item summary, anything else: digest text). Relevance and summary answer by the ``<title>`` in
+    the prompt, so off-topic articles are filtered as in-process; ``fail_at`` is not supported.
+    ``requests`` records ``(purpose, model)``.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, articles: Sequence[E2EArticle]) -> None:
+        self._articles = articles
         self._requests: list[tuple[str, str]] = []
         self._lock = threading.Lock()
         owner = self
@@ -542,7 +552,7 @@ class FakeOllamaServer:
                 self.end_headers()
                 self.wfile.write(data)
 
-        self._httpd = _QuietServer(("127.0.0.1", 0), Handler)
+        self._httpd = _Server(("127.0.0.1", 0), Handler)
         self._httpd.daemon_threads = True
         self._thread = threading.Thread(
             target=lambda: self._httpd.serve_forever(poll_interval=0.01), daemon=True
@@ -565,32 +575,41 @@ class FakeOllamaServer:
         self._thread.start()
 
     def stop(self) -> None:
-        self._httpd.shutdown()
-        self._thread.join(timeout=5)
+        """Stop serving; safe on a server that never started and safe to call more than once."""
+        if self._thread.is_alive():
+            self._httpd.shutdown()
+            self._thread.join(timeout=5)
         self._httpd.server_close()
-
-    def __enter__(self) -> Self:
-        self.start()
-        return self
-
-    def __exit__(self, *exc: object) -> None:
-        self.stop()
 
     def _answer(self, body: dict[str, Any]) -> dict[str, Any]:
         fmt = body.get("format")
         properties = fmt.get("properties", {}) if isinstance(fmt, dict) else {}
+        # Like RoutedFakeProvider: the title comes from the user message (the system prompt
+        # mentions ``<title>`` too).
+        user = next(
+            (
+                str(m.get("content", ""))
+                for m in body.get("messages", [])
+                if m.get("role") == "user"
+            ),
+            "",
+        )
+        match = _TITLE.search(user)
+        title = match.group(1) if match else ""
+        reply: FakeReply | RuntimeError
         if "score" in properties:
-            purpose, text = "relevance", relevance_reply(0.9).text
+            purpose, reply = "relevance", relevance_answer(self._articles, title)
         elif "headline" in properties:
-            purpose, text = "summarize", summary_reply().text
+            purpose, reply = "summarize", summary_answer(self._articles, title)
         else:
-            purpose, text = "synthesize", digest_reply().text
+            purpose, reply = "synthesize", digest_reply()
+        assert isinstance(reply, FakeReply), "the Ollama stub does not inject failures"
         with self._lock:
             self._requests.append((purpose, str(body.get("model", ""))))
         return {
             "model": body.get("model", ""),
             "created_at": "2026-10-09T12:00:00.000000Z",
-            "message": {"role": "assistant", "content": text},
+            "message": {"role": "assistant", "content": reply.text},
             "done_reason": "stop",
             "done": True,
             "prompt_eval_count": 12,
